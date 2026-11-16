@@ -15,13 +15,14 @@ final class EditorView: NSView {
     private let toolButtons = NSStackView()
     private let colorControls = NSStackView()
     private let historyRows = NSStackView()
-    private let layerPreview = NSImageView()
+    private let layersView: LayersView
     private var panels: UtilityPanels?
     private let swatchColors: [(String, NSColor)] = [("Black", .black), ("Red", .systemRed), ("Blue", .systemBlue)]
 
     init(document: PaintDocument) {
         self.document = document
         canvas = CanvasView(document: document)
+        layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
         for button in [brush, eraser, crop] {
@@ -90,7 +91,6 @@ final class EditorView: NSView {
         historyRows.orientation = .vertical
         historyRows.alignment = .leading
         historyRows.spacing = 2
-        layerPreview.imageScaling = .scaleProportionallyUpOrDown
 
         let panelButtons = NSStackView(views: UtilityPanels.Kind.allCases.map { kind in
             let button = Self.icon(kind.symbol, label: "Toggle \(kind.title)")
@@ -121,8 +121,6 @@ final class EditorView: NSView {
             scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -5),
             color.widthAnchor.constraint(equalToConstant: 56),
             color.heightAnchor.constraint(equalToConstant: 26),
-            layerPreview.widthAnchor.constraint(equalToConstant: 36),
-            layerPreview.heightAnchor.constraint(equalToConstant: 36),
             footer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5)
         ])
@@ -131,10 +129,8 @@ final class EditorView: NSView {
     required init?(coder: NSCoder) { nil }
 
     func installPanels(on window: NSWindow) {
-        let layer = NSStackView(views: [layerPreview, NSTextField(labelWithString: "Background")])
-        layer.spacing = 8
         panels = UtilityPanels(parent: window, contents: [
-            .tools: toolButtons, .colors: colorControls, .history: historyRows, .layers: layer
+            .tools: toolButtons, .colors: colorControls, .history: historyRows, .layers: layersView
         ])
         refreshImage()
         updateHistory(document?.undoManager)
@@ -156,9 +152,10 @@ final class EditorView: NSView {
     }
 
     func refreshImage() {
+        canvas.cancelStroke()
         canvas.clearSelection()
         canvas.fitViewport()
-        if let image = document?.image { layerPreview.image = NSImage(cgImage: image, size: .zero) }
+        layersView.refresh()
         updateStatus()
     }
 
@@ -233,7 +230,7 @@ final class EditorView: NSView {
         changeColor(color)
     }
 
-    private static func icon(_ symbol: String, label: String) -> NSButton {
+    static func icon(_ symbol: String, label: String) -> NSButton {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage()
         let button = NSButton(image: image, target: nil, action: nil)
         button.bezelStyle = .texturedRounded

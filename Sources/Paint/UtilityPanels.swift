@@ -12,7 +12,7 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
             switch self {
             case .tools: return CGSize(width: 88, height: 76)
             case .history: return CGSize(width: 160, height: 145)
-            case .layers: return CGSize(width: 160, height: 72)
+            case .layers: return CGSize(width: 168, height: 151)
             case .colors: return CGSize(width: 144, height: 88)
             }
         }

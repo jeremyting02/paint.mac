@@ -1,25 +1,84 @@
 import AppKit
-import ImageIO
 import UniformTypeIdentifiers
 
 @objc(PaintDocument)
 final class PaintDocument: NSDocument {
-    private(set) var image: CGImage?
+    enum LayerCommand: Int, CaseIterable {
+        case add, selectAbove, selectBelow, toggleVisibility, moveUp, moveDown, delete
+
+        var title: String {
+            ["Add Layer", "Select Layer Above", "Select Layer Below", "Show Layer",
+             "Move Layer Up", "Move Layer Down", "Delete Layer"][rawValue]
+        }
+    }
+
+    static let projectType = "paint.mac Project"
+    private static let projectContentType = UTType(exportedAs: "local.paintmac.project")
+    private(set) var stack: LayerStack?
+    var image: CGImage? { stack?.activeLayer.image }
     private weak var editor: EditorView?
     private let undoLimit = 5
     private(set) var historyEntries = ["New Image"]
     private(set) var historyPosition = 0
 
-    static func makeBitmap(width: Int, height: Int) -> CGContext? {
-        CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    func selectLayer(_ index: Int) {
+        guard let stack, stack.layers.indices.contains(index), index != stack.active else { return }
+        self.stack?.active = index
+        editor?.refreshImage()
     }
 
     func replaceImage(with replacement: CGImage, actionName: String) {
-        guard let previous = image else { return }
+        guard var next = stack else { return }
+        next.layers[next.active].image = replacement
+        replaceStack(with: next, actionName: actionName)
+    }
+
+    func crop(to rect: CGRect) {
+        guard var next = stack else { return }
+        for index in next.layers.indices {
+            guard let cropped = next.layers[index].image.cropping(to: rect) else { return }
+            next.layers[index].image = cropped
+        }
+        replaceStack(with: next, actionName: "Crop")
+    }
+
+    func addLayer() {
+        guard var next = stack, next.layers.count < LayerStack.limit else { return }
+        let image = next.activeLayer.image
+        guard let blank = LayerStack.makeBitmap(width: image.width, height: image.height)?.makeImage() else { return }
+        let names = Set(next.layers.map(\.name))
+        var number = 1
+        while names.contains("Layer \(number)") { number += 1 }
+        next.active += 1
+        next.layers.insert(PaintLayer(name: "Layer \(number)", image: blank), at: next.active)
+        replaceStack(with: next, actionName: "Add Layer")
+    }
+
+    func setLayerVisibility(_ visible: Bool, at index: Int) {
+        guard var next = stack, next.layers.indices.contains(index),
+              next.layers[index].isVisible != visible else { return }
+        next.layers[index].isVisible = visible
+        replaceStack(with: next, actionName: visible ? "Show Layer" : "Hide Layer")
+    }
+
+    func moveLayer(by offset: Int) {
+        guard var next = stack, next.layers.indices.contains(next.active + offset) else { return }
+        next.layers.swapAt(next.active, next.active + offset)
+        next.active += offset
+        replaceStack(with: next, actionName: "Move Layer")
+    }
+
+    func deleteLayer() {
+        guard var next = stack, next.layers.count > 1 else { return }
+        next.layers.remove(at: next.active)
+        next.active = min(next.active, next.layers.count - 1)
+        replaceStack(with: next, actionName: "Delete Layer")
+    }
+
+    private func replaceStack(with replacement: LayerStack, actionName: String) {
+        guard let previous = stack else { return }
         undoManager?.registerUndo(withTarget: self) { document in
-            document.replaceImage(with: previous, actionName: actionName)
+            document.replaceStack(with: previous, actionName: actionName)
         }
         undoManager?.setActionName(actionName)
         if undoManager?.isUndoing == true {
@@ -31,7 +90,7 @@ final class PaintDocument: NSDocument {
             if historyEntries.count > undoLimit + 1 { historyEntries.removeFirst() }
             historyPosition = historyEntries.count - 1
         }
-        image = replacement
+        stack = replacement
         editor?.refreshImage()
         editor?.updateHistory(undoManager)
     }
@@ -60,6 +119,36 @@ final class PaintDocument: NSDocument {
 
     @objc func resetUtilityPanels(_ sender: Any?) { editor?.resetPanels() }
 
+    @objc func layerCommand(_ sender: NSMenuItem) {
+        guard let command = LayerCommand(rawValue: sender.tag), let stack else { return }
+        switch command {
+        case .add: addLayer()
+        case .selectAbove: selectLayer(stack.active + 1)
+        case .selectBelow: selectLayer(stack.active - 1)
+        case .toggleVisibility: setLayerVisibility(!stack.activeLayer.isVisible, at: stack.active)
+        case .moveUp: moveLayer(by: 1)
+        case .moveDown: moveLayer(by: -1)
+        case .delete: deleteLayer()
+        }
+    }
+
+    @objc func exportPNG(_ sender: Any?) {
+        guard let window = windowForSheet, let stack else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = fileURL?.deletingPathExtension().lastPathComponent ?? displayName
+        panel.directoryURL = fileURL?.deletingLastPathComponent()
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                guard let image = stack.flattened() else { throw CocoaError(.fileWriteUnknown) }
+                try PaintFiles.pngData(image).write(to: url, options: .atomic)
+            } catch {
+                self?.presentError(error)
+            }
+        }
+    }
+
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
         case #selector(undoStroke(_:)): return undoManager?.canUndo == true
@@ -69,48 +158,82 @@ final class PaintDocument: NSDocument {
                 menuItem.state = editor?.isPanelShown(kind) == true ? .on : .off
             }
             return editor != nil
+        case #selector(layerCommand(_:)):
+            guard let stack, let menuItem = item as? NSMenuItem,
+                  let command = LayerCommand(rawValue: menuItem.tag) else { return false }
+            switch command {
+            case .add: return stack.layers.count < LayerStack.limit
+            case .selectAbove, .moveUp: return stack.active < stack.layers.count - 1
+            case .selectBelow, .moveDown: return stack.active > 0
+            case .toggleVisibility:
+                menuItem.title = stack.activeLayer.isVisible ? "Hide Layer" : "Show Layer"
+                return true
+            case .delete: return stack.layers.count > 1
+            }
         default: return super.validateUserInterfaceItem(item)
         }
     }
 
-    override func read(from data: Data, ofType typeName: String) throws {
-        let corrupt = CocoaError(.fileReadCorruptFile, userInfo: [
-            NSLocalizedDescriptionKey: "The file could not be read as a static PNG image."
-        ])
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetType(source) as String? == UTType.png.identifier,
-              CGImageSourceGetCount(source) == 1,
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0 else { throw corrupt }
+    private static func isProject(_ type: String?) -> Bool {
+        type == projectType || type == projectContentType.identifier
+    }
 
-        guard width <= 4096, height <= 4096, width * height <= 8_388_608 else {
-            throw CocoaError(.fileReadTooLarge, userInfo: [
-                NSLocalizedDescriptionKey: "PNG images can be at most 4,096 pixels per side and 8,388,608 pixels total."
-            ])
+    private var savesAsProject: Bool { Self.isProject(fileType) || stack?.needsProject == true }
+
+    override func writableTypes(for saveOperation: NSDocument.SaveOperationType) -> [String] {
+        if savesAsProject { return [Self.projectType] }
+        return super.writableTypes(for: saveOperation)
+    }
+
+    override func fileNameExtension(forType typeName: String, saveOperation: NSDocument.SaveOperationType) -> String? {
+        if Self.isProject(typeName) { return "paintmac" }
+        return super.fileNameExtension(forType: typeName, saveOperation: saveOperation)
+    }
+
+    override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
+        guard super.prepareSavePanel(savePanel) else { return false }
+        if savesAsProject {
+            savePanel.allowedContentTypes = [Self.projectContentType]
+            savePanel.allowsOtherFileTypes = false
         }
+        return true
+    }
 
-        guard let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil),
-              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { throw corrupt }
-        image = decoded
+    override func save(withDelegate delegate: Any?, didSave selector: Selector?, contextInfo: UnsafeMutableRawPointer?) {
+        if stack?.needsProject == true && !Self.isProject(fileType) {
+            runModalSavePanel(for: .saveAsOperation, delegate: delegate, didSave: selector, contextInfo: contextInfo)
+        } else {
+            super.save(withDelegate: delegate, didSave: selector, contextInfo: contextInfo)
+        }
+    }
+
+    override func read(from data: Data, ofType typeName: String) throws {
+        if Self.isProject(typeName) {
+            stack = try PaintFiles.readProject(data)
+        } else {
+            stack = LayerStack(layers: [PaintLayer(name: "Background", image: try PaintFiles.readPNG(data))], active: 0)
+        }
+        undoManager?.removeAllActions()
         historyEntries = ["Open Image"]
         historyPosition = 0
+        editor?.refreshImage()
+        editor?.updateHistory(undoManager)
     }
 
     override func data(ofType typeName: String) throws -> Data {
-        let bytes = NSMutableData()
-        guard let image,
-              let destination = CGImageDestinationCreateWithData(bytes, UTType.png.identifier as CFString, 1, nil)
-        else { throw CocoaError(.fileWriteUnknown) }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
-        return bytes as Data
+        guard let stack else { throw CocoaError(.fileWriteUnknown) }
+        if Self.isProject(typeName) { return try PaintFiles.projectData(stack) }
+        guard !stack.needsProject else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [
+                NSLocalizedDescriptionKey: "Save a paint.mac project to keep the layers, or use Export PNG to flatten them."
+            ])
+        }
+        return try PaintFiles.pngData(stack.activeLayer.image)
     }
 
     override func makeWindowControllers() {
-        if image == nil {
-            image = Self.makeBitmap(width: 1024, height: 768)?.makeImage()
+        if stack == nil, let blank = LayerStack.makeBitmap(width: 1024, height: 768)?.makeImage() {
+            stack = LayerStack(layers: [PaintLayer(name: "Background", image: blank)], active: 0)
         }
         undoManager?.levelsOfUndo = undoLimit
 
@@ -122,7 +245,7 @@ final class PaintDocument: NSDocument {
         let editor = EditorView(document: self)
         self.editor = editor
         window.contentView = editor
-        window.contentMinSize = NSSize(width: 420, height: 364)
+        window.contentMinSize = NSSize(width: 420, height: 420)
         window.initialFirstResponder = editor.canvas
         window.center()
         editor.installPanels(on: window)

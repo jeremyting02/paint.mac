@@ -27,7 +27,16 @@ the window at 100%.
 
 Use **Command-Z** and **Shift-Command-Z** to undo or redo a whole stroke or crop.
 Each document keeps the five most recent undo steps, which you can also select
-in the floating **History** window. **Layers** shows the current Background
-bitmap. Use the toolbar buttons or **Window** menu to show or hide each utility
+in the floating **History** window. In **Layers**, use **+** to insert a transparent
+layer above the selected row, click a row to edit it, and use its checkbox to
+hide or show it. The arrows move the selected layer and the trash button deletes
+it. The **Layer** menu offers the same commands. A document can have up to eight
+layers. Crop applies to the whole stack.
+
+When a PNG has layer changes, **Save** prompts for a `.paintmac` project to keep
+the layers. **File → Export PNG** writes a flat copy of the visible layers.
+Single-layer PNG edits can still save directly to PNG.
+
+Use the toolbar buttons or **Window** menu to show or hide each utility
 window (F5–F8). Drag a window by its title bar or use **Window → Reset Panel
 Layout** to put the four windows back in their corners.

@@ -19,6 +19,7 @@ fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)
 fileMenu.addItem(withTitle: "Save", action: #selector(NSDocument.save(_:)), keyEquivalent: "s")
 let saveAs = fileMenu.addItem(withTitle: "Save As…", action: #selector(NSDocument.saveAs(_:)), keyEquivalent: "s")
 saveAs.keyEquivalentModifierMask = [.command, .shift]
+fileMenu.addItem(withTitle: "Export PNG…", action: #selector(PaintDocument.exportPNG(_:)), keyEquivalent: "")
 fileItem.submenu = fileMenu
 
 let editItem = menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "")
@@ -27,6 +28,14 @@ editMenu.addItem(withTitle: "Undo", action: #selector(PaintDocument.undoStroke(_
 let redo = editMenu.addItem(withTitle: "Redo", action: #selector(PaintDocument.redoStroke(_:)), keyEquivalent: "z")
 redo.keyEquivalentModifierMask = [.command, .shift]
 editItem.submenu = editMenu
+
+let layerItem = menu.addItem(withTitle: "Layer", action: nil, keyEquivalent: "")
+let layerMenu = NSMenu(title: "Layer")
+for command in PaintDocument.LayerCommand.allCases {
+    let item = layerMenu.addItem(withTitle: command.title, action: #selector(PaintDocument.layerCommand(_:)), keyEquivalent: "")
+    item.tag = command.rawValue
+}
+layerItem.submenu = layerMenu
 
 let windowItem = menu.addItem(withTitle: "Window", action: nil, keyEquivalent: "")
 let windowMenu = NSMenu(title: "Window")

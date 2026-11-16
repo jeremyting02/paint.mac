@@ -85,6 +85,8 @@ final class CanvasView: NSView {
         if selection != .zero { selection = .zero }
     }
 
+    func cancelStroke() { stroke = nil }
+
     var cropRect: CGRect? {
         guard let image = document?.image, !selection.isEmpty,
               selection.size != CGSize(width: image.width, height: image.height) else { return nil }
@@ -94,8 +96,7 @@ final class CanvasView: NSView {
     }
 
     func cropSelection() {
-        guard let cropRect, let image = document?.image?.cropping(to: cropRect) else { return }
-        document?.replaceImage(with: image, actionName: "Crop")
+        if let cropRect { document?.crop(to: cropRect) }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -122,7 +123,11 @@ final class CanvasView: NSView {
             return
         }
 
-        guard let bitmap = PaintDocument.makeBitmap(width: image.width, height: image.height) else { return }
+        guard document?.stack?.activeLayer.isVisible == true else {
+            NSSound.beep()
+            return
+        }
+        guard let bitmap = LayerStack.makeBitmap(width: image.width, height: image.height) else { return }
         let isErasing = tool == .eraser
         bitmap.setBlendMode(.copy)
         bitmap.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
@@ -178,7 +183,7 @@ final class CanvasView: NSView {
         let rect = imageRect
         let visible = rect.intersection(dirtyRect)
         guard !visible.isEmpty, let context = NSGraphicsContext.current?.cgContext,
-              let image = stroke?.bitmap.makeImage() ?? document?.image else { return }
+              let stack = document?.stack else { return }
 
         context.saveGState()
         context.clip(to: rect)
@@ -195,9 +200,9 @@ final class CanvasView: NSView {
             }
         }
         if !fitsToWindow { context.interpolationQuality = .none }
-        context.draw(image, in: rect)
+        stack.draw(in: context, rect: rect, preview: stroke?.bitmap.makeImage())
         if !selection.isEmpty {
-            let scale = rect.width / CGFloat(image.width)
+            let scale = rect.width / CGFloat(stack.activeLayer.image.width)
             let marquee = CGRect(x: rect.minX + selection.minX * scale, y: rect.minY + selection.minY * scale,
                                  width: selection.width * scale, height: selection.height * scale)
             context.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor)

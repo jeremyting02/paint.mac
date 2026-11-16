@@ -28,6 +28,34 @@
             <key>NSDocumentClass</key>
             <string>PaintDocument</string>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>paint.mac Project</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array><string>local.paintmac.project</string></array>
+            <key>NSDocumentClass</key>
+            <string>PaintDocument</string>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>local.paintmac.project</string>
+            <key>UTTypeDescription</key>
+            <string>paint.mac Project</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array><string>paintmac</string></array>
+            </dict>
+        </dict>
     </array>
     <key>NSHighResolutionCapable</key>
     <true/>
