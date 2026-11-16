@@ -28,5 +28,18 @@ let redo = editMenu.addItem(withTitle: "Redo", action: #selector(PaintDocument.r
 redo.keyEquivalentModifierMask = [.command, .shift]
 editItem.submenu = editMenu
 
+let windowItem = menu.addItem(withTitle: "Window", action: nil, keyEquivalent: "")
+let windowMenu = NSMenu(title: "Window")
+for kind in UtilityPanels.Kind.allCases {
+    let item = windowMenu.addItem(withTitle: kind.title, action: #selector(PaintDocument.toggleUtilityPanel(_:)),
+                                  keyEquivalent: kind.keyEquivalent)
+    item.tag = kind.rawValue
+    item.keyEquivalentModifierMask = []
+}
+windowMenu.addItem(.separator())
+windowMenu.addItem(withTitle: "Reset Panel Layout", action: #selector(PaintDocument.resetUtilityPanels(_:)), keyEquivalent: "")
+windowItem.submenu = windowMenu
+app.windowsMenu = windowMenu
+
 app.mainMenu = menu
 app.run()

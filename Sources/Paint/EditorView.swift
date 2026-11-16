@@ -12,6 +12,11 @@ final class EditorView: NSView {
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private let color = NSColorWell()
+    private let toolButtons = NSStackView()
+    private let colorControls = NSStackView()
+    private let historyRows = NSStackView()
+    private let layerPreview = NSImageView()
+    private var panels: UtilityPanels?
     private let swatchColors: [(String, NSColor)] = [("Black", .black), ("Red", .systemRed), ("Blue", .systemBlue)]
 
     init(document: PaintDocument) {
@@ -65,9 +70,9 @@ final class EditorView: NSView {
 
         let toolbar = NSStackView(views: [undo, redo, NSTextField(labelWithString: "Size"), size, applyCrop])
         toolbar.spacing = 8
-        let tools = NSStackView(views: [Self.caption("Tools"), brush, eraser, crop])
-        tools.orientation = .vertical
-        tools.spacing = 6
+        for button in [brush, eraser, crop] { toolButtons.addArrangedSubview(button) }
+        toolButtons.distribution = .fillEqually
+        toolButtons.spacing = 1
         let swatches = NSStackView(views: swatchColors.enumerated().map { index, swatch in
             let button = Self.icon("square.fill", label: swatch.0)
             button.isBordered = false
@@ -78,38 +83,72 @@ final class EditorView: NSView {
             return button
         })
         swatches.spacing = 3
-        let colors = NSStackView(views: [Self.caption("Color"), color, swatches])
-        colors.orientation = .vertical
-        colors.spacing = 6
+        colorControls.orientation = .vertical
+        colorControls.spacing = 6
+        colorControls.addArrangedSubview(color)
+        colorControls.addArrangedSubview(swatches)
+        historyRows.orientation = .vertical
+        historyRows.alignment = .leading
+        historyRows.spacing = 2
+        layerPreview.imageScaling = .scaleProportionallyUpOrDown
+
+        let panelButtons = NSStackView(views: UtilityPanels.Kind.allCases.map { kind in
+            let button = Self.icon(kind.symbol, label: "Toggle \(kind.title)")
+            button.tag = kind.rawValue
+            button.target = self
+            button.action = #selector(togglePanelButton(_:))
+            return button
+        })
+        panelButtons.spacing = 3
         status.textColor = .secondaryLabelColor
         status.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         let footer = NSStackView(views: [status, zoom])
         footer.spacing = 8
         updateStatus()
 
-        for view in [toolbar, tools, colors, scrollView, footer] {
+        for view in [toolbar, panelButtons, scrollView, footer] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
             toolbar.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            panelButtons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            panelButtons.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 60),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -5),
-            tools.topAnchor.constraint(equalTo: scrollView.topAnchor, constant: 8),
-            tools.centerXAnchor.constraint(equalTo: leadingAnchor, constant: 30),
-            colors.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -8),
-            colors.centerXAnchor.constraint(equalTo: tools.centerXAnchor),
-            color.widthAnchor.constraint(equalToConstant: 36),
+            color.widthAnchor.constraint(equalToConstant: 56),
             color.heightAnchor.constraint(equalToConstant: 26),
+            layerPreview.widthAnchor.constraint(equalToConstant: 36),
+            layerPreview.heightAnchor.constraint(equalToConstant: 36),
             footer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5)
         ])
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func installPanels(on window: NSWindow) {
+        let layer = NSStackView(views: [layerPreview, NSTextField(labelWithString: "Background")])
+        layer.spacing = 8
+        panels = UtilityPanels(parent: window, contents: [
+            .tools: toolButtons, .colors: colorControls, .history: historyRows, .layers: layer
+        ])
+        refreshImage()
+        updateHistory(document?.undoManager)
+    }
+
+    func isPanelShown(_ kind: UtilityPanels.Kind) -> Bool { panels?.isShown(kind) == true }
+
+    func togglePanel(_ kind: UtilityPanels.Kind) { panels?.toggle(kind) }
+
+    func resetPanels() { panels?.resetPositions() }
+
+    @objc private func togglePanelButton(_ sender: NSButton) {
+        if let kind = UtilityPanels.Kind(rawValue: sender.tag) { togglePanel(kind) }
+    }
 
     override func layout() {
         super.layout()
@@ -119,6 +158,7 @@ final class EditorView: NSView {
     func refreshImage() {
         canvas.clearSelection()
         canvas.fitViewport()
+        if let image = document?.image { layerPreview.image = NSImage(cgImage: image, size: .zero) }
         updateStatus()
     }
 
@@ -135,6 +175,25 @@ final class EditorView: NSView {
     func updateHistory(_ history: UndoManager?) {
         undo.isEnabled = history?.canUndo == true
         redo.isEnabled = history?.canRedo == true
+        guard let document else { return }
+        for row in historyRows.arrangedSubviews {
+            historyRows.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        for (index, name) in document.historyEntries.enumerated() {
+            let current = index == document.historyPosition
+            let row = NSButton(title: current ? "✓  \(name)" : "     \(name)",
+                               target: self, action: #selector(selectHistory(_:)))
+            row.isBordered = false
+            row.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: current ? .semibold : .regular)
+            row.tag = index
+            row.setAccessibilityLabel(current ? "\(name), current" : name)
+            historyRows.addArrangedSubview(row)
+        }
+    }
+
+    @objc private func selectHistory(_ sender: NSButton) {
+        document?.goToHistoryEntry(sender.tag)
     }
 
     @objc private func selectTool(_ sender: NSButton) {
@@ -172,13 +231,6 @@ final class EditorView: NSView {
     @objc private func pickSwatch(_ sender: NSButton) {
         color.color = swatchColors[sender.tag].1
         changeColor(color)
-    }
-
-    private static func caption(_ title: String) -> NSTextField {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        label.textColor = .secondaryLabelColor
-        return label
     }
 
     private static func icon(_ symbol: String, label: String) -> NSButton {
