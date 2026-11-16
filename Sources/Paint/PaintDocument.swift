@@ -14,6 +14,7 @@ final class PaintDocument: NSDocument {
 
     private static let projectType = "Paint.NET Project"
     private static let projectContentType = UTType(importedAs: "com.paintdotnet.pdn")
+    private static let pixelClipboardTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .init(UTType.jpeg.identifier)]
     private(set) var stack: LayerStack?
     var image: CGImage? { stack?.activeLayer.image }
     private weak var editor: EditorView?
@@ -80,6 +81,50 @@ final class PaintDocument: NSDocument {
         let clipboard = NSPasteboard.general
         clipboard.clearContents()
         clipboard.setString(text, forType: .string)
+    }
+
+    @objc func cut(_ sender: Any?) { copyPixels(to: .general, cutting: true) }
+    @objc func copy(_ sender: Any?) { copyPixels(to: .general, cutting: false) }
+    @objc func paste(_ sender: Any?) { pastePixels(from: .general) }
+
+    func copyPixels(to clipboard: NSPasteboard, cutting: Bool) {
+        guard let canvas = editor?.canvas, canvas.canCopyPixels, let layer = canvas.copyableLayer else { return }
+        var copied = layer
+        var cutLayer: PaintLayer?
+        if let outline = canvas.copyableOutline {
+            let bounds = outline.bounds.integral
+            let height = layer.image.height
+            let region = CGRect(x: bounds.minX, y: CGFloat(height) - bounds.maxY,
+                                width: bounds.width, height: bounds.height)
+            let mask = outline.pixelRectangle ? nil : outline.mask(in: region, imageHeight: height)
+            guard outline.pixelRectangle || mask != nil, copied.crop(to: region, keeping: mask) else { return }
+            if cutting {
+                guard let source = layer.straightPixels,
+                      let cleared = layer.withPixels(layer.clearing(region, mask: mask, from: source)) else { return }
+                cutLayer = cleared
+            }
+        } else if cutting {
+            return
+        }
+
+        guard let data = try? PaintFiles.pngData(copied.image) else { return }
+        clipboard.clearContents()
+        guard clipboard.setData(data, forType: .png) else { return }
+        if let cutLayer {
+            canvas.cancelMove()
+            commitSelectedPixelsTransform(cutLayer, to: nil, actionName: "Cut")
+        }
+    }
+
+    func pastePixels(from clipboard: NSPasteboard) {
+        guard let canvas = editor?.canvas, stack?.activeLayer.isVisible == true else { return }
+        for type in Self.pixelClipboardTypes {
+            if let data = clipboard.data(forType: type), let image = PaintFiles.readClipboardImage(data) {
+                canvas.pastePixels(image)
+                return
+            }
+        }
+        NSSound.beep()
     }
 
     @objc func pasteSelection(_ sender: Any?) {
@@ -318,6 +363,10 @@ final class PaintDocument: NSDocument {
         case #selector(redoStroke(_:)): return editor?.canvas.hasPendingMove != true && undoManager?.canRedo == true
         case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
         case #selector(copySelection(_:)): return editor?.canvas.copyableOutline != nil
+        case #selector(cut(_:)): return editor?.canvas.copyableOutline != nil
+        case #selector(copy(_:)): return editor?.canvas.canCopyPixels == true
+        case #selector(paste(_:)): return stack?.activeLayer.isVisible == true
+            && NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
         case #selector(pasteSelection(_:)): return clipboardOutline != nil
         case #selector(deselect(_:)): return editor?.canvas.imageSelection != nil || editor?.canvas.hasPendingMove == true
         case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false

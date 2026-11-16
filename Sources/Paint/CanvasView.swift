@@ -24,7 +24,8 @@ final class CanvasView: NSView {
         var preview: PaintLayer?
         var actionName = "Move Selected Pixels"
 
-        var changed: Bool { geometry.rect != source || geometry.angle != 0 || geometry.flipX || geometry.flipY }
+        var isPaste: Bool { pixels?.isPaste == true }
+        var changed: Bool { isPaste || geometry.rect != source || geometry.angle != 0 || geometry.flipX || geometry.flipY }
 
         var transformedOutline: SelectionOutline? {
             let transform = CGAffineTransform(translationX: geometry.rect.midX, y: geometry.rect.midY)
@@ -415,6 +416,34 @@ final class CanvasView: NSView {
         return selectionOutline
     }
 
+    var copyableLayer: PaintLayer? { move?.preview ?? document?.stack?.activeLayer }
+    var canCopyPixels: Bool {
+        copyableLayer != nil && (copyableOutline != nil || (selectionOutline == nil && move?.isPaste != true))
+    }
+
+    func pastePixels(_ pastedImage: CGImage) {
+        guard let layer = copyableLayer, layer.isVisible, layerPreview == nil else { return }
+        let visible = imageRect.intersection(visibleRect)
+        let corner = visible.isEmpty ? CGPoint(x: 0, y: layer.image.height)
+            : pixelEdge(at: CGPoint(x: visible.minX, y: visible.maxY), in: layer.image)
+        let rect = CGRect(x: corner.x, y: corner.y - CGFloat(pastedImage.height),
+                          width: CGFloat(pastedImage.width), height: CGFloat(pastedImage.height))
+        let destination = topLeftRect(rect, imageHeight: layer.image.height)
+        guard let outline = SelectionOutline(rect: rect),
+              let pixels = SelectedPixelsTransform(layer: layer, pastedImage: pastedImage, at: destination),
+              let preview = pixels.transformed(to: destination) else { return }
+
+        finishMove()
+        if let selectTransformTool { selectTransformTool(.moveSelectedPixels) }
+        else { tool = .moveSelectedPixels }
+        window?.makeFirstResponder(self)
+        move = MoveSession(pixels: pixels, outline: outline, source: rect,
+                           geometry: MoveGeometry(rect: rect, pivot: rect.center), preview: preview, actionName: "Paste")
+        composite = nil
+        needsDisplay = true
+        selectionDidChange?()
+    }
+
     func cancelEditingGesture() {
         stroke = nil
         selectionAnchor = nil
@@ -455,7 +484,8 @@ final class CanvasView: NSView {
         guard session.changed else { return }
         let destination = session.transformedOutline?.clipped(to: canvasBounds(for: image))
         if let preview = session.preview {
-            document?.commitSelectedPixelsTransform(preview, to: selectionOutline == nil ? nil : destination,
+            let keepsOutline = session.isPaste || selectionOutline != nil
+            document?.commitSelectedPixelsTransform(preview, to: keepsOutline ? destination : nil,
                                                     actionName: session.actionName)
         } else {
             document?.commitSelection(destination, actionName: session.actionName)
@@ -639,7 +669,7 @@ final class CanvasView: NSView {
             session.preview = nil
         }
         session.copy = keepSource
-        session.actionName = tool == .moveSelection ? "Transform Selection" : actionName
+        if !session.isPaste { session.actionName = tool == .moveSelection ? "Transform Selection" : actionName }
         move = session
         composite = nil
         needsDisplay = true

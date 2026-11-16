@@ -46,6 +46,13 @@ the outline using the same handles. In the **Edit** menu, **Copy Selection**
 (Option-Shift-Command-C) copies the outline as polygon JSON. **Paste Selection**
 (Option-Shift-Command-V) replaces the current outline with the clipboard shape.
 
+Use **Command-X** to cut selected pixels from the active layer and **Command-C**
+to copy them. With no selection, Copy takes the entire active layer.
+**Command-V** pastes a clipboard image into **Move Selected Pixels**, where it
+can be positioned, resized, or rotated before committing. Commit with **Return**,
+**Escape**, or **Finish**, or use **Command-Z** to discard the floating paste.
+Pixels outside the canvas are clipped on commit.
+
 **Fit** shows the whole image, and **100%** shows one image pixel per display
 pixel. Hold **Command** and scroll
 to zoom toward or away from the pointer. Hold the middle mouse button and drag

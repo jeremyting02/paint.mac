@@ -14,6 +14,34 @@ struct PaintLayer {
 
     var straightPixels: Data? { pdnPixels ?? BGRA8.pixels(from: image) }
 
+    func withPixels(_ pixels: Data) -> PaintLayer? {
+        guard let image = BGRA8.image(from: pixels, width: image.width, height: image.height) else { return nil }
+        var updated = self
+        updated.image = image
+        updated.pdnPixels = pixels
+        return updated
+    }
+
+    func clearing(_ region: CGRect, mask: Data?, from source: Data) -> Data {
+        let width = image.width, regionWidth = Int(region.width)
+        let origin = Int(region.minY) * width + Int(region.minX)
+        var cleared = source
+        if let mask {
+            cleared.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                for (index, selected) in mask.enumerated() where selected != 0 {
+                    let pixel = origin + index / regionWidth * width + index % regionWidth
+                    target.storeBytes(of: UInt32(0), toByteOffset: pixel * 4, as: UInt32.self)
+                }
+            }
+        } else {
+            for row in 0..<Int(region.height) {
+                let start = (origin + row * width) * 4
+                cleared.resetBytes(in: start..<(start + regionWidth * 4))
+            }
+        }
+        return cleared
+    }
+
     mutating func padCanvas(width: Int, height: Int) throws {
         guard width != image.width || height != image.height else { return }
         guard let source = straightPixels else { throw CocoaError(.fileReadUnknown) }
@@ -67,7 +95,8 @@ struct SelectedPixelsTransform {
     private let cleared: Data
     private let selection: CGRect
     private let bounds: CGRect
-    private let maskedSource: PaintLayer?
+    private let croppedSource: PaintLayer?
+    let isPaste: Bool
 
     init?(layer: PaintLayer, selection: CGRect, mask: Data? = nil) {
         let width = layer.image.width, height = layer.image.height
@@ -78,28 +107,26 @@ struct SelectedPixelsTransform {
         self.source = source
         self.selection = selection
         self.bounds = bounds
-
-        var cleared = source
-        let selectionWidth = Int(selection.width)
+        isPaste = false
         if let mask {
             var foreground = layer
             guard foreground.crop(to: selection, keeping: mask) else { return nil }
-            maskedSource = foreground
-            let origin = Int(selection.minY) * width + Int(selection.minX)
-            cleared.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
-                for (index, selected) in mask.enumerated() where selected != 0 {
-                    let pixel = origin + index / selectionWidth * width + index % selectionWidth
-                    target.storeBytes(of: UInt32(0), toByteOffset: pixel * 4, as: UInt32.self)
-                }
-            }
+            croppedSource = foreground
         } else {
-            maskedSource = nil
-            for row in Int(selection.minY)..<Int(selection.maxY) {
-                let start = (row * width + Int(selection.minX)) * 4
-                cleared.resetBytes(in: start..<(start + selectionWidth * 4))
-            }
+            croppedSource = nil
         }
-        self.cleared = cleared
+        cleared = layer.clearing(selection, mask: mask, from: source)
+    }
+
+    init?(layer: PaintLayer, pastedImage: CGImage, at destination: CGRect) {
+        guard let source = layer.straightPixels, let foreground = BGRA8.pixels(from: pastedImage) else { return nil }
+        self.layer = layer
+        self.source = source
+        cleared = source
+        selection = destination
+        bounds = CGRect(x: 0, y: 0, width: layer.image.width, height: layer.image.height)
+        croppedSource = PaintLayer(name: layer.name, image: pastedImage, pdnPixels: foreground)
+        isPaste = true
     }
 
     static func rotatedBounds(of rect: CGRect, by angle: CGFloat) -> CGRect {
@@ -113,7 +140,7 @@ struct SelectedPixelsTransform {
 
     func transformed(to destination: CGRect, rotation: CGFloat = 0, flipX: Bool = false, flipY: Bool = false,
                      copy: Bool = false) -> PaintLayer? {
-        if destination == selection && rotation == 0 && !flipX && !flipY { return layer }
+        if !isPaste && destination == selection && rotation == 0 && !flipX && !flipY { return layer }
         let width = layer.image.width
         let target = Self.rotatedBounds(of: destination, by: rotation).intersection(bounds)
         var pixels = copy ? source : cleared
@@ -125,9 +152,9 @@ struct SelectedPixelsTransform {
             let foregroundStride: Int
             if rotation == 0 && !flipX && !flipY && destination == destination.integral && destination.size == selection.size {
                 let x = Int(target.minX - destination.minX), y = Int(target.minY - destination.minY)
-                if let maskedSource, let pixels = maskedSource.pdnPixels {
+                if let croppedSource, let pixels = croppedSource.pdnPixels {
                     foreground = pixels
-                    foregroundStride = maskedSource.image.width * 4
+                    foregroundStride = croppedSource.image.width * 4
                     foregroundStart = y * foregroundStride + x * 4
                 } else {
                     foreground = source
@@ -155,15 +182,11 @@ struct SelectedPixelsTransform {
                 }
             }
         }
-        guard let image = BGRA8.image(from: pixels, width: width, height: layer.image.height) else { return nil }
-        var moved = layer
-        moved.image = image
-        moved.pdnPixels = pixels
-        return moved
+        return layer.withPixels(pixels)
     }
 
     private func renderPixels(destination: CGRect, visible: CGRect, rotation: CGFloat, flipX: Bool, flipY: Bool) -> Data? {
-        guard let image = maskedSource?.image ?? layer.image.cropping(to: selection) else { return nil }
+        guard let image = croppedSource?.image ?? layer.image.cropping(to: selection) else { return nil }
         // Rasterize only the on-canvas portion. The drawing context has a bottom-left origin.
         return BGRA8.render(width: Int(visible.width), height: Int(visible.height)) { bitmap in
             bitmap.interpolationQuality = .low
@@ -282,6 +305,17 @@ struct LayerStack {
 }
 
 enum PaintFiles {
+    static func readClipboardImage(_ data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              LayerStack.supportsCanvas(width: width, height: height),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { return nil }
+        return image
+    }
+
     static func layersForImport(from url: URL) throws -> [PaintLayer] {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         let name = url.deletingPathExtension().lastPathComponent
