@@ -18,8 +18,43 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         }
     }
 
+    private struct Placement {
+        let fromLeft: Bool
+        let fromTop: Bool
+        let inset: CGPoint
+        var lastOrigin: CGPoint?
+
+        init(fromLeft: Bool, fromTop: Bool, inset: CGPoint) {
+            self.fromLeft = fromLeft
+            self.fromTop = fromTop
+            self.inset = inset
+        }
+
+        init(panel: CGRect, in frame: CGRect) {
+            let left = panel.minX - frame.minX
+            let right = frame.maxX - panel.maxX
+            let top = frame.maxY - panel.maxY
+            let bottom = panel.minY - frame.minY
+            let fromLeft = abs(left) <= abs(right)
+            let fromTop = abs(top) <= abs(bottom)
+            self.init(fromLeft: fromLeft, fromTop: fromTop,
+                      inset: CGPoint(x: fromLeft ? left : right, y: fromTop ? top : bottom))
+        }
+
+        @MainActor mutating func apply(to panel: NSPanel, in frame: CGRect) {
+            let panelFrame = panel.frame
+            let x = fromLeft ? frame.minX + inset.x : frame.maxX - panelFrame.width - inset.x
+            let y = fromTop ? frame.maxY - panelFrame.height - inset.y : frame.minY + inset.y
+            let origin = CGPoint(x: x, y: y)
+            if panelFrame.origin != origin { panel.setFrameOrigin(origin) }
+            lastOrigin = panel.frame.origin
+        }
+    }
+
     private weak var parent: NSWindow?
     private var panels: [Kind: NSPanel] = [:]
+    private var placements: [Kind: Placement] = [:]
+    private var parentFrame: CGRect = .zero
     private var shown = Set(Kind.allCases)
 
     init(parent: NSWindow, contents: [Kind: NSView]) {
@@ -52,6 +87,9 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         }
 
         resetPositions()
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(parentFrameChanged(_:)), name: name, object: parent)
+        }
         for name in [NSWindow.didBecomeMainNotification, NSWindow.didResignMainNotification,
                      NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
                      NSWindow.willCloseNotification] {
@@ -71,14 +109,28 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
 
     func resetPositions() {
         guard let parent else { return }
+        parentFrame = parent.frame
         for (kind, panel) in panels {
             let left = kind == .tools || kind == .colors
             let top = kind == .tools || kind == .history
-            let frame = parent.frame
-            let x = left ? frame.minX + 8 : frame.maxX - panel.frame.width - 8
-            let y = top ? frame.maxY - panel.frame.height - 66 : frame.minY + 34
-            panel.setFrameOrigin(CGPoint(x: x, y: y))
+            var placement = Placement(fromLeft: left, fromTop: top, inset: CGPoint(x: 8, y: top ? 66 : 34))
+            placement.apply(to: panel, in: parentFrame)
+            placements[kind] = placement
         }
+    }
+
+    @objc private func parentFrameChanged(_ notification: Notification) {
+        guard let frame = parent?.frame, frame != parentFrame else { return }
+        for (kind, panel) in panels {
+            guard var placement = placements[kind] else { continue }
+            // Read manual moves when the owner changes geometry so dragging a panel stays native.
+            if panel.frame.origin != placement.lastOrigin {
+                placement = Placement(panel: panel.frame, in: parentFrame)
+            }
+            placement.apply(to: panel, in: frame)
+            placements[kind] = placement
+        }
+        parentFrame = frame
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -91,10 +143,10 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
 
     @objc private func parentChanged(_ notification: Notification) {
         if notification.name == NSWindow.willCloseNotification {
-            for panel in panels.values { hide(panel) }
+            for panel in panels.values { panel.orderOut(nil) }
             parent = nil
         } else if notification.name == NSWindow.didResignMainNotification {
-            for panel in panels.values { hide(panel) }
+            for panel in panels.values { panel.orderOut(nil) }
         } else {
             updateVisibility()
         }
@@ -104,16 +156,10 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         guard let parent else { return }
         for (kind, panel) in panels {
             if parent.isMainWindow && !parent.isMiniaturized && shown.contains(kind) {
-                if panel.parent == nil { parent.addChildWindow(panel, ordered: .above) }
                 if !panel.isVisible { panel.orderFront(nil) }
             } else {
-                hide(panel)
+                panel.orderOut(nil)
             }
         }
-    }
-
-    private func hide(_ panel: NSPanel) {
-        panel.parent?.removeChildWindow(panel)
-        panel.orderOut(nil)
     }
 }
