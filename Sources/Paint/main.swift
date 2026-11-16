@@ -21,5 +21,12 @@ let saveAs = fileMenu.addItem(withTitle: "Save As…", action: #selector(NSDocum
 saveAs.keyEquivalentModifierMask = [.command, .shift]
 fileItem.submenu = fileMenu
 
+let editItem = menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "")
+let editMenu = NSMenu(title: "Edit")
+editMenu.addItem(withTitle: "Undo", action: #selector(PaintDocument.undoStroke(_:)), keyEquivalent: "z")
+let redo = editMenu.addItem(withTitle: "Redo", action: #selector(PaintDocument.redoStroke(_:)), keyEquivalent: "z")
+redo.keyEquivalentModifierMask = [.command, .shift]
+editItem.submenu = editMenu
+
 app.mainMenu = menu
 app.run()

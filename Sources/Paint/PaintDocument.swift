@@ -4,7 +4,43 @@ import UniformTypeIdentifiers
 
 @objc(PaintDocument)
 final class PaintDocument: NSDocument {
-    private var image: CGImage?
+    private(set) var image: CGImage?
+    private weak var editor: EditorView?
+
+    static func makeBitmap(width: Int, height: Int) -> CGContext? {
+        CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    }
+
+    func replaceImage(with replacement: CGImage, actionName: String) {
+        guard let previous = image else { return }
+        undoManager?.registerUndo(withTarget: self) { document in
+            document.replaceImage(with: previous, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+        image = replacement
+        editor?.canvas.needsDisplay = true
+        editor?.updateHistory(undoManager)
+    }
+
+    @objc func undoStroke(_ sender: Any?) {
+        undoManager?.undo()
+        editor?.updateHistory(undoManager)
+    }
+
+    @objc func redoStroke(_ sender: Any?) {
+        undoManager?.redo()
+        editor?.updateHistory(undoManager)
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(undoStroke(_:)): return undoManager?.canUndo == true
+        case #selector(redoStroke(_:)): return undoManager?.canRedo == true
+        default: return super.validateUserInterfaceItem(item)
+        }
+    }
 
     override func read(from data: Data, ofType typeName: String) throws {
         let corrupt = CocoaError(.fileReadCorruptFile, userInfo: [
@@ -41,21 +77,20 @@ final class PaintDocument: NSDocument {
 
     override func makeWindowControllers() {
         if image == nil {
-            image = CGContext(
-                data: nil, width: 1024, height: 768, bitsPerComponent: 8, bytesPerRow: 0,
-                space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            )?.makeImage()
+            image = Self.makeBitmap(width: 1024, height: 768)?.makeImage()
         }
+        undoManager?.levelsOfUndo = 5
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false
         )
-        let canvas = CanvasView(frame: window.contentView?.bounds ?? .zero)
-        canvas.image = image
-        window.contentView = canvas
+        let editor = EditorView(document: self)
+        self.editor = editor
+        window.contentView = editor
+        window.contentMinSize = NSSize(width: 420, height: 300)
+        window.initialFirstResponder = editor.canvas
         window.center()
         addWindowController(NSWindowController(window: window))
     }
