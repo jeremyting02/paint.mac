@@ -32,9 +32,13 @@ hide or show it. The arrows move the selected layer and the trash button deletes
 it. The **Layer** menu offers the same commands. A document can have up to eight
 layers. Crop applies to the whole stack.
 
-Paint.NET 5.2 projects retain their layer names, order, visibility, opacity, and
-pixel data. Reopened projects select the top layer. Projects that use non-Normal
-blending, embedded color profiles, or an unsupported pixel layout show an error
+Double-click a layer or press **F4** to open **Layer Properties**. Set its name,
+visibility, opacity (0–255), and blend mode. The canvas previews the changes,
+and **OK** applies them as one undo step.
+
+Paint.NET 5.2 projects retain their layer names, order, visibility, opacity,
+blend modes, and pixel data. Reopened projects select the top layer. Projects
+that use embedded color profiles or an unsupported pixel layout show an error
 when opened.
 
 Run `sh Tests/pdn-roundtrip.sh` to check the Paint.NET 5.2 fixture.

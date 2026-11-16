@@ -76,7 +76,8 @@ struct PDNWriter {
     }
 
     private mutating func bitmapLayer(_ layer: PaintLayer, id layerID: Int, width: Int, height: Int) {
-        let legacy = id(), surface = id(), properties = id(), normal = id(), memory = id(), layerMetadata = id()
+        let legacy = id(), surface = id(), properties = id(), blendOp = id(), memory = id(), layerMetadata = id()
+        let blendClass = layer.blendMode.pdnClass
         object(layerID, "PaintDotNet.BitmapLayer", fields: [
             ("properties", .object("PaintDotNet.BitmapLayer+BitmapLayerProperties")),
             ("surface", .object("PaintDotNet.Surface", 6)), ("Layer+isDisposed", Self.bool),
@@ -91,10 +92,10 @@ struct PDNWriter {
         reference(properties)
 
         object(legacy, "PaintDotNet.BitmapLayer+BitmapLayerProperties", fields: [
-            ("blendOp", .object("PaintDotNet.UserBlendOps+NormalBlendOp"))
+            ("blendOp", .object(blendClass))
         ])
-        reference(normal)
-        object(normal, "PaintDotNet.UserBlendOps+NormalBlendOp", fields: [])
+        reference(blendOp)
+        object(blendOp, blendClass, fields: [])
         object(surface, "PaintDotNet.Surface", library: 6, fields: [
             ("width", Self.int), ("height", Self.int), ("stride", Self.int),
             ("scan0", .object("PaintDotNet.MemoryBlock", 6))
@@ -118,7 +119,7 @@ struct PDNWriter {
         data.append(contentsOf: [layer.isVisible ? 1 : 0, layer.isBackground ? 1 : 0, layer.opacity])
         let blend = -id()
         object(blend, "PaintDotNet.LayerBlendMode", fields: [("value__", Self.int)])
-        int(0)
+        int(layer.blendMode.rawValue)
         metadata(layer.metadata, id: layerMetadata)
     }
 

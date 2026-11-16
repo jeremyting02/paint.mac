@@ -8,6 +8,7 @@ struct PaintLayer {
     var isVisible = true
     var isBackground = false
     var opacity: UInt8 = 255
+    var blendMode: LayerBlendMode = .normal
     var metadata: [PDNMetadata] = []
     var pdnPixels: Data?
 
@@ -35,6 +36,9 @@ struct LayerStack {
     var metadata: [PDNMetadata] = []
 
     var activeLayer: PaintLayer { layers[active] }
+    var needsBlendComposite: Bool {
+        layers.lazy.filter { $0.isVisible && $0.opacity > 0 }.dropFirst().contains { $0.blendMode != .normal }
+    }
 
     func draw(in context: CGContext, rect: CGRect, preview: CGImage? = nil) {
         context.saveGState()
@@ -46,12 +50,25 @@ struct LayerStack {
     }
 
     func flattened() -> CGImage? {
-        let visible = layers.filter(\.isVisible)
+        let visible = layers.filter { $0.isVisible && $0.opacity > 0 }
         if visible.count == 1, visible[0].opacity == 255 { return visible[0].image }
+        if needsBlendComposite { return blendComposite() }
         let image = activeLayer.image
         guard let bitmap = Self.makeBitmap(width: image.width, height: image.height) else { return nil }
         draw(in: bitmap, rect: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         return bitmap.makeImage()
+    }
+
+    func blendComposite(preview: CGImage? = nil) -> CGImage? {
+        let image = activeLayer.image
+        var pixels = Data(count: image.width * image.height * 4)
+        for (index, layer) in layers.enumerated() where layer.isVisible && layer.opacity > 0 {
+            let source = index == active ? preview : nil
+            let stored = source == nil ? layer.pdnPixels : nil
+            guard let bytes = stored ?? BGRA8.pixels(from: source ?? layer.image) else { return nil }
+            layer.blendMode.composite(bytes, onto: &pixels, opacity: layer.opacity)
+        }
+        return BGRA8.image(from: pixels, width: image.width, height: image.height)
     }
 
     static func makeBitmap(width: Int, height: Int) -> CGContext? {

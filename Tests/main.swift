@@ -13,6 +13,7 @@ for stack in [imported, reopened] {
     precondition(stack.layers.map(\.name) == ["Base", "Top – 日本"])
     precondition(stack.layers.map(\.isVisible) == [true, false])
     precondition(stack.layers.map(\.opacity) == [255, 161])
+    precondition(stack.layers.map(\.blendMode) == [.normal, .normal])
     precondition(stack.layers.map(\.pdnPixels) == [Data(base), Data(top)])
     precondition(stack.activeLayer.image.width == 2 && stack.activeLayer.image.height == 3)
 }
@@ -20,4 +21,17 @@ do {
     _ = try PDNFile.read(data.dropLast())
     preconditionFailure("Accepted truncated pixel data")
 } catch PDNError.invalid {}
+
+for mode in LayerBlendMode.allCases {
+    var changed = imported
+    changed.layers[1].blendMode = mode
+    changed.layers[1].opacity = 73
+    let saved = try PDNFile.read(PDNFile.write(changed))
+    precondition(saved.layers[1].blendMode == mode && saved.layers[1].opacity == 73)
+    precondition(saved.layers[1].pdnPixels == Data(top))
+}
+
+var blend = Data([200, 0, 255, 255, 0, 0, 0, 0])
+LayerBlendMode.additive.composite(Data([100, 64, 31, 255, 100, 64, 31, 255]), onto: &blend, opacity: 128)
+precondition(blend == Data([228, 32, 255, 255, 100, 64, 31, 128]))
 print("Paint.NET 5.2 layer round-trip passed")

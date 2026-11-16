@@ -4,11 +4,11 @@ import UniformTypeIdentifiers
 @objc(PaintDocument)
 final class PaintDocument: NSDocument {
     enum LayerCommand: Int, CaseIterable {
-        case add, selectAbove, selectBelow, toggleVisibility, moveUp, moveDown, delete
+        case add, selectAbove, selectBelow, toggleVisibility, moveUp, moveDown, delete, properties
 
         var title: String {
             ["Add Layer", "Select Layer Above", "Select Layer Below", "Show Layer",
-             "Move Layer Up", "Move Layer Down", "Delete Layer"][rawValue]
+             "Move Layer Up", "Move Layer Down", "Delete Layer", "Layer Properties…"][rawValue]
         }
     }
 
@@ -74,6 +74,28 @@ final class PaintDocument: NSDocument {
         replaceStack(with: next, actionName: "Delete Layer")
     }
 
+    func showLayerProperties() {
+        guard let original = stack, let window = windowForSheet, window.attachedSheet == nil,
+              let canvas = editor?.canvas else { return }
+        let panel = LayerPropertiesPanel(layer: original.activeLayer)
+        panel.preview = { [weak canvas] layer in
+            var preview = original
+            preview.layers[original.active] = layer
+            canvas?.layerPreview = preview
+        }
+        window.beginSheet(panel) { [weak self, weak canvas] response in
+            canvas?.layerPreview = nil
+            guard response == .OK, let self, var next = self.stack,
+                  next.layers.indices.contains(original.active),
+                  next.layers[original.active].image === original.activeLayer.image else { return }
+            let edited = panel.editedLayer, before = original.activeLayer
+            guard edited.name != before.name || edited.isVisible != before.isVisible ||
+                  edited.opacity != before.opacity || edited.blendMode != before.blendMode else { return }
+            next.layers[original.active] = edited
+            self.replaceStack(with: next, actionName: "Layer Properties")
+        }
+    }
+
     private func replaceStack(with replacement: LayerStack, actionName: String) {
         guard let previous = stack else { return }
         undoManager?.registerUndo(withTarget: self) { document in
@@ -128,6 +150,7 @@ final class PaintDocument: NSDocument {
         case .moveUp: moveLayer(by: 1)
         case .moveDown: moveLayer(by: -1)
         case .delete: deleteLayer()
+        case .properties: showLayerProperties()
         }
     }
 
@@ -168,6 +191,7 @@ final class PaintDocument: NSDocument {
                 menuItem.title = stack.activeLayer.isVisible ? "Hide Layer" : "Show Layer"
                 return true
             case .delete: return stack.layers.count > 1
+            case .properties: return windowForSheet?.attachedSheet == nil
             }
         default: return super.validateUserInterfaceItem(item)
         }

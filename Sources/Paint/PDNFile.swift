@@ -8,8 +8,6 @@ struct PDNMetadata {
 }
 
 enum PDNFile {
-    private static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-    private static let bgra = CGBitmapInfo.byteOrder32Little.rawValue
     private static let byteLimit = 280 * 1024 * 1024
     private static let graphLimit = 4 * 1024 * 1024
 
@@ -45,17 +43,18 @@ enum PDNFile {
             let layer = try graph.fields(item, named: "PaintDotNet.BitmapLayer")
             let props = try graph.fields(layer["Layer+properties"], named: "PaintDotNet.Layer+LayerProperties")
             let name = try graph.string(props["name"])
+            let blendMode: LayerBlendMode?
             if let mode = props["blendMode"] {
                 let blend = try graph.fields(mode, named: "PaintDotNet.LayerBlendMode")
-                guard try PDNRecords.integer(blend["value__"]) == 0 else {
-                    throw PDNError.unsupported("non-Normal blending on layer “\(name)”")
-                }
+                blendMode = try LayerBlendMode(rawValue: PDNRecords.integer(blend["value__"]))
             } else if let bitmapProperties = layer["properties"] {
                 let legacy = try graph.fields(bitmapProperties, named: "PaintDotNet.BitmapLayer+BitmapLayerProperties")
-                guard (try? graph.fields(legacy["blendOp"], named: "PaintDotNet.UserBlendOps+NormalBlendOp")) != nil else {
-                    throw PDNError.unsupported("non-Normal blending on layer “\(name)”")
-                }
+                let legacyMode = try graph.className(legacy["blendOp"])
+                blendMode = LayerBlendMode.allCases.first { $0.pdnClass == legacyMode }
+            } else {
+                blendMode = .normal
             }
+            guard let blendMode else { throw PDNError.unsupported("blend mode on layer “\(name)”") }
             let surface = try graph.fields(layer["surface"], named: "PaintDotNet.Surface")
             let stride = try PDNRecords.integer(surface["stride"])
             let scan = try graph.fields(surface["scan0"], named: "PaintDotNet.MemoryBlock")
@@ -72,7 +71,7 @@ enum PDNFile {
             let opacity = try PDNRecords.integer(props["opacity"])
             guard let alpha = UInt8(exactly: opacity) else { throw PDNError.invalid }
             surfaces[block] = stride * height
-            return (block: block, name: name, alpha: alpha,
+            return (block: block, name: name, alpha: alpha, blendMode: blendMode,
                     visible: try PDNRecords.integer(props["visible"]) != 0,
                     background: try PDNRecords.integer(props["isBackground"]) != 0,
                     metadata: try metadata(props["userMetadataItems"], in: graph))
@@ -85,14 +84,10 @@ enum PDNFile {
         }
         guard reader.remaining == 0 else { throw PDNError.invalid }
         let images = try layers.map { layer in
-            guard let pixels = buffers[layer.block], let provider = CGDataProvider(data: pixels as CFData),
-                  let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
-                                      bytesPerRow: width * 4, space: colorSpace,
-                                      bitmapInfo: CGBitmapInfo(rawValue: bgra | CGImageAlphaInfo.first.rawValue),
-                                      provider: provider, decode: nil, shouldInterpolate: false,
-                                      intent: .defaultIntent) else { throw PDNError.invalid }
+            guard let pixels = buffers[layer.block],
+                  let image = BGRA8.image(from: pixels, width: width, height: height) else { throw PDNError.invalid }
             return PaintLayer(name: layer.name, image: image, isVisible: layer.visible,
-                              isBackground: layer.background, opacity: layer.alpha,
+                              isBackground: layer.background, opacity: layer.alpha, blendMode: layer.blendMode,
                               metadata: layer.metadata, pdnPixels: pixels)
         }
         return LayerStack(layers: images, active: images.count - 1, metadata: documentMetadata)
@@ -160,28 +155,9 @@ enum PDNFile {
         var writer = PDNWriter(width: width, height: height, stack: stack)
         guard writer.data.count <= graphLimit else { throw PDNError.unsupported("oversized project metadata") }
         for layer in stack.layers {
-            try writer.pixels(layer.pdnPixels ?? straightPixels(layer.image))
+            guard let pixels = layer.pdnPixels ?? BGRA8.pixels(from: layer.image) else { throw CocoaError(.fileWriteUnknown) }
+            try writer.pixels(pixels)
         }
         return writer.data
-    }
-
-    private static func straightPixels(_ image: CGImage) throws -> Data {
-        let bytesPerRow = image.width * 4
-        var pixels = Data(count: bytesPerRow * image.height)
-        try pixels.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
-            guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
-                                          bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace,
-                                          bitmapInfo: bgra | CGImageAlphaInfo.premultipliedFirst.rawValue)
-            else { throw CocoaError(.fileWriteUnknown) }
-            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-            for index in stride(from: 0, to: bytes.count, by: 4) {
-                let alpha = Int(bytes[index + 3])
-                if alpha == 0 || alpha == 255 { continue }
-                for channel in index..<(index + 3) {
-                    bytes[channel] = UInt8(min(255, (Int(bytes[channel]) * 255 + alpha / 2) / alpha))
-                }
-            }
-        }
-        return pixels
     }
 }

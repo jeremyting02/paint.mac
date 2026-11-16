@@ -112,6 +112,11 @@ struct PDNRecords {
         return fields
     }
 
+    func className(_ value: Value?) throws -> String {
+        guard case let .reference(id) = value, case let .fields(name, _) = objects[id] else { throw PDNError.invalid }
+        return name
+    }
+
     func array(_ value: Value?) throws -> [Value] {
         guard case let .reference(id) = value, case let .array(items) = objects[id] else { throw PDNError.invalid }
         return items

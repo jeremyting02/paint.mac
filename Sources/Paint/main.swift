@@ -34,6 +34,11 @@ let layerMenu = NSMenu(title: "Layer")
 for command in PaintDocument.LayerCommand.allCases {
     let item = layerMenu.addItem(withTitle: command.title, action: #selector(PaintDocument.layerCommand(_:)), keyEquivalent: "")
     item.tag = command.rawValue
+    if command == .properties {
+        layerMenu.insertItem(.separator(), at: layerMenu.numberOfItems - 1)
+        item.keyEquivalent = String(UnicodeScalar(Int(NSF4FunctionKey))!)
+        item.keyEquivalentModifierMask = []
+    }
 }
 layerItem.submenu = layerMenu
 

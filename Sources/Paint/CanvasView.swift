@@ -11,6 +11,13 @@ final class CanvasView: NSView {
     var brushColor = NSColor.black
     var brushSize: CGFloat = 12
     var selectionDidChange: (() -> Void)?
+    var layerPreview: LayerStack? {
+        didSet {
+            composite = nil
+            needsDisplay = true
+        }
+    }
+    private var composite: CGImage?
 
     private(set) var selection = CGRect.zero {
         didSet {
@@ -85,7 +92,10 @@ final class CanvasView: NSView {
         if selection != .zero { selection = .zero }
     }
 
-    func cancelStroke() { stroke = nil }
+    func cancelStroke() {
+        stroke = nil
+        composite = nil
+    }
 
     var cropRect: CGRect? {
         guard let image = document?.image, !selection.isEmpty,
@@ -183,7 +193,7 @@ final class CanvasView: NSView {
         let rect = imageRect
         let visible = rect.intersection(dirtyRect)
         guard !visible.isEmpty, let context = NSGraphicsContext.current?.cgContext,
-              let stack = document?.stack else { return }
+              let stack = layerPreview ?? document?.stack else { return }
 
         context.saveGState()
         context.clip(to: rect)
@@ -200,7 +210,17 @@ final class CanvasView: NSView {
             }
         }
         if !fitsToWindow { context.interpolationQuality = .none }
-        stack.draw(in: context, rect: rect, preview: stroke?.bitmap.makeImage())
+        let strokeImage = stroke?.bitmap.makeImage()
+        if stack.needsBlendComposite {
+            if let strokeImage {
+                if let image = stack.blendComposite(preview: strokeImage) { context.draw(image, in: rect) }
+            } else {
+                if composite == nil { composite = stack.blendComposite() }
+                if let composite { context.draw(composite, in: rect) }
+            }
+        } else {
+            stack.draw(in: context, rect: rect, preview: strokeImage)
+        }
         if !selection.isEmpty {
             let scale = rect.width / CGFloat(stack.activeLayer.image.width)
             let marquee = CGRect(x: rect.minX + selection.minX * scale, y: rect.minY + selection.minY * scale,

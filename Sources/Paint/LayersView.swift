@@ -7,6 +7,7 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
     private let up = EditorView.icon("arrow.up", label: "Move Layer Up")
     private let down = EditorView.icon("arrow.down", label: "Move Layer Down")
     private let delete = EditorView.icon("trash", label: "Delete Layer")
+    private let properties = EditorView.icon("wrench", label: "Layer Properties")
     private var refreshing = false
 
     init(document: PaintDocument) {
@@ -25,6 +26,8 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
         table.setAccessibilityLabel("Layer Stack")
         table.dataSource = self
         table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(openClickedLayer(_:))
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
@@ -35,16 +38,17 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
         scroll.heightAnchor.constraint(equalToConstant: 102).isActive = true
         scroll.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
 
-        let buttons = NSStackView(views: [add, up, down, delete])
+        let buttons = NSStackView(views: [add, up, down, delete, properties])
         buttons.spacing = 3
         addArrangedSubview(buttons)
-        for button in [add, up, down, delete] { button.target = self }
+        for button in [add, up, down, delete, properties] { button.target = self }
         add.action = #selector(addLayer(_:))
         up.action = #selector(moveLayer(_:))
         down.action = #selector(moveLayer(_:))
         up.tag = 1
         down.tag = -1
         delete.action = #selector(deleteLayer(_:))
+        properties.action = #selector(openProperties(_:))
     }
 
     required init?(coder: NSCoder) { nil }
@@ -93,6 +97,12 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
 
     @objc private func addLayer(_ sender: NSButton) { document?.addLayer() }
     @objc private func deleteLayer(_ sender: NSButton) { document?.deleteLayer() }
+    @objc private func openProperties(_ sender: NSButton) { document?.showLayerProperties() }
+    @objc private func openClickedLayer(_ sender: NSTableView) {
+        guard sender.clickedRow >= 0, let document, let stack = document.stack else { return }
+        document.selectLayer(stack.layers.count - 1 - sender.clickedRow)
+        document.showLayerProperties()
+    }
     @objc private func moveLayer(_ sender: NSButton) { document?.moveLayer(by: sender.tag) }
     @objc private func toggleLayer(_ sender: NSButton) {
         document?.setLayerVisibility(sender.state == .on, at: sender.tag)
