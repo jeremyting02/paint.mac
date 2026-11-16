@@ -4,6 +4,9 @@ Date: 6 November 2026
 
 Status: Agreed product and architecture direction; implementation has not started
 
+Start with the [MVP delivery plan](MVP_PLAN.md). This document describes the
+longer-term parity target.
+
 Build a native Mac raster editor with broad Paint.NET feature parity. Use Swift,
 AppKit, selected SwiftUI panels, and a Metal rendering backend. Keep the editing
 core separate from platform services so future ports can reuse editing behavior.
