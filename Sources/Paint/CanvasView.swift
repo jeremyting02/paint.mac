@@ -3,38 +3,42 @@ import AppKit
 final class CanvasView: NSView {
     enum Tool { case brush, eraser, rectangleSelect, moveSelectedPixels }
 
-    private struct MoveDrag {
-        let pixels: SelectedPixelsTransform
-        let anchor: CGPoint
-        let handle: TransformHandle?
-        var destination: CGRect
+    private struct MoveGeometry: Equatable {
+        var rect: CGRect
+        var pivot: CGPoint
         var angle: CGFloat = 0
-        var preview: PaintLayer?
+        var flipX = false
+        var flipY = false
+    }
 
-        var actionName: String {
-            switch handle {
-            case .rotate: return "Rotate Selected Pixels"
-            case .resize: return "Resize Selected Pixels"
-            case nil: return "Move Selected Pixels"
-            }
-        }
+    private struct MoveSession {
+        let pixels: SelectedPixelsTransform
+        let source: CGRect
+        var geometry: MoveGeometry
+        var copy = false
+        var preview: PaintLayer?
+        var actionName = "Move Selected Pixels"
+    }
+
+    private struct MoveDrag {
+        let geometry: MoveGeometry
+        let anchor: CGPoint
+        let handle: TransformHandle
+        let rightButton: Bool
+        var lastPoint: CGPoint
     }
 
     private enum TransformHandle {
+        case move
         case resize(ResizeHandle)
         case rotate
+        case pivot
     }
 
     private enum HandleEdge: CGFloat, CaseIterable {
         case minimum = 0, middle = 0.5, maximum = 1
 
-        func resized(_ range: ClosedRange<CGFloat>, by offset: CGFloat) -> ClosedRange<CGFloat> {
-            switch self {
-            case .minimum: return min(range.lowerBound + offset, range.upperBound - 1)...range.upperBound
-            case .middle: return range
-            case .maximum: return range.lowerBound...max(range.upperBound + offset, range.lowerBound + 1)
-            }
-        }
+        var direction: CGFloat { rawValue * 2 - 1 }
     }
 
     private struct ResizeHandle {
@@ -47,11 +51,31 @@ final class CanvasView: NSView {
             }
         }
 
-        func resized(_ rect: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
-            let x = horizontal.resized(rect.minX...rect.maxX, by: dx)
-            let y = vertical.resized(rect.minY...rect.maxY, by: dy)
-            return CGRect(x: x.lowerBound, y: y.lowerBound,
-                          width: x.upperBound - x.lowerBound, height: y.upperBound - y.lowerBound)
+        func resized(_ geometry: MoveGeometry, delta: CGPoint, proportional: Bool, centered: Bool) -> MoveGeometry {
+            let rect = geometry.rect
+            let local = delta.rotated(by: -geometry.angle)
+            let x = horizontal.direction, y = vertical.direction
+            let multiplier: CGFloat = centered ? 2 : 1
+            var width = rect.width + (x * local.x * multiplier).rounded()
+            var height = rect.height + (y * local.y * multiplier).rounded()
+            if proportional {
+                let sx = width / rect.width, sy = height / rect.height
+                let dominant = abs(sx - 1) >= abs(sy - 1) ? sx : sy
+                let scale = max(abs(dominant), 1 / min(rect.width, rect.height))
+                width = rect.width * scale * (width < 0 ? -1 : 1)
+                height = rect.height * scale * (height < 0 ? -1 : 1)
+            }
+            if abs(width) < 1 { width = 1 }
+            if abs(height) < 1 { height = 1 }
+
+            let shift = CGPoint(x: x * (width - rect.width) / 2, y: y * (height - rect.height) / 2)
+            let center = centered ? rect.center : rect.center + shift.rotated(by: geometry.angle)
+            let pivot = (geometry.pivot - rect.center).rotated(by: -geometry.angle)
+            let scaledPivot = CGPoint(x: pivot.x * width / rect.width, y: pivot.y * height / rect.height)
+            return MoveGeometry(rect: CGRect(x: center.x - abs(width) / 2, y: center.y - abs(height) / 2,
+                                             width: abs(width), height: abs(height)),
+                                pivot: center + scaledPivot.rotated(by: geometry.angle), angle: geometry.angle,
+                                flipX: geometry.flipX != (width < 0), flipY: geometry.flipY != (height < 0))
         }
 
         func frame(in marquee: CGRect) -> CGRect {
@@ -68,11 +92,21 @@ final class CanvasView: NSView {
         600, 800, 1000, 1200, 1400, 1600, 2000, 2400, 2800, 3200, 4000, 4800, 5600, 6400,
         8000, 10000
     ]
-    private static let rotationIcon = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Rotate Selected Pixels")
+    private static let rotationCursor: NSCursor = {
+        guard let image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Rotate Selected Pixels") else {
+            return .crosshair
+        }
+        return NSCursor(image: image, hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2))
+    }()
 
     private weak var document: PaintDocument?
     var tool = Tool.brush {
-        didSet { if tool != oldValue { cancelMove() } }
+        willSet { if newValue != tool { finishMove() } }
+        didSet {
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+            selectionDidChange?()
+        }
     }
     private(set) var zoomPercent: CGFloat?
     private(set) var displayedZoomPercent: CGFloat = 0
@@ -80,6 +114,7 @@ final class CanvasView: NSView {
     var brushColor = NSColor.black
     var brushSize: CGFloat = 12
     var selectionDidChange: (() -> Void)?
+    var selectMoveTool: (() -> Void)?
     var layerPreview: LayerStack? {
         didSet {
             cancelMove()
@@ -98,7 +133,9 @@ final class CanvasView: NSView {
     private var selectionAnchor: CGPoint?
 
     private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String, imageSelection: CGRect?)?
-    private var move: MoveDrag?
+    private var move: MoveSession?
+    private var moveDrag: MoveDrag?
+    private var cursorTracking: NSTrackingArea?
     private var panLocation: CGPoint?
     private var zoomScrollDistance: CGFloat = 0
     private var zoomingScrollGesture = false
@@ -184,7 +221,7 @@ final class CanvasView: NSView {
     }
 
     @objc private func windowDidResignKey(_ notification: Notification) {
-        cancelMove()
+        moveDrag = nil
         guard panLocation != nil else { return }
         panLocation = nil
         window?.invalidateCursorRects(for: self)
@@ -200,8 +237,42 @@ final class CanvasView: NSView {
     override func resetCursorRects() {
         if panLocation != nil {
             addCursorRect(visibleRect, cursor: .closedHand)
-        } else if !imageRect.isEmpty {
+        } else if tool != .moveSelectedPixels && !imageRect.isEmpty {
             addCursorRect(imageRect, cursor: .crosshair)
+        }
+    }
+
+    override func updateTrackingAreas() {
+        if let cursorTracking { removeTrackingArea(cursorTracking) }
+        let tracking = NSTrackingArea(rect: .zero, options: [.inVisibleRect, .activeInKeyWindow, .cursorUpdate, .mouseMoved],
+                                      owner: self, userInfo: nil)
+        addTrackingArea(tracking)
+        cursorTracking = tracking
+        super.updateTrackingAreas()
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if tool == .moveSelectedPixels { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
+        else { super.cursorUpdate(with: event) }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if tool == .moveSelectedPixels { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
+        else { super.mouseMoved(with: event) }
+    }
+
+    private func updateMoveCursor(at location: CGPoint) {
+        guard let layer = document?.stack?.activeLayer, layer.isVisible, !imageRect.isEmpty else {
+            NSCursor.arrow.set()
+            return
+        }
+        if panLocation != nil {
+            NSCursor.closedHand.set()
+            return
+        }
+        switch moveDrag?.handle ?? transformHandle(at: location, image: layer.image) {
+        case .rotate: Self.rotationCursor.set()
+        case .move, .resize, .pivot: (moveDrag == nil ? NSCursor.openHand : .closedHand).set()
         }
     }
 
@@ -221,7 +292,7 @@ final class CanvasView: NSView {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, move == nil, panLocation == nil,
+        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, moveDrag == nil, panLocation == nil,
               let scrollView = enclosingScrollView else { return }
 
         let steps: Int
@@ -258,7 +329,7 @@ final class CanvasView: NSView {
             super.otherMouseDown(with: event)
             return
         }
-        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, move == nil else { return }
+        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, moveDrag == nil else { return }
         panLocation = event.locationInWindow
         NSCursor.closedHand.set()
         window?.invalidateCursorRects(for: self)
@@ -287,7 +358,9 @@ final class CanvasView: NSView {
         otherMouseDragged(with: event)
         panLocation = nil
         let location = convert(event.locationInWindow, from: nil)
-        if visibleRect.contains(location) && imageRect.contains(location) {
+        if tool == .moveSelectedPixels && visibleRect.contains(location) {
+            updateMoveCursor(at: location)
+        } else if visibleRect.contains(location) && imageRect.contains(location) {
             NSCursor.crosshair.set()
         } else {
             NSCursor.arrow.set()
@@ -324,12 +397,29 @@ final class CanvasView: NSView {
         composite = nil
     }
 
-    private func cancelMove() {
-        guard move != nil else { return }
+    var hasPendingMove: Bool { move?.preview != nil }
+    var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
+
+    @discardableResult
+    func cancelMove() -> Bool {
+        let hadPreview = hasPendingMove
+        moveDrag = nil
+        guard move != nil else { return false }
         move = nil
         composite = nil
         needsDisplay = true
         selectionDidChange?()
+        return hadPreview
+    }
+
+    func finishMove() {
+        guard let session = move else { return }
+        cancelMove()
+        guard let preview = session.preview else { return }
+        let bounds = CGRect(x: 0, y: 0, width: preview.image.width, height: preview.image.height)
+        let target = SelectedPixelsTransform.rotatedBounds(of: session.geometry.rect, by: session.geometry.angle)
+        let destination = selection.isEmpty ? .zero : target.intersection(bounds)
+        document?.commitSelectedPixelsTransform(preview, from: selection, to: destination, actionName: session.actionName)
     }
 
     var imageSelection: CGRect? {
@@ -348,41 +438,200 @@ final class CanvasView: NSView {
                       width: selection.width * scale, height: selection.height * scale)
     }
 
-    private func rotationHandleFrame(above marquee: CGRect) -> CGRect {
-        let topHandleY = marquee.midY + max(marquee.height / 2, 14)
-        return CGRect(x: marquee.midX - 8, y: topHandleY + 12, width: 16, height: 16)
+    private func moveGeometry(for image: CGImage) -> MoveGeometry {
+        if let move { return move.geometry }
+        let rect = selection.isEmpty ? CGRect(x: 0, y: 0, width: image.width, height: image.height) : selection
+        return MoveGeometry(rect: rect, pivot: rect.center)
     }
 
-    private func transformHandle(at location: CGPoint, imageWidth: Int) -> TransformHandle? {
-        guard tool == .moveSelectedPixels, !selection.isEmpty else { return nil }
-        let marquee = marquee(for: selection, imageWidth: imageWidth)
-        if rotationHandleFrame(above: marquee).contains(location) { return .rotate }
-        return ResizeHandle.all.first { $0.frame(in: marquee).contains(location) }.map(TransformHandle.resize)
+    private func transformHandle(at location: CGPoint, image: CGImage) -> TransformHandle {
+        let geometry = moveGeometry(for: image)
+        let frame = marquee(for: geometry.rect, imageWidth: image.width)
+        let pivot = marquee(for: CGRect(origin: geometry.pivot, size: .zero), imageWidth: image.width).origin
+        let radius = min(6, max(1, min(frame.width, frame.height) / 5))
+        let pivotTarget = CGRect(x: pivot.x - radius, y: pivot.y - radius, width: 2 * radius, height: 2 * radius)
+        if pivotTarget.contains(location) { return .pivot }
+        let local = frame.center + (location - frame.center).rotated(by: -geometry.angle)
+        if let handle = ResizeHandle.all.first(where: { $0.frame(in: frame).insetBy(dx: -2, dy: -2).contains(local) }) {
+            return .resize(handle)
+        }
+        let rotationMargin: CGFloat = 48
+        if !frame.contains(local) && frame.insetBy(dx: -rotationMargin, dy: -rotationMargin).contains(local) {
+            return .rotate
+        }
+        return .move
     }
 
     var cropRect: CGRect? {
-        guard move == nil, let image = document?.image, let imageSelection,
+        guard !hasPendingMove, let image = document?.image, let imageSelection,
               imageSelection.size != CGSize(width: image.width, height: image.height) else { return nil }
         return imageSelection
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 && event.isARepeat { return }
-        if event.keyCode == 53 && move != nil {
-            cancelMove()
-        } else if event.keyCode == 53 && (!selection.isEmpty || selectionAnchor != nil) {
+        let isEscape = event.keyCode == 53
+        let isReturn = event.keyCode == 36 || event.keyCode == 76
+        let finishesMove = tool == .moveSelectedPixels && (isEscape || isReturn)
+        if event.isARepeat && (isEscape || finishesMove) { return }
+        if event.charactersIgnoringModifiers == "m", event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+           let selectMoveTool {
+            selectMoveTool()
+        } else if finishesMove {
+            if move != nil { finishMove() } else { clearSelection() }
+        } else if isEscape && (!selection.isEmpty || selectionAnchor != nil) {
             clearSelection()
+        } else if tool == .moveSelectedPixels, let delta = nudge(for: event), moveDrag == nil,
+                  let layer = document?.stack?.activeLayer, beginMove(on: layer) {
+            let geometry = moveGeometry(for: layer.image)
+            updateMove(with: translated(geometry, by: delta), actionName: "Move Selected Pixels",
+                       copy: false, imageHeight: layer.image.height)
         } else {
             super.keyDown(with: event)
         }
     }
 
+    private func nudge(for event: NSEvent) -> CGPoint? {
+        let step: CGFloat = event.modifierFlags.contains(.control) ? 10 : 1
+        switch event.keyCode {
+        case 123: return CGPoint(x: -step, y: 0)
+        case 124: return CGPoint(x: step, y: 0)
+        case 125: return CGPoint(x: 0, y: -step)
+        case 126: return CGPoint(x: 0, y: step)
+        default: return nil
+        }
+    }
+
+    private func beginMove(on layer: PaintLayer) -> Bool {
+        guard layer.isVisible, !imageRect.isEmpty, layerPreview == nil else { return false }
+        if move != nil { return true }
+        let geometry = moveGeometry(for: layer.image)
+        let source = topLeftRect(geometry.rect, imageHeight: layer.image.height)
+        guard let pixels = SelectedPixelsTransform(layer: layer, selection: source) else { return false }
+        move = MoveSession(pixels: pixels, source: geometry.rect, geometry: geometry)
+        return true
+    }
+
+    private func beginMoveDrag(with event: NSEvent, rightButton: Bool) {
+        guard panLocation == nil, moveDrag == nil, let layer = document?.stack?.activeLayer,
+              beginMove(on: layer) else { return }
+        window?.makeFirstResponder(self)
+        let location = convert(event.locationInWindow, from: nil)
+        let handle = rightButton ? .rotate : transformHandle(at: location, image: layer.image)
+        let point = imagePoint(location)
+        moveDrag = MoveDrag(geometry: moveGeometry(for: layer.image), anchor: point, handle: handle,
+                            rightButton: rightButton, lastPoint: point)
+        updateMoveCursor(at: location)
+    }
+
+    private func translated(_ geometry: MoveGeometry, by delta: CGPoint) -> MoveGeometry {
+        var next = geometry
+        next.rect = next.rect.offsetBy(dx: delta.x, dy: delta.y)
+        next.pivot = next.pivot + delta
+        return next
+    }
+
+    private func updateMoveDrag(with event: NSEvent, rightButton: Bool) {
+        guard let drag = moveDrag, drag.rightButton == rightButton else { return }
+        let point = imagePoint(convert(event.locationInWindow, from: nil))
+        moveDrag?.lastPoint = point
+        updateMoveDrag(at: point, modifiers: event.modifierFlags)
+    }
+
+    private func updateMoveDrag(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
+        guard let drag = moveDrag, let image = document?.image else { return }
+        let delta = point - drag.anchor
+        var geometry = drag.geometry
+        let actionName: String
+        switch drag.handle {
+        case .pivot:
+            move?.geometry.pivot = geometry.pivot + delta
+            needsDisplay = true
+            return
+        case .move:
+            geometry = translated(geometry, by: CGPoint(x: delta.x.rounded(), y: delta.y.rounded()))
+            actionName = "Move Selected Pixels"
+        case .resize(let handle):
+            geometry = handle.resized(geometry, delta: delta, proportional: modifiers.contains(.shift),
+                                      centered: modifiers.contains(.option))
+            actionName = "Resize Selected Pixels"
+        case .rotate:
+            let from = drag.anchor - geometry.pivot, to = point - geometry.pivot
+            guard from != .zero, to != .zero else { return }
+            let change = atan2(from.x * to.y - from.y * to.x, from.x * to.x + from.y * to.y)
+            let step = CGFloat.pi / 12
+            let angle = geometry.angle + change
+            let snapped = modifiers.contains(.shift) ? (angle / step).rounded() * step : angle
+            let rotation = snapped - geometry.angle
+            let center = geometry.pivot + (geometry.rect.center - geometry.pivot).rotated(by: rotation)
+            geometry.rect.origin = CGPoint(x: center.x - geometry.rect.width / 2, y: center.y - geometry.rect.height / 2)
+            geometry.angle = snapped.remainder(dividingBy: 2 * .pi)
+            actionName = "Rotate Selected Pixels"
+        }
+        let copy = !modifiers.intersection([.control, .command]).isEmpty
+        updateMove(with: geometry, actionName: actionName, copy: copy, imageHeight: image.height)
+    }
+
+    private func updateMove(with geometry: MoveGeometry, actionName: String, copy: Bool, imageHeight: Int) {
+        guard var session = move else { return }
+        let keepSource = session.copy || copy
+        guard session.geometry != geometry || session.copy != keepSource else { return }
+        let transformed = geometry.rect != session.source || geometry.angle != 0 || geometry.flipX || geometry.flipY
+        if transformed {
+            let destination = topLeftRect(geometry.rect, imageHeight: imageHeight)
+            guard let preview = session.pixels.transformed(to: destination, rotation: geometry.angle,
+                                                           flipX: geometry.flipX, flipY: geometry.flipY,
+                                                           copy: keepSource) else { return }
+            session.preview = preview
+        } else {
+            session.preview = nil
+        }
+        session.geometry = geometry
+        session.copy = keepSource
+        session.actionName = actionName
+        move = session
+        composite = nil
+        needsDisplay = true
+        selectionDidChange?()
+    }
+
+    private func endMoveDrag(with event: NSEvent, rightButton: Bool) {
+        guard moveDrag?.rightButton == rightButton else { return }
+        updateMoveDrag(with: event, rightButton: rightButton)
+        moveDrag = nil
+        if let session = move, session.preview == nil, session.geometry.pivot == session.source.center {
+            cancelMove()
+        }
+        updateMoveCursor(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if tool == .moveSelectedPixels { beginMoveDrag(with: event, rightButton: true) }
+        else { super.rightMouseDown(with: event) }
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        if tool == .moveSelectedPixels { updateMoveDrag(with: event, rightButton: true) }
+        else { super.rightMouseDragged(with: event) }
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        if tool == .moveSelectedPixels { endMoveDrag(with: event, rightButton: true) }
+        else { super.rightMouseUp(with: event) }
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        if let point = moveDrag?.lastPoint { updateMoveDrag(at: point, modifiers: event.modifierFlags) }
+        super.flagsChanged(with: event)
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard panLocation == nil else { return }
+        if tool == .moveSelectedPixels {
+            beginMoveDrag(with: event, rightButton: false)
+            return
+        }
         let location = convert(event.locationInWindow, from: nil)
-        guard let image = document?.image else { return }
-        let handle = transformHandle(at: location, imageWidth: image.width)
-        guard imageRect.contains(location) || handle != nil else {
+        guard imageRect.contains(location), let image = document?.image else {
             if tool == .rectangleSelect { clearSelection() }
             return
         }
@@ -393,17 +642,8 @@ final class CanvasView: NSView {
             selection = .zero
             return
         }
-
-        guard let layer = document?.stack?.activeLayer, layer.isVisible else {
+        guard document?.stack?.activeLayer.isVisible == true else {
             NSSound.beep()
-            return
-        }
-        if tool == .moveSelectedPixels {
-            let point = imagePoint(location)
-            guard handle != nil || selection.contains(point), let imageSelection,
-                  let pixels = SelectedPixelsTransform(layer: layer, selection: imageSelection) else { return }
-            move = MoveDrag(pixels: pixels, anchor: point, handle: handle, destination: selection)
-            selectionDidChange?()
             return
         }
         guard let bitmap = LayerStack.makeBitmap(width: image.width, height: image.height) else { return }
@@ -434,35 +674,8 @@ final class CanvasView: NSView {
                                width: abs(start.x - end.x), height: abs(start.y - end.y))
             return
         }
-        if var drag = move, let image = document?.image {
-            let point = imagePoint(location)
-            if case .rotate = drag.handle {
-                let from = CGPoint(x: drag.anchor.x - selection.midX, y: drag.anchor.y - selection.midY)
-                let to = CGPoint(x: point.x - selection.midX, y: point.y - selection.midY)
-                guard to != .zero else { return }
-                let angle = atan2(from.x * to.y - from.y * to.x, from.x * to.x + from.y * to.y)
-                guard angle != drag.angle else { return }
-                drag.angle = angle
-            } else {
-                let width = CGFloat(image.width), height = CGFloat(image.height)
-                let dx = max(-width, min(width, (point.x - drag.anchor.x).rounded()))
-                let dy = max(-height, min(height, (point.y - drag.anchor.y).rounded()))
-                let destination = if case .resize(let handle) = drag.handle {
-                    handle.resized(selection, dx: dx, dy: dy)
-                } else {
-                    selection.offsetBy(dx: dx, dy: dy)
-                }
-                guard destination != drag.destination else { return }
-                drag.destination = destination
-            }
-            drag.preview = nil
-            if drag.destination != selection || drag.angle != 0 {
-                let destination = topLeftRect(drag.destination, imageHeight: image.height)
-                drag.preview = drag.pixels.transformed(to: destination, rotation: drag.angle)
-            }
-            move = drag
-            composite = nil
-            needsDisplay = true
+        if moveDrag != nil {
+            updateMoveDrag(with: event, rightButton: false)
             return
         }
         guard let current = stroke else { return }
@@ -476,18 +689,12 @@ final class CanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        mouseDragged(with: event)
-        selectionAnchor = nil
-        if let drag = move {
-            cancelMove()
-            if let preview = drag.preview {
-                let bounds = CGRect(x: 0, y: 0, width: preview.image.width, height: preview.image.height)
-                let destination = SelectedPixelsTransform.rotatedBounds(of: drag.destination, by: drag.angle)
-                document?.commitSelectedPixelsTransform(preview, from: selection, to: destination.intersection(bounds),
-                                                        actionName: drag.actionName)
-            }
+        if moveDrag != nil {
+            endMoveDrag(with: event, rightButton: false)
             return
         }
+        mouseDragged(with: event)
+        selectionAnchor = nil
         guard let current = stroke else { return }
         stroke = nil
         if let image = current.bitmap.makeImage() {
@@ -506,11 +713,14 @@ final class CanvasView: NSView {
         guard let context = NSGraphicsContext.current?.cgContext,
               var stack = layerPreview ?? document?.stack else { return }
         if let preview = move?.preview { stack.layers[stack.active] = preview }
-        let marquee = marquee(for: move?.destination ?? selection, imageWidth: stack.activeLayer.image.width)
-        let angle = move?.angle ?? 0
+        let image = stack.activeLayer.image
+        let showsHandles = tool == .moveSelectedPixels && stack.activeLayer.isVisible
+        let geometry = moveGeometry(for: image)
+        let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
-            if tool == .moveSelectedPixels && !marquee.isEmpty && stack.activeLayer.isVisible {
-                drawTransformHandles(around: marquee, angle: angle, in: context)
+            if showsHandles && !marquee.isEmpty {
+                let pivot = self.marquee(for: CGRect(origin: geometry.pivot, size: .zero), imageWidth: image.width).origin
+                drawTransformHandles(around: marquee, angle: geometry.angle, pivot: pivot, in: context)
             }
         }
         guard !visible.isEmpty else { return }
@@ -543,18 +753,23 @@ final class CanvasView: NSView {
         } else {
             stack.draw(in: context, rect: rect, preview: strokeImage)
         }
+        context.restoreGState()
         if !marquee.isEmpty {
-            rotateDrawing(around: marquee, by: angle, in: context)
-            context.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor)
-            context.fill(marquee)
+            context.saveGState()
+            rotateDrawing(around: marquee, by: geometry.angle, in: context)
+            if !showsHandles {
+                context.clip(to: rect)
+                context.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor)
+                context.fill(marquee)
+            }
             context.setStrokeColor(NSColor.white.cgColor)
             context.setLineWidth(1)
             context.stroke(marquee)
             context.setStrokeColor(NSColor.black.cgColor)
             context.setLineDash(phase: 0, lengths: [4, 3])
             context.stroke(marquee)
+            context.restoreGState()
         }
-        context.restoreGState()
     }
 
     private func rotateDrawing(around marquee: CGRect, by angle: CGFloat, in context: CGContext) {
@@ -564,9 +779,8 @@ final class CanvasView: NSView {
         context.translateBy(x: -marquee.midX, y: -marquee.midY)
     }
 
-    private func drawTransformHandles(around marquee: CGRect, angle: CGFloat, in context: CGContext) {
+    private func drawTransformHandles(around marquee: CGRect, angle: CGFloat, pivot: CGPoint, in context: CGContext) {
         context.saveGState()
-        context.clip(to: imageRect.insetBy(dx: -46, dy: -46))
         rotateDrawing(around: marquee, by: angle, in: context)
         context.setFillColor(NSColor.white.cgColor)
         context.setStrokeColor(NSColor.black.cgColor)
@@ -576,15 +790,37 @@ final class CanvasView: NSView {
             context.fill(frame)
             context.stroke(frame)
         }
-        let rotationFrame = rotationHandleFrame(above: marquee)
-        context.move(to: CGPoint(x: rotationFrame.midX, y: rotationFrame.minY - 8))
-        context.addLine(to: CGPoint(x: rotationFrame.midX, y: rotationFrame.minY))
-        context.strokePath()
+        context.restoreGState()
+        context.saveGState()
+        let pivotFrame = CGRect(x: pivot.x - 5, y: pivot.y - 5, width: 10, height: 10)
         context.setFillColor(NSColor.windowBackgroundColor.cgColor)
         context.setStrokeColor(NSColor.labelColor.cgColor)
-        context.fillEllipse(in: rotationFrame)
-        context.strokeEllipse(in: rotationFrame)
-        Self.rotationIcon?.draw(in: rotationFrame.insetBy(dx: 3, dy: 3))
+        context.setLineWidth(1)
+        context.fillEllipse(in: pivotFrame)
+        context.strokeEllipse(in: pivotFrame)
+        context.move(to: CGPoint(x: pivot.x - 3, y: pivot.y))
+        context.addLine(to: CGPoint(x: pivot.x + 3, y: pivot.y))
+        context.move(to: CGPoint(x: pivot.x, y: pivot.y - 3))
+        context.addLine(to: CGPoint(x: pivot.x, y: pivot.y + 3))
+        context.strokePath()
         context.restoreGState()
+    }
+}
+
+private extension CGRect {
+    var center: CGPoint { CGPoint(x: midX, y: midY) }
+}
+
+private extension CGPoint {
+    static func + (lhs: CGPoint, rhs: CGPoint) -> CGPoint {
+        CGPoint(x: lhs.x + rhs.x, y: lhs.y + rhs.y)
+    }
+
+    static func - (lhs: CGPoint, rhs: CGPoint) -> CGPoint {
+        CGPoint(x: lhs.x - rhs.x, y: lhs.y - rhs.y)
+    }
+
+    func rotated(by angle: CGFloat) -> CGPoint {
+        applying(CGAffineTransform(rotationAngle: angle))
     }
 }

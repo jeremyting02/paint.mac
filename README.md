@@ -24,13 +24,23 @@ area. Press **Escape** to deselect. The status bar shows the selection size and
 its top-left pixel. To crop, choose **Image → Crop to Selection**
 (Shift-Command-X) or click the crop button above the canvas.
 
-Choose **Move Selected Pixels** in **Tools**, then drag from inside the
-selection to move pixels on the active layer. Drag a corner or edge handle to
-resize, or drag the round handle above the selection to rotate around its center.
-The canvas previews the change as you drag. Release to commit, or press
-**Escape** during the drag to cancel. After rotation, the selection becomes a
-rectangle around the rotated area. One undo restores the original pixels and
-selection. Pixels past the canvas edge are clipped on commit.
+Choose **Move Selected Pixels** in **Tools** or press **M**. The tool acts on the
+selection or, if there is none, the entire active layer. Drag where the pointer
+shows a hand to move. Drag just outside the outline or use a right-button drag
+to rotate. Drag the crosshair in the circle to reposition the rotation pivot.
+Hold **Shift** while rotating to snap to 15° steps.
+
+Drag a corner or edge handle to resize. Hold **Shift** to preserve proportions,
+**Option** to resize about the center, or both to combine them. Drag a handle
+past its opposite edge to flip. **Command**-drag to keep the original pixels
+and transform a copy. Use the arrow keys to nudge one pixel, or hold **Control**
+to nudge ten.
+
+The preview stays editable between drags. Press **Return** or **Escape**, or
+click **Finish**, to commit the transforms as one undo step. Use **Undo** to
+discard the preview. After rotation, the committed selection is a rectangle
+around the rotated area.
+Pixels past the canvas edge are clipped on commit.
 
 **Fit** shows the whole image, and **100%** shows one image pixel per display
 pixel. Hold **Command** and scroll

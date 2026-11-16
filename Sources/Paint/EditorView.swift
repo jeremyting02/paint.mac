@@ -13,6 +13,7 @@ final class EditorView: NSView {
     private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
     private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
     private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
+    private let finishMove = NSButton(title: "Finish", target: nil, action: nil)
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private let color = NSColorWell()
@@ -42,7 +43,14 @@ final class EditorView: NSView {
         updateHistory(document.undoManager)
         applyCrop.target = document
         applyCrop.action = #selector(PaintDocument.cropSelection(_:))
+        finishMove.target = self
+        finishMove.action = #selector(commitMove(_:))
+        finishMove.toolTip = "Finish the current transform (Return or Escape)"
         canvas.selectionDidChange = { [weak self] in self?.updateStatus() }
+        canvas.selectMoveTool = { [weak self] in
+            guard let self else { return }
+            self.selectTool(self.moveSelectedPixels)
+        }
 
         scrollView.documentView = canvas
         scrollView.hasHorizontalScroller = true
@@ -74,7 +82,7 @@ final class EditorView: NSView {
         color.target = self
         color.action = #selector(changeColor(_:))
 
-        let toolbar = NSStackView(views: [undo, redo, NSTextField(labelWithString: "Size"), size, applyCrop])
+        let toolbar = NSStackView(views: [undo, redo, NSTextField(labelWithString: "Size"), size, applyCrop, finishMove])
         toolbar.spacing = 8
         for button in [brush, eraser, rectangleSelect, moveSelectedPixels] { toolButtons.addArrangedSubview(button) }
         toolButtons.distribution = .fillEqually
@@ -168,17 +176,31 @@ final class EditorView: NSView {
 
     private func updateStatus() {
         applyCrop.isEnabled = canvas.cropRect != nil
+        finishMove.isHidden = canvas.tool != .moveSelectedPixels
+        finishMove.isEnabled = canvas.hasPendingMove
+        updateUndoButtons(document?.undoManager)
         let dimensions = document?.image.map { "\($0.width) × \($0.height) px" } ?? ""
-        if let rect = canvas.imageSelection {
+        if let angle = canvas.rotationDegrees, abs(angle) >= 0.05 {
+            status.stringValue = "\(Double(angle).formatted(.number.precision(.fractionLength(0...1))))°  ·  \(dimensions)"
+        } else if let rect = canvas.imageSelection {
             status.stringValue = "\(Int(rect.width)) × \(Int(rect.height)) at \(Int(rect.minX)), \(Int(rect.minY))  ·  \(dimensions)"
         } else {
             status.stringValue = dimensions
         }
     }
 
+    @objc private func commitMove(_ sender: NSButton) {
+        canvas.finishMove()
+        window?.makeFirstResponder(canvas)
+    }
+
+    private func updateUndoButtons(_ history: UndoManager?) {
+        undo.isEnabled = canvas.hasPendingMove || history?.canUndo == true
+        redo.isEnabled = !canvas.hasPendingMove && history?.canRedo == true
+    }
+
     func updateHistory(_ history: UndoManager?) {
-        undo.isEnabled = history?.canUndo == true
-        redo.isEnabled = history?.canRedo == true
+        updateUndoButtons(history)
         guard let document else { return }
         for row in historyRows.arrangedSubviews {
             historyRows.removeArrangedSubview(row)

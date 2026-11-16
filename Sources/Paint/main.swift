@@ -27,6 +27,8 @@ let editMenu = NSMenu(title: "Edit")
 editMenu.addItem(withTitle: "Undo", action: #selector(PaintDocument.undoStroke(_:)), keyEquivalent: "z")
 let redo = editMenu.addItem(withTitle: "Redo", action: #selector(PaintDocument.redoStroke(_:)), keyEquivalent: "z")
 redo.keyEquivalentModifierMask = [.command, .shift]
+editMenu.addItem(.separator())
+editMenu.addItem(withTitle: "Deselect", action: #selector(PaintDocument.deselect(_:)), keyEquivalent: "d")
 editItem.submenu = editMenu
 
 let imageItem = menu.addItem(withTitle: "Image", action: nil, keyEquivalent: "")
