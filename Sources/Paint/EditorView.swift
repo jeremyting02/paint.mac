@@ -12,6 +12,7 @@ final class EditorView: NSView {
     private let eraser = EditorView.icon("eraser", label: "Eraser")
     private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
     private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
+    private let moveSelection = EditorView.icon("rectangle.dashed.and.paperclip", label: "Move Selection")
     private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
     private let finishMove = NSButton(title: "Finish", target: nil, action: nil)
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
@@ -30,7 +31,7 @@ final class EditorView: NSView {
         layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
-        for button in [brush, eraser, rectangleSelect, moveSelectedPixels] {
+        for button in [brush, eraser, rectangleSelect, moveSelectedPixels, moveSelection] {
             button.setButtonType(.pushOnPushOff)
             button.target = self
             button.action = #selector(selectTool(_:))
@@ -47,9 +48,9 @@ final class EditorView: NSView {
         finishMove.action = #selector(commitMove(_:))
         finishMove.toolTip = "Finish the current transform (Return or Escape)"
         canvas.selectionDidChange = { [weak self] in self?.updateStatus() }
-        canvas.selectMoveTool = { [weak self] in
+        canvas.selectTransformTool = { [weak self] tool in
             guard let self else { return }
-            self.selectTool(self.moveSelectedPixels)
+            self.selectTool(tool == .moveSelection ? self.moveSelection : self.moveSelectedPixels)
         }
 
         scrollView.documentView = canvas
@@ -84,7 +85,7 @@ final class EditorView: NSView {
 
         let toolbar = NSStackView(views: [undo, redo, NSTextField(labelWithString: "Size"), size, applyCrop, finishMove])
         toolbar.spacing = 8
-        for button in [brush, eraser, rectangleSelect, moveSelectedPixels] { toolButtons.addArrangedSubview(button) }
+        for button in [brush, eraser, rectangleSelect, moveSelectedPixels, moveSelection] { toolButtons.addArrangedSubview(button) }
         toolButtons.distribution = .fillEqually
         toolButtons.spacing = 1
         let swatches = NSStackView(views: swatchColors.enumerated().map { index, swatch in
@@ -176,7 +177,7 @@ final class EditorView: NSView {
 
     private func updateStatus() {
         applyCrop.isEnabled = canvas.cropRect != nil
-        finishMove.isHidden = canvas.tool != .moveSelectedPixels
+        finishMove.isHidden = !canvas.tool.transformsSelection
         finishMove.isEnabled = canvas.hasPendingMove
         updateUndoButtons(document?.undoManager)
         let dimensions = document?.image.map { "\($0.width) × \($0.height) px" } ?? ""
@@ -225,7 +226,7 @@ final class EditorView: NSView {
     @objc private func selectTool(_ sender: NSButton) {
         let tools: [(NSButton, CanvasView.Tool)] = [
             (brush, .brush), (eraser, .eraser), (rectangleSelect, .rectangleSelect),
-            (moveSelectedPixels, .moveSelectedPixels)
+            (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)
         ]
         for (button, tool) in tools {
             let selected = button === sender

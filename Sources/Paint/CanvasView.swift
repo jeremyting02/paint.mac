@@ -1,7 +1,11 @@
 import AppKit
 
 final class CanvasView: NSView {
-    enum Tool { case brush, eraser, rectangleSelect, moveSelectedPixels }
+    enum Tool {
+        case brush, eraser, rectangleSelect, moveSelectedPixels, moveSelection
+
+        var transformsSelection: Bool { self == .moveSelectedPixels || self == .moveSelection }
+    }
 
     private struct MoveGeometry: Equatable {
         var rect: CGRect
@@ -12,12 +16,24 @@ final class CanvasView: NSView {
     }
 
     private struct MoveSession {
-        let pixels: SelectedPixelsTransform
+        let pixels: SelectedPixelsTransform?
+        let outline: SelectionOutline
         let source: CGRect
         var geometry: MoveGeometry
         var copy = false
         var preview: PaintLayer?
         var actionName = "Move Selected Pixels"
+
+        var changed: Bool { geometry.rect != source || geometry.angle != 0 || geometry.flipX || geometry.flipY }
+
+        var transformedOutline: SelectionOutline? {
+            let transform = CGAffineTransform(translationX: geometry.rect.midX, y: geometry.rect.midY)
+                .rotated(by: geometry.angle)
+                .scaledBy(x: (geometry.flipX ? -1 : 1) * geometry.rect.width / source.width,
+                          y: (geometry.flipY ? -1 : 1) * geometry.rect.height / source.height)
+                .translatedBy(x: -source.midX, y: -source.midY)
+            return outline.transformed(by: transform)
+        }
     }
 
     private struct MoveDrag {
@@ -114,7 +130,7 @@ final class CanvasView: NSView {
     var brushColor = NSColor.black
     var brushSize: CGFloat = 12
     var selectionDidChange: (() -> Void)?
-    var selectMoveTool: (() -> Void)?
+    var selectTransformTool: ((Tool) -> Void)?
     var layerPreview: LayerStack? {
         didSet {
             cancelMove()
@@ -124,12 +140,8 @@ final class CanvasView: NSView {
     }
     private var composite: CGImage?
 
-    private(set) var selection = CGRect.zero {
-        didSet {
-            needsDisplay = true
-            selectionDidChange?()
-        }
-    }
+    private(set) var selectionOutline: SelectionOutline?
+    var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionAnchor: CGPoint?
 
     private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String, imageSelection: CGRect?)?
@@ -237,7 +249,7 @@ final class CanvasView: NSView {
     override func resetCursorRects() {
         if panLocation != nil {
             addCursorRect(visibleRect, cursor: .closedHand)
-        } else if tool != .moveSelectedPixels && !imageRect.isEmpty {
+        } else if !tool.transformsSelection && !imageRect.isEmpty {
             addCursorRect(imageRect, cursor: .crosshair)
         }
     }
@@ -252,17 +264,18 @@ final class CanvasView: NSView {
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if tool == .moveSelectedPixels { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
+        if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
         else { super.cursorUpdate(with: event) }
     }
 
     override func mouseMoved(with event: NSEvent) {
-        if tool == .moveSelectedPixels { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
+        if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
         else { super.mouseMoved(with: event) }
     }
 
     private func updateMoveCursor(at location: CGPoint) {
-        guard let layer = document?.stack?.activeLayer, layer.isVisible, !imageRect.isEmpty else {
+        guard let layer = document?.stack?.activeLayer, !imageRect.isEmpty,
+              tool == .moveSelection ? selectionOutline != nil : layer.isVisible else {
             NSCursor.arrow.set()
             return
         }
@@ -358,7 +371,7 @@ final class CanvasView: NSView {
         otherMouseDragged(with: event)
         panLocation = nil
         let location = convert(event.locationInWindow, from: nil)
-        if tool == .moveSelectedPixels && visibleRect.contains(location) {
+        if tool.transformsSelection && visibleRect.contains(location) {
             updateMoveCursor(at: location)
         } else if visibleRect.contains(location) && imageRect.contains(location) {
             NSCursor.crosshair.set()
@@ -382,12 +395,24 @@ final class CanvasView: NSView {
 
     func clearSelection() {
         selectionAnchor = nil
-        setSelection(.zero)
+        setSelection(nil)
     }
 
-    func setSelection(_ rect: CGRect) {
-        let rect = rect.isEmpty ? .zero : rect
-        if selection != rect { selection = rect }
+    func setSelection(_ outline: SelectionOutline?) {
+        guard selectionOutline != outline else { return }
+        selectionOutline = outline
+        needsDisplay = true
+        selectionDidChange?()
+    }
+
+    private func canvasBounds(for image: CGImage) -> CGRect {
+        CGRect(x: 0, y: 0, width: image.width, height: image.height)
+    }
+
+    var copyableOutline: SelectionOutline? {
+        guard let image = document?.image else { return nil }
+        if let move, move.changed { return move.transformedOutline?.clipped(to: canvasBounds(for: image)) }
+        return selectionOutline
     }
 
     func cancelEditingGesture() {
@@ -397,7 +422,8 @@ final class CanvasView: NSView {
         composite = nil
     }
 
-    var hasPendingMove: Bool { move?.preview != nil }
+    var hasPendingMove: Bool { move?.changed == true }
+    var hasPendingPixelMove: Bool { move?.preview != nil }
     var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
 
     @discardableResult
@@ -412,14 +438,28 @@ final class CanvasView: NSView {
         return hadPreview
     }
 
-    func finishMove() {
-        guard let session = move else { return }
+    func finishMove(pasting outline: SelectionOutline? = nil) {
+        guard let session = move, let image = document?.image else {
+            if let outline { document?.commitSelection(outline, actionName: "Paste Selection") }
+            return
+        }
         cancelMove()
-        guard let preview = session.preview else { return }
-        let bounds = CGRect(x: 0, y: 0, width: preview.image.width, height: preview.image.height)
-        let target = SelectedPixelsTransform.rotatedBounds(of: session.geometry.rect, by: session.geometry.angle)
-        let destination = selection.isEmpty ? .zero : target.intersection(bounds)
-        document?.commitSelectedPixelsTransform(preview, from: selection, to: destination, actionName: session.actionName)
+        if let outline {
+            if let preview = session.preview {
+                document?.commitSelectedPixelsTransform(preview, to: outline, actionName: "Paste Selection")
+            } else {
+                document?.commitSelection(outline, actionName: "Paste Selection")
+            }
+            return
+        }
+        guard session.changed else { return }
+        let destination = session.transformedOutline?.clipped(to: canvasBounds(for: image))
+        if let preview = session.preview {
+            document?.commitSelectedPixelsTransform(preview, to: selectionOutline == nil ? nil : destination,
+                                                    actionName: session.actionName)
+        } else {
+            document?.commitSelection(destination, actionName: session.actionName)
+        }
     }
 
     var imageSelection: CGRect? {
@@ -440,7 +480,8 @@ final class CanvasView: NSView {
 
     private func moveGeometry(for image: CGImage) -> MoveGeometry {
         if let move { return move.geometry }
-        let rect = selection.isEmpty ? CGRect(x: 0, y: 0, width: image.width, height: image.height) : selection
+        let rect = tool == .moveSelection ? selectionOutline?.bounds ?? .zero
+            : (selectionOutline == nil ? canvasBounds(for: image) : selection)
         return MoveGeometry(rect: rect, pivot: rect.center)
     }
 
@@ -464,23 +505,26 @@ final class CanvasView: NSView {
 
     var cropRect: CGRect? {
         guard !hasPendingMove, let image = document?.image, let imageSelection,
-              imageSelection.size != CGSize(width: image.width, height: image.height) else { return nil }
+              selectionOutline?.pixelRectangle == false ||
+                imageSelection.size != CGSize(width: image.width, height: image.height) else { return nil }
         return imageSelection
     }
 
     override func keyDown(with event: NSEvent) {
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76
-        let finishesMove = tool == .moveSelectedPixels && (isEscape || isReturn)
+        let finishesMove = tool.transformsSelection && (isEscape || isReturn)
         if event.isARepeat && (isEscape || finishesMove) { return }
-        if event.charactersIgnoringModifiers == "m", event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
-           let selectMoveTool {
-            selectMoveTool()
+        if !event.isARepeat, event.charactersIgnoringModifiers?.lowercased() == "m",
+           event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+           let selectTransformTool {
+            let outline = event.modifierFlags.contains(.shift) || tool == .moveSelectedPixels
+            selectTransformTool(outline ? .moveSelection : .moveSelectedPixels)
         } else if finishesMove {
             if move != nil { finishMove() } else { clearSelection() }
         } else if isEscape && (!selection.isEmpty || selectionAnchor != nil) {
             clearSelection()
-        } else if tool == .moveSelectedPixels, let delta = nudge(for: event), moveDrag == nil,
+        } else if tool.transformsSelection, let delta = nudge(for: event), moveDrag == nil,
                   let layer = document?.stack?.activeLayer, beginMove(on: layer) {
             let geometry = moveGeometry(for: layer.image)
             updateMove(with: translated(geometry, by: delta), actionName: "Move Selected Pixels",
@@ -502,12 +546,21 @@ final class CanvasView: NSView {
     }
 
     private func beginMove(on layer: PaintLayer) -> Bool {
-        guard layer.isVisible, !imageRect.isEmpty, layerPreview == nil else { return false }
+        guard !imageRect.isEmpty, layerPreview == nil,
+              tool == .moveSelection ? selectionOutline != nil : layer.isVisible else { return false }
         if move != nil { return true }
         let geometry = moveGeometry(for: layer.image)
-        let source = topLeftRect(geometry.rect, imageHeight: layer.image.height)
-        guard let pixels = SelectedPixelsTransform(layer: layer, selection: source) else { return false }
-        move = MoveSession(pixels: pixels, source: geometry.rect, geometry: geometry)
+        guard let outline = selectionOutline ?? SelectionOutline(rect: geometry.rect) else { return false }
+        var pixels: SelectedPixelsTransform?
+        if tool == .moveSelectedPixels {
+            let height = layer.image.height
+            let region = topLeftRect(geometry.rect, imageHeight: height)
+            let mask = outline.pixelRectangle ? nil : outline.mask(in: region, imageHeight: height)
+            guard outline.pixelRectangle || mask != nil,
+                  let transform = SelectedPixelsTransform(layer: layer, selection: region, mask: mask) else { return false }
+            pixels = transform
+        }
+        move = MoveSession(pixels: pixels, outline: outline, source: geometry.rect, geometry: geometry)
         return true
     }
 
@@ -575,19 +628,18 @@ final class CanvasView: NSView {
         guard var session = move else { return }
         let keepSource = session.copy || copy
         guard session.geometry != geometry || session.copy != keepSource else { return }
-        let transformed = geometry.rect != session.source || geometry.angle != 0 || geometry.flipX || geometry.flipY
-        if transformed {
+        session.geometry = geometry
+        if session.changed, let pixels = session.pixels {
             let destination = topLeftRect(geometry.rect, imageHeight: imageHeight)
-            guard let preview = session.pixels.transformed(to: destination, rotation: geometry.angle,
+            guard let preview = pixels.transformed(to: destination, rotation: geometry.angle,
                                                            flipX: geometry.flipX, flipY: geometry.flipY,
                                                            copy: keepSource) else { return }
             session.preview = preview
         } else {
             session.preview = nil
         }
-        session.geometry = geometry
         session.copy = keepSource
-        session.actionName = actionName
+        session.actionName = tool == .moveSelection ? "Transform Selection" : actionName
         move = session
         composite = nil
         needsDisplay = true
@@ -598,24 +650,24 @@ final class CanvasView: NSView {
         guard moveDrag?.rightButton == rightButton else { return }
         updateMoveDrag(with: event, rightButton: rightButton)
         moveDrag = nil
-        if let session = move, session.preview == nil, session.geometry.pivot == session.source.center {
+        if let session = move, !session.changed, session.geometry.pivot == session.source.center {
             cancelMove()
         }
         updateMoveCursor(at: convert(event.locationInWindow, from: nil))
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        if tool == .moveSelectedPixels { beginMoveDrag(with: event, rightButton: true) }
+        if tool.transformsSelection { beginMoveDrag(with: event, rightButton: true) }
         else { super.rightMouseDown(with: event) }
     }
 
     override func rightMouseDragged(with event: NSEvent) {
-        if tool == .moveSelectedPixels { updateMoveDrag(with: event, rightButton: true) }
+        if tool.transformsSelection { updateMoveDrag(with: event, rightButton: true) }
         else { super.rightMouseDragged(with: event) }
     }
 
     override func rightMouseUp(with event: NSEvent) {
-        if tool == .moveSelectedPixels { endMoveDrag(with: event, rightButton: true) }
+        if tool.transformsSelection { endMoveDrag(with: event, rightButton: true) }
         else { super.rightMouseUp(with: event) }
     }
 
@@ -626,7 +678,7 @@ final class CanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard panLocation == nil else { return }
-        if tool == .moveSelectedPixels {
+        if tool.transformsSelection {
             beginMoveDrag(with: event, rightButton: false)
             return
         }
@@ -639,7 +691,7 @@ final class CanvasView: NSView {
         window?.makeFirstResponder(self)
         if tool == .rectangleSelect {
             selectionAnchor = pixelEdge(at: location, in: image)
-            selection = .zero
+            setSelection(nil)
             return
         }
         guard document?.stack?.activeLayer.isVisible == true else {
@@ -650,7 +702,10 @@ final class CanvasView: NSView {
         let isErasing = tool == .eraser
         bitmap.setBlendMode(.copy)
         bitmap.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-        if !selection.isEmpty { bitmap.clip(to: selection) }
+        if let selectionOutline {
+            bitmap.addPath(selectionOutline.path)
+            bitmap.clip(using: .evenOdd)
+        }
         bitmap.setBlendMode(isErasing ? .clear : .normal)
         let color = (brushColor.usingColorSpace(.sRGB) ?? .black).withAlphaComponent(1).cgColor
         bitmap.setFillColor(color)
@@ -670,8 +725,9 @@ final class CanvasView: NSView {
         let location = convert(event.locationInWindow, from: nil)
         if let start = selectionAnchor, let image = document?.image {
             let end = pixelEdge(at: location, in: image)
-            selection = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
-                               width: abs(start.x - end.x), height: abs(start.y - end.y))
+            let rect = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
+                              width: abs(start.x - end.x), height: abs(start.y - end.y))
+            setSelection(SelectionOutline(rect: rect))
             return
         }
         if moveDrag != nil {
@@ -714,7 +770,8 @@ final class CanvasView: NSView {
               var stack = layerPreview ?? document?.stack else { return }
         if let preview = move?.preview { stack.layers[stack.active] = preview }
         let image = stack.activeLayer.image
-        let showsHandles = tool == .moveSelectedPixels && stack.activeLayer.isVisible
+        let showsHandles = tool == .moveSelection ? selectionOutline != nil
+            : tool == .moveSelectedPixels && stack.activeLayer.isVisible
         let geometry = moveGeometry(for: image)
         let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
@@ -754,20 +811,26 @@ final class CanvasView: NSView {
             stack.draw(in: context, rect: rect, preview: strokeImage)
         }
         context.restoreGState()
-        if !marquee.isEmpty {
+        let outline = move?.transformedOutline ?? selectionOutline
+            ?? (showsHandles ? SelectionOutline(rect: geometry.rect) : nil)
+        let scale = rect.width / CGFloat(image.width)
+        let toView = CGAffineTransform(translationX: rect.minX, y: rect.minY).scaledBy(x: scale, y: scale)
+        if let path = outline?.transformed(by: toView)?.path {
             context.saveGState()
-            rotateDrawing(around: marquee, by: geometry.angle, in: context)
-            if !showsHandles {
+            if !showsHandles || tool == .moveSelection {
                 context.clip(to: rect)
                 context.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor)
-                context.fill(marquee)
+                context.addPath(path)
+                context.fillPath(using: .evenOdd)
             }
             context.setStrokeColor(NSColor.white.cgColor)
             context.setLineWidth(1)
-            context.stroke(marquee)
+            context.addPath(path)
+            context.strokePath()
             context.setStrokeColor(NSColor.black.cgColor)
             context.setLineDash(phase: 0, lengths: [4, 3])
-            context.stroke(marquee)
+            context.addPath(path)
+            context.strokePath()
             context.restoreGState()
         }
     }

@@ -22,7 +22,7 @@ final class PaintDocument: NSDocument {
     private(set) var historyPosition = 0
 
     override var isDocumentEdited: Bool {
-        editor?.canvas.hasPendingMove == true || super.isDocumentEdited
+        editor?.canvas.hasPendingPixelMove == true || super.isDocumentEdited
     }
 
     func selectLayer(_ index: Int) {
@@ -65,11 +65,32 @@ final class PaintDocument: NSDocument {
     }
 
     @objc func cropSelection(_ sender: Any?) {
-        guard let rect = editor?.canvas.cropRect, var next = stack else { return }
+        guard let canvas = editor?.canvas, let rect = canvas.cropRect, let outline = canvas.selectionOutline,
+              var next = stack else { return }
+        let mask = outline.pixelRectangle ? nil : outline.mask(in: rect, imageHeight: next.activeLayer.image.height)
+        guard outline.pixelRectangle || mask != nil else { return }
         for index in next.layers.indices {
-            guard next.layers[index].crop(to: rect) else { return }
+            guard next.layers[index].crop(to: rect, keeping: mask) else { return }
         }
-        replaceStack(with: next, actionName: "Crop to Selection")
+        replaceStack(with: next, actionName: "Crop to Selection", selectionChange: (outline, nil))
+    }
+
+    @objc func copySelection(_ sender: Any?) {
+        guard let image, let text = editor?.canvas.copyableOutline?.clipboardText(imageHeight: image.height) else { return }
+        let clipboard = NSPasteboard.general
+        clipboard.clearContents()
+        clipboard.setString(text, forType: .string)
+    }
+
+    @objc func pasteSelection(_ sender: Any?) {
+        guard let canvas = editor?.canvas, let outline = clipboardOutline else { return }
+        canvas.finishMove(pasting: outline)
+    }
+
+    private var clipboardOutline: SelectionOutline? {
+        guard let image, let text = NSPasteboard.general.string(forType: .string) else { return nil }
+        let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        return SelectionOutline(clipboardText: text, imageHeight: image.height)?.clipped(to: bounds)
     }
 
     @objc func deselect(_ sender: Any?) {
@@ -194,14 +215,19 @@ final class PaintDocument: NSDocument {
         }
     }
 
-    func commitSelectedPixelsTransform(_ layer: PaintLayer, from source: CGRect, to destination: CGRect, actionName: String) {
+    func commitSelection(_ outline: SelectionOutline?, actionName: String) {
+        guard let stack, let canvas = editor?.canvas, canvas.selectionOutline != outline else { return }
+        replaceStack(with: stack, actionName: actionName, selectionChange: (canvas.selectionOutline, outline))
+    }
+
+    func commitSelectedPixelsTransform(_ layer: PaintLayer, to destination: SelectionOutline?, actionName: String) {
         guard var next = stack else { return }
         next.layers[next.active] = layer
-        replaceStack(with: next, actionName: actionName, selectionChange: (source, destination))
+        replaceStack(with: next, actionName: actionName, selectionChange: (editor?.canvas.selectionOutline, destination))
     }
 
     private func replaceStack(with replacement: LayerStack, actionName: String,
-                              selectionChange: (before: CGRect, after: CGRect)? = nil) {
+                              selectionChange: (before: SelectionOutline?, after: SelectionOutline?)? = nil) {
         guard let previous = stack else { return }
         undoManager?.registerUndo(withTarget: self) { document in
             document.replaceStack(with: previous, actionName: actionName,
@@ -291,6 +317,8 @@ final class PaintDocument: NSDocument {
         case #selector(undoStroke(_:)): return editor?.canvas.hasPendingMove == true || undoManager?.canUndo == true
         case #selector(redoStroke(_:)): return editor?.canvas.hasPendingMove != true && undoManager?.canRedo == true
         case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
+        case #selector(copySelection(_:)): return editor?.canvas.copyableOutline != nil
+        case #selector(pasteSelection(_:)): return clipboardOutline != nil
         case #selector(deselect(_:)): return editor?.canvas.imageSelection != nil || editor?.canvas.hasPendingMove == true
         case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false
         case #selector(toggleUtilityPanel(_:)):

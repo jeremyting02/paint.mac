@@ -38,16 +38,20 @@ to nudge ten.
 
 The preview stays editable between drags. Press **Return** or **Escape**, or
 click **Finish**, to commit the transforms as one undo step. Use **Undo** to
-discard the preview. After rotation, the committed selection is a rectangle
-around the rotated area.
-Pixels past the canvas edge are clipped on commit.
+discard the preview. Pixels and selection edges past the canvas are clipped on
+commit.
+
+Choose **Move Selection** or press **Shift-M** to move, resize, or rotate only
+the outline using the same handles. In the **Edit** menu, **Copy Selection**
+(Option-Shift-Command-C) copies the outline as polygon JSON. **Paste Selection**
+(Option-Shift-Command-V) replaces the current outline with the clipboard shape.
 
 **Fit** shows the whole image, and **100%** shows one image pixel per display
 pixel. Hold **Command** and scroll
 to zoom toward or away from the pointer. Hold the middle mouse button and drag
 to pan the canvas with any tool active. Scrolling without Command moves the view.
 
-Use **Command-Z** and **Shift-Command-Z** to undo or redo a whole stroke or crop.
+Use **Command-Z** and **Command-Y** to undo or redo an edit.
 Each document keeps the five most recent undo steps, which you can also select
 in the floating **History** window. In **Layers**, use **+** to insert a transparent
 layer above the selected row, click a row to edit it, and use its checkbox to

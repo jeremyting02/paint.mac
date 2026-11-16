@@ -32,8 +32,9 @@ struct PaintLayer {
         pdnPixels = pixels
     }
 
-    mutating func crop(to rect: CGRect) -> Bool {
-        guard let cropped = image.cropping(to: rect) else { return false }
+    mutating func crop(to rect: CGRect, keeping mask: Data? = nil) -> Bool {
+        guard let cropped = image.cropping(to: rect),
+              mask == nil || mask?.count == cropped.width * cropped.height else { return false }
         let original = pdnPixels
         let stride = image.width * 4
         image = cropped
@@ -43,6 +44,17 @@ struct PaintLayer {
                 let start = row * stride + Int(rect.minX) * 4
                 pixels.append(original[start..<(start + cropped.width * 4)])
             }
+            pdnPixels = pixels
+        }
+        if let mask {
+            guard var pixels = straightPixels else { return false }
+            pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                for (index, selected) in mask.enumerated() where selected == 0 {
+                    target.storeBytes(of: UInt32(0), toByteOffset: index * 4, as: UInt32.self)
+                }
+            }
+            guard let masked = BGRA8.image(from: pixels, width: cropped.width, height: cropped.height) else { return false }
+            image = masked
             pdnPixels = pixels
         }
         return true
@@ -55,8 +67,9 @@ struct SelectedPixelsTransform {
     private let cleared: Data
     private let selection: CGRect
     private let bounds: CGRect
+    private let maskedSource: PaintLayer?
 
-    init?(layer: PaintLayer, selection: CGRect) {
+    init?(layer: PaintLayer, selection: CGRect, mask: Data? = nil) {
         let width = layer.image.width, height = layer.image.height
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
         guard !selection.isEmpty, bounds.contains(selection), selection == selection.integral,
@@ -67,9 +80,24 @@ struct SelectedPixelsTransform {
         self.bounds = bounds
 
         var cleared = source
-        for row in Int(selection.minY)..<Int(selection.maxY) {
-            let start = (row * width + Int(selection.minX)) * 4
-            cleared.resetBytes(in: start..<(start + Int(selection.width) * 4))
+        let selectionWidth = Int(selection.width)
+        if let mask {
+            var foreground = layer
+            guard foreground.crop(to: selection, keeping: mask) else { return nil }
+            maskedSource = foreground
+            let origin = Int(selection.minY) * width + Int(selection.minX)
+            cleared.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                for (index, selected) in mask.enumerated() where selected != 0 {
+                    let pixel = origin + index / selectionWidth * width + index % selectionWidth
+                    target.storeBytes(of: UInt32(0), toByteOffset: pixel * 4, as: UInt32.self)
+                }
+            }
+        } else {
+            maskedSource = nil
+            for row in Int(selection.minY)..<Int(selection.maxY) {
+                let start = (row * width + Int(selection.minX)) * 4
+                cleared.resetBytes(in: start..<(start + selectionWidth * 4))
+            }
         }
         self.cleared = cleared
     }
@@ -96,11 +124,16 @@ struct SelectedPixelsTransform {
             let foregroundStart: Int
             let foregroundStride: Int
             if rotation == 0 && !flipX && !flipY && destination == destination.integral && destination.size == selection.size {
-                foreground = source
-                let sourceX = Int(selection.minX + target.minX - destination.minX)
-                let sourceY = Int(selection.minY + target.minY - destination.minY)
-                foregroundStart = (sourceY * width + sourceX) * 4
-                foregroundStride = width * 4
+                let x = Int(target.minX - destination.minX), y = Int(target.minY - destination.minY)
+                if let maskedSource, let pixels = maskedSource.pdnPixels {
+                    foreground = pixels
+                    foregroundStride = maskedSource.image.width * 4
+                    foregroundStart = y * foregroundStride + x * 4
+                } else {
+                    foreground = source
+                    foregroundStride = width * 4
+                    foregroundStart = (Int(selection.minY) + y) * foregroundStride + (Int(selection.minX) + x) * 4
+                }
             } else {
                 guard let rendered = renderPixels(destination: destination, visible: target, rotation: rotation,
                                                   flipX: flipX, flipY: flipY) else { return nil }
@@ -130,7 +163,7 @@ struct SelectedPixelsTransform {
     }
 
     private func renderPixels(destination: CGRect, visible: CGRect, rotation: CGFloat, flipX: Bool, flipY: Bool) -> Data? {
-        guard let image = layer.image.cropping(to: selection) else { return nil }
+        guard let image = maskedSource?.image ?? layer.image.cropping(to: selection) else { return nil }
         // Rasterize only the on-canvas portion. The drawing context has a bottom-left origin.
         return BGRA8.render(width: Int(visible.width), height: Int(visible.height)) { bitmap in
             bitmap.interpolationQuality = .low

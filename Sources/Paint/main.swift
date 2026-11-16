@@ -25,9 +25,12 @@ fileItem.submenu = fileMenu
 let editItem = menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "")
 let editMenu = NSMenu(title: "Edit")
 editMenu.addItem(withTitle: "Undo", action: #selector(PaintDocument.undoStroke(_:)), keyEquivalent: "z")
-let redo = editMenu.addItem(withTitle: "Redo", action: #selector(PaintDocument.redoStroke(_:)), keyEquivalent: "z")
-redo.keyEquivalentModifierMask = [.command, .shift]
+editMenu.addItem(withTitle: "Redo", action: #selector(PaintDocument.redoStroke(_:)), keyEquivalent: "y")
 editMenu.addItem(.separator())
+let copySelection = editMenu.addItem(withTitle: "Copy Selection", action: #selector(PaintDocument.copySelection(_:)), keyEquivalent: "c")
+copySelection.keyEquivalentModifierMask = [.command, .option, .shift]
+let pasteSelection = editMenu.addItem(withTitle: "Paste Selection", action: #selector(PaintDocument.pasteSelection(_:)), keyEquivalent: "v")
+pasteSelection.keyEquivalentModifierMask = [.command, .option, .shift]
 editMenu.addItem(withTitle: "Deselect", action: #selector(PaintDocument.deselect(_:)), keyEquivalent: "d")
 editItem.submenu = editMenu
 
