@@ -16,44 +16,44 @@
     <array>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>PNG Image</string>
+            <string>Paint.NET Project</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
-            <string>Alternate</string>
+            <string>Default</string>
             <key>LSItemContentTypes</key>
             <array>
-                <string>public.png</string>
+                <string>com.paintdotnet.pdn</string>
             </array>
             <key>NSDocumentClass</key>
             <string>PaintDocument</string>
         </dict>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>paint.mac Project</string>
+            <string>PNG Image</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
-            <string>Owner</string>
+            <string>Alternate</string>
             <key>LSItemContentTypes</key>
-            <array><string>local.paintmac.project</string></array>
+            <array><string>public.png</string></array>
             <key>NSDocumentClass</key>
             <string>PaintDocument</string>
         </dict>
     </array>
-    <key>UTExportedTypeDeclarations</key>
+    <key>UTImportedTypeDeclarations</key>
     <array>
         <dict>
             <key>UTTypeIdentifier</key>
-            <string>local.paintmac.project</string>
+            <string>com.paintdotnet.pdn</string>
             <key>UTTypeDescription</key>
-            <string>paint.mac Project</string>
+            <string>Paint.NET Project</string>
             <key>UTTypeConformsTo</key>
             <array><string>public.data</string></array>
             <key>UTTypeTagSpecification</key>
             <dict>
                 <key>public.filename-extension</key>
-                <array><string>paintmac</string></array>
+                <array><string>pdn</string></array>
             </dict>
         </dict>
     </array>

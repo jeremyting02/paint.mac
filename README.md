@@ -1,6 +1,6 @@
 # paint.mac
 
-A native macOS app for painting and erasing on PNG images. See the [MVP plan](docs/MVP_PLAN.md) for what's next.
+A native macOS bitmap editor with layered Paint.NET projects. See the [MVP plan](docs/MVP_PLAN.md) for the initial scope.
 
 From the repository root with Swift and the macOS SDK installed:
 
@@ -9,11 +9,10 @@ sh build.sh
 open .build/paint.mac.app
 ```
 
-Use **File → New** for a 1024 × 768 transparent canvas or **File → Open** for an
-existing PNG. Use **File → Save As** (Shift-Command-S) to save a copy. The
-checkerboard is only a canvas background. To check the saved image, open it in
-Preview and use **Tools → Show Inspector** (Command-I) to check dimensions and
-alpha.
+Use **File → New** for a 1024 × 768 transparent canvas or **File → Open** for a
+Paint.NET project or PNG. **Save** and **Save As** write `.pdn` projects. Saving
+an opened PNG creates a separate project. **File → Export PNG** writes a flat
+copy of the visible layers. The checkerboard marks transparent areas.
 
 Choose **Paintbrush** or **Eraser** in the floating **Tools** window. Pick a
 paint color in **Colors** and use **Size** above the canvas to set the diameter
@@ -33,9 +32,12 @@ hide or show it. The arrows move the selected layer and the trash button deletes
 it. The **Layer** menu offers the same commands. A document can have up to eight
 layers. Crop applies to the whole stack.
 
-When a PNG has layer changes, **Save** prompts for a `.paintmac` project to keep
-the layers. **File → Export PNG** writes a flat copy of the visible layers.
-Single-layer PNG edits can still save directly to PNG.
+Paint.NET 5.2 projects retain their layer names, order, visibility, opacity, and
+pixel data. Reopened projects select the top layer. Projects that use non-Normal
+blending, embedded color profiles, or an unsupported pixel layout show an error
+when opened.
+
+Run `sh Tests/pdn-roundtrip.sh` to check the Paint.NET 5.2 fixture.
 
 Use the toolbar buttons or **Window** menu to show or hide each utility
 window (F5–F8). Drag a window by its title bar or use **Window → Reset Panel

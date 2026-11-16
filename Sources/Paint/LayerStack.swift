@@ -4,27 +4,50 @@ import UniformTypeIdentifiers
 
 struct PaintLayer {
     var name: String
-    var image: CGImage
+    var image: CGImage { didSet { pdnPixels = nil } }
     var isVisible = true
+    var isBackground = false
+    var opacity: UInt8 = 255
+    var metadata: [PDNMetadata] = []
+    var pdnPixels: Data?
+
+    mutating func crop(to rect: CGRect) -> Bool {
+        guard let cropped = image.cropping(to: rect) else { return false }
+        let original = pdnPixels
+        let stride = image.width * 4
+        image = cropped
+        if let original {
+            var pixels = Data(capacity: cropped.width * cropped.height * 4)
+            for row in Int(rect.minY)..<(Int(rect.minY) + cropped.height) {
+                let start = row * stride + Int(rect.minX) * 4
+                pixels.append(original[start..<(start + cropped.width * 4)])
+            }
+            pdnPixels = pixels
+        }
+        return true
+    }
 }
 
 struct LayerStack {
     static let limit = 8
     var layers: [PaintLayer] // Bottom to top.
     var active: Int
+    var metadata: [PDNMetadata] = []
 
     var activeLayer: PaintLayer { layers[active] }
-    var needsProject: Bool { layers.count > 1 || !activeLayer.isVisible || activeLayer.name != "Background" }
 
     func draw(in context: CGContext, rect: CGRect, preview: CGImage? = nil) {
+        context.saveGState()
         for (index, layer) in layers.enumerated() where layer.isVisible {
+            context.setAlpha(CGFloat(layer.opacity) / 255)
             context.draw(index == active ? preview ?? layer.image : layer.image, in: rect)
         }
+        context.restoreGState()
     }
 
     func flattened() -> CGImage? {
         let visible = layers.filter(\.isVisible)
-        if visible.count == 1 { return visible[0].image }
+        if visible.count == 1, visible[0].opacity == 255 { return visible[0].image }
         let image = activeLayer.image
         guard let bitmap = Self.makeBitmap(width: image.width, height: image.height) else { return nil }
         draw(in: bitmap, rect: CGRect(x: 0, y: 0, width: image.width, height: image.height))
@@ -39,52 +62,6 @@ struct LayerStack {
 }
 
 enum PaintFiles {
-    private static let projectByteLimit = 280 * 1024 * 1024
-
-    private struct Project: Codable {
-        struct Layer: Codable {
-            let name: String
-            let isVisible: Bool
-            let png: Data
-        }
-
-        let version: Int
-        let active: Int
-        let layers: [Layer]
-    }
-
-    static func readProject(_ data: Data) throws -> LayerStack {
-        let invalid = CocoaError(.fileReadCorruptFile, userInfo: [
-            NSLocalizedDescriptionKey: "The file could not be read as a paint.mac project."
-        ])
-        guard data.count <= projectByteLimit,
-              let project = try? PropertyListDecoder().decode(Project.self, from: data),
-              project.version == 1, project.layers.indices.contains(project.active),
-              project.layers.count <= LayerStack.limit else { throw invalid }
-
-        let layers = try project.layers.map { layer in
-            PaintLayer(name: layer.name, image: try readPNG(layer.png), isVisible: layer.isVisible)
-        }
-        let size = layers[0].image
-        guard layers.allSatisfy({ $0.image.width == size.width && $0.image.height == size.height }) else {
-            throw invalid
-        }
-        return LayerStack(layers: layers, active: project.active)
-    }
-
-    static func projectData(_ stack: LayerStack) throws -> Data {
-        let layers = try stack.layers.map { layer in
-            Project.Layer(name: layer.name, isVisible: layer.isVisible, png: try pngData(layer.image))
-        }
-        let encoder = PropertyListEncoder()
-        encoder.outputFormat = .binary
-        let data = try encoder.encode(Project(version: 1, active: stack.active, layers: layers))
-        guard data.count <= projectByteLimit else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "The project exceeds 280 MiB."])
-        }
-        return data
-    }
-
     static func readPNG(_ data: Data) throws -> CGImage {
         let corrupt = CocoaError(.fileReadCorruptFile, userInfo: [
             NSLocalizedDescriptionKey: "The file could not be read as a static PNG image."

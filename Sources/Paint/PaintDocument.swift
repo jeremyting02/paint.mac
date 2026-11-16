@@ -12,8 +12,8 @@ final class PaintDocument: NSDocument {
         }
     }
 
-    static let projectType = "paint.mac Project"
-    private static let projectContentType = UTType(exportedAs: "local.paintmac.project")
+    private static let projectType = "Paint.NET Project"
+    private static let projectContentType = UTType(importedAs: "com.paintdotnet.pdn")
     private(set) var stack: LayerStack?
     var image: CGImage? { stack?.activeLayer.image }
     private weak var editor: EditorView?
@@ -36,8 +36,7 @@ final class PaintDocument: NSDocument {
     func crop(to rect: CGRect) {
         guard var next = stack else { return }
         for index in next.layers.indices {
-            guard let cropped = next.layers[index].image.cropping(to: rect) else { return }
-            next.layers[index].image = cropped
+            guard next.layers[index].crop(to: rect) else { return }
         }
         replaceStack(with: next, actionName: "Crop")
     }
@@ -178,29 +177,24 @@ final class PaintDocument: NSDocument {
         type == projectType || type == projectContentType.identifier
     }
 
-    private var savesAsProject: Bool { Self.isProject(fileType) || stack?.needsProject == true }
-
     override func writableTypes(for saveOperation: NSDocument.SaveOperationType) -> [String] {
-        if savesAsProject { return [Self.projectType] }
-        return super.writableTypes(for: saveOperation)
+        [Self.projectType]
     }
 
     override func fileNameExtension(forType typeName: String, saveOperation: NSDocument.SaveOperationType) -> String? {
-        if Self.isProject(typeName) { return "paintmac" }
+        if Self.isProject(typeName) { return "pdn" }
         return super.fileNameExtension(forType: typeName, saveOperation: saveOperation)
     }
 
     override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
         guard super.prepareSavePanel(savePanel) else { return false }
-        if savesAsProject {
-            savePanel.allowedContentTypes = [Self.projectContentType]
-            savePanel.allowsOtherFileTypes = false
-        }
+        savePanel.allowedContentTypes = [Self.projectContentType]
+        savePanel.allowsOtherFileTypes = false
         return true
     }
 
     override func save(withDelegate delegate: Any?, didSave selector: Selector?, contextInfo: UnsafeMutableRawPointer?) {
-        if stack?.needsProject == true && !Self.isProject(fileType) {
+        if fileURL != nil && !Self.isProject(fileType) {
             runModalSavePanel(for: .saveAsOperation, delegate: delegate, didSave: selector, contextInfo: contextInfo)
         } else {
             super.save(withDelegate: delegate, didSave: selector, contextInfo: contextInfo)
@@ -209,9 +203,12 @@ final class PaintDocument: NSDocument {
 
     override func read(from data: Data, ofType typeName: String) throws {
         if Self.isProject(typeName) {
-            stack = try PaintFiles.readProject(data)
+            stack = try PDNFile.read(data)
+        } else if typeName == "PNG Image" || typeName == UTType.png.identifier {
+            let image = try PaintFiles.readPNG(data)
+            stack = LayerStack(layers: [PaintLayer(name: "Background", image: image, isBackground: true)], active: 0)
         } else {
-            stack = LayerStack(layers: [PaintLayer(name: "Background", image: try PaintFiles.readPNG(data))], active: 0)
+            throw CocoaError(.fileReadUnknown)
         }
         undoManager?.removeAllActions()
         historyEntries = ["Open Image"]
@@ -221,19 +218,13 @@ final class PaintDocument: NSDocument {
     }
 
     override func data(ofType typeName: String) throws -> Data {
-        guard let stack else { throw CocoaError(.fileWriteUnknown) }
-        if Self.isProject(typeName) { return try PaintFiles.projectData(stack) }
-        guard !stack.needsProject else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [
-                NSLocalizedDescriptionKey: "Save a paint.mac project to keep the layers, or use Export PNG to flatten them."
-            ])
-        }
-        return try PaintFiles.pngData(stack.activeLayer.image)
+        guard let stack, Self.isProject(typeName) else { throw CocoaError(.fileWriteUnknown) }
+        return try PDNFile.write(stack)
     }
 
     override func makeWindowControllers() {
         if stack == nil, let blank = LayerStack.makeBitmap(width: 1024, height: 768)?.makeImage() {
-            stack = LayerStack(layers: [PaintLayer(name: "Background", image: blank)], active: 0)
+            stack = LayerStack(layers: [PaintLayer(name: "Background", image: blank, isBackground: true)], active: 0)
         }
         undoManager?.levelsOfUndo = undoLimit
 

@@ -4,5 +4,8 @@ import PackageDescription
 let package = Package(
     name: "Paint",
     platforms: [.macOS(.v13)],
-    targets: [.executableTarget(name: "Paint")]
+    targets: [
+        .systemLibrary(name: "CZlib"),
+        .executableTarget(name: "Paint", dependencies: ["CZlib"])
+    ]
 )
