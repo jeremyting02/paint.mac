@@ -29,8 +29,8 @@ enum PDNFile {
         let height = try PDNRecords.integer(document["height"])
         let list = try graph.fields(document["layers"], named: "PaintDotNet.LayerList")
         let count = try PDNRecords.integer(list["ArrayList+_size"])
-        guard (1...4096).contains(width), (1...4096).contains(height),
-              width * height <= 8_388_608, (1...LayerStack.limit).contains(count) else { throw PDNError.tooLarge }
+        guard LayerStack.supportsCanvas(width: width, height: height),
+              (1...LayerStack.limit).contains(count) else { throw PDNError.tooLarge }
         let items = try graph.array(list["ArrayList+_items"])
         guard items.count >= count else { throw PDNError.invalid }
         let documentMetadata = try metadata(document["userMetadataItems"], in: graph)

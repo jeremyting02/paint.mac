@@ -29,6 +29,12 @@ let redo = editMenu.addItem(withTitle: "Redo", action: #selector(PaintDocument.r
 redo.keyEquivalentModifierMask = [.command, .shift]
 editItem.submenu = editMenu
 
+let imageItem = menu.addItem(withTitle: "Image", action: nil, keyEquivalent: "")
+let imageMenu = NSMenu(title: "Image")
+let flatten = imageMenu.addItem(withTitle: "Flatten", action: #selector(PaintDocument.flattenLayers(_:)), keyEquivalent: "f")
+flatten.keyEquivalentModifierMask = [.command, .shift]
+imageItem.submenu = imageMenu
+
 let layerItem = menu.addItem(withTitle: "Layer", action: nil, keyEquivalent: "")
 let layerMenu = NSMenu(title: "Layer")
 for command in PaintDocument.LayerCommand.allCases {

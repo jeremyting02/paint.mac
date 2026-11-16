@@ -213,9 +213,9 @@ final class CanvasView: NSView {
         let strokeImage = stroke?.bitmap.makeImage()
         if stack.needsBlendComposite {
             if let strokeImage {
-                if let image = stack.blendComposite(preview: strokeImage) { context.draw(image, in: rect) }
+                if let image = stack.blendComposite(preview: strokeImage)?.image { context.draw(image, in: rect) }
             } else {
-                if composite == nil { composite = stack.blendComposite() }
+                if composite == nil { composite = stack.blendComposite()?.image }
                 if let composite { context.draw(composite, in: rect) }
             }
         } else {

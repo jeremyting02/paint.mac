@@ -14,6 +14,24 @@ struct PaintLayer {
 
     var straightPixels: Data? { pdnPixels ?? BGRA8.pixels(from: image) }
 
+    mutating func padCanvas(width: Int, height: Int) throws {
+        guard width != image.width || height != image.height else { return }
+        guard let source = straightPixels else { throw CocoaError(.fileReadUnknown) }
+        let stride = image.width * 4
+        var pixels = Data(count: width * height * 4)
+        // BGRA rows start at the top, so padding adds space on the right and bottom.
+        for row in 0..<image.height {
+            let start = row * width * 4
+            let sourceStart = source.startIndex + row * stride
+            pixels.replaceSubrange(start..<(start + stride), with: source[sourceStart..<(sourceStart + stride)])
+        }
+        guard let padded = BGRA8.image(from: pixels, width: width, height: height) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        image = padded
+        pdnPixels = pixels
+    }
+
     mutating func crop(to rect: CGRect) -> Bool {
         guard let cropped = image.cropping(to: rect) else { return false }
         let original = pdnPixels
@@ -33,6 +51,9 @@ struct PaintLayer {
 
 struct LayerStack {
     static let limit = 8
+    static func supportsCanvas(width: Int, height: Int) -> Bool {
+        (1...4096).contains(width) && (1...4096).contains(height) && width * height <= 8_388_608
+    }
     var layers: [PaintLayer] // Bottom to top.
     var active: Int
     var metadata: [PDNMetadata] = []
@@ -72,6 +93,22 @@ struct LayerStack {
         return true
     }
 
+    mutating func importLayers(_ incoming: [PaintLayer]) throws {
+        guard !incoming.isEmpty else { return }
+        let combined = layers + incoming
+        let width = combined.reduce(0) { max($0, $1.image.width) }
+        let height = combined.reduce(0) { max($0, $1.image.height) }
+        guard combined.count <= Self.limit, Self.supportsCanvas(width: width, height: height) else {
+            throw PDNError.tooLarge
+        }
+        layers = try combined.map { layer in
+            var padded = layer
+            try padded.padCanvas(width: width, height: height)
+            return padded
+        }
+        active = layers.count - 1
+    }
+
     func draw(in context: CGContext, rect: CGRect, preview: CGImage? = nil) {
         context.saveGState()
         for (index, layer) in layers.enumerated() where layer.isVisible {
@@ -81,17 +118,23 @@ struct LayerStack {
         context.restoreGState()
     }
 
-    func flattened() -> CGImage? {
+    func flattenedLayer() -> PaintLayer? {
         let visible = layers.filter { $0.isVisible && $0.opacity > 0 }
-        if visible.count == 1, visible[0].opacity == 255 { return visible[0].image }
-        if needsBlendComposite { return blendComposite() }
+        if visible.count == 1, let layer = visible.first, layer.opacity == 255 {
+            return PaintLayer(name: "Background", image: layer.image, isBackground: true, pdnPixels: layer.pdnPixels)
+        }
+        if needsBlendComposite {
+            guard let composite = blendComposite() else { return nil }
+            return PaintLayer(name: "Background", image: composite.image, isBackground: true, pdnPixels: composite.pixels)
+        }
         let image = activeLayer.image
         guard let bitmap = Self.makeBitmap(width: image.width, height: image.height) else { return nil }
         draw(in: bitmap, rect: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-        return bitmap.makeImage()
+        guard let flat = bitmap.makeImage() else { return nil }
+        return PaintLayer(name: "Background", image: flat, isBackground: true)
     }
 
-    func blendComposite(preview: CGImage? = nil) -> CGImage? {
+    func blendComposite(preview: CGImage? = nil) -> (image: CGImage, pixels: Data)? {
         let image = activeLayer.image
         var pixels = Data(count: image.width * image.height * 4)
         for (index, layer) in layers.enumerated() where layer.isVisible && layer.opacity > 0 {
@@ -100,7 +143,8 @@ struct LayerStack {
             guard let bytes = sourcePixels else { return nil }
             layer.blendMode.composite(bytes, onto: &pixels, opacity: layer.opacity)
         }
-        return BGRA8.image(from: pixels, width: image.width, height: image.height)
+        guard let flat = BGRA8.image(from: pixels, width: image.width, height: image.height) else { return nil }
+        return (flat, pixels)
     }
 
     static func makeBitmap(width: Int, height: Int) -> CGContext? {
@@ -111,6 +155,22 @@ struct LayerStack {
 }
 
 enum PaintFiles {
+    static func layersForImport(from url: URL) throws -> [PaintLayer] {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let name = url.deletingPathExtension().lastPathComponent
+        let layers = if url.pathExtension.lowercased() == "pdn" {
+            try PDNFile.read(data).layers
+        } else {
+            [PaintLayer(name: "Background", image: try readPNG(data))]
+        }
+        return layers.map { layer in
+            var imported = layer
+            imported.name = "\(name): \(layer.name)"
+            imported.isBackground = false
+            return imported
+        }
+    }
+
     static func readPNG(_ data: Data) throws -> CGImage {
         let corrupt = CocoaError(.fileReadCorruptFile, userInfo: [
             NSLocalizedDescriptionKey: "The file could not be read as a static PNG image."
@@ -123,7 +183,7 @@ enum PaintFiles {
               let height = properties[kCGImagePropertyPixelHeight] as? Int,
               width > 0, height > 0 else { throw corrupt }
 
-        guard width <= 4096, height <= 4096, width * height <= 8_388_608 else {
+        guard LayerStack.supportsCanvas(width: width, height: height) else {
             throw CocoaError(.fileReadTooLarge, userInfo: [
                 NSLocalizedDescriptionKey: "PNG images can be at most 4,096 pixels per side and 8,388,608 pixels total."
             ])

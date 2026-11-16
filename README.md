@@ -37,6 +37,11 @@ layers. Crop applies to the whole stack.
 and keeps the lower layer's properties. Both commands are in the **Layer** menu
 and the floating **Layers** window.
 
+Use **Layer → Import From File** to add PNGs or PDN layers at the top of the
+stack. Imported pixels start at the upper left, and the canvas expands with
+transparency when needed. **Image → Flatten** (Shift-Command-F) combines the
+visible layers into a single Background layer. Either command takes one undo step.
+
 Double-click a layer or press **F4** to open **Layer Properties**. Set its name,
 visibility, opacity (0–255), and blend mode. The canvas previews the changes,
 and **OK** applies them as one undo step.

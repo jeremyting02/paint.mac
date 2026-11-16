@@ -4,11 +4,11 @@ import UniformTypeIdentifiers
 @objc(PaintDocument)
 final class PaintDocument: NSDocument {
     enum LayerCommand: Int, CaseIterable {
-        case add, delete, duplicate, mergeDown, selectAbove, selectBelow, toggleVisibility, moveUp, moveDown, properties
+        case add, delete, duplicate, mergeDown, importFromFile, selectAbove, selectBelow, toggleVisibility, moveUp, moveDown, properties
 
         var title: String {
-            ["Add Layer", "Delete Layer", "Duplicate Layer", "Merge Layer Down", "Select Layer Above", "Select Layer Below",
-             "Show Layer", "Move Layer Up", "Move Layer Down", "Layer Properties…"][rawValue]
+            ["Add Layer", "Delete Layer", "Duplicate Layer", "Merge Layer Down", "Import From File…", "Select Layer Above",
+             "Select Layer Below", "Show Layer", "Move Layer Up", "Move Layer Down", "Layer Properties…"][rawValue]
         }
     }
 
@@ -82,6 +82,48 @@ final class PaintDocument: NSDocument {
     func mergeLayerDown() {
         guard var next = stack, next.mergeActiveLayerDown() else { return }
         replaceStack(with: next, actionName: LayerCommand.mergeDown.title)
+    }
+
+    private func showImportPanel() {
+        guard let window = windowForSheet, window.attachedSheet == nil, stack?.canDuplicate == true else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, Self.projectContentType]
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = fileURL?.deletingLastPathComponent()
+        panel.prompt = "Import"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let self else { return }
+            do {
+                try self.importLayerFiles(panel.urls)
+            } catch {
+                self.presentError(error)
+            }
+        }
+    }
+
+    func importLayerFiles(_ urls: [URL]) throws {
+        guard var next = stack, !urls.isEmpty else { return }
+        let capacity = LayerStack.limit - next.layers.count
+        guard urls.count <= capacity else { throw PDNError.tooLarge }
+        var incoming: [PaintLayer] = []
+        for url in urls {
+            guard incoming.count < capacity else { throw PDNError.tooLarge }
+            incoming += try PaintFiles.layersForImport(from: url)
+            guard incoming.count <= capacity else { throw PDNError.tooLarge }
+        }
+        try next.importLayers(incoming)
+        replaceStack(with: next, actionName: "Import From File")
+    }
+
+    @objc func flattenLayers(_ sender: Any?) {
+        guard var next = stack, next.layers.count > 1 else { return }
+        guard let flat = next.flattenedLayer() else {
+            presentError(CocoaError(.fileWriteUnknown))
+            return
+        }
+        next.layers = [flat]
+        next.active = 0
+        replaceStack(with: next, actionName: "Flatten")
     }
 
     func showLayerProperties() {
@@ -162,6 +204,7 @@ final class PaintDocument: NSDocument {
         case .delete: deleteLayer()
         case .duplicate: duplicateLayer()
         case .mergeDown: mergeLayerDown()
+        case .importFromFile: showImportPanel()
         case .properties: showLayerProperties()
         }
     }
@@ -175,7 +218,7 @@ final class PaintDocument: NSDocument {
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             do {
-                guard let image = stack.flattened() else { throw CocoaError(.fileWriteUnknown) }
+                guard let image = stack.flattenedLayer()?.image else { throw CocoaError(.fileWriteUnknown) }
                 try PaintFiles.pngData(image).write(to: url, options: .atomic)
             } catch {
                 self?.presentError(error)
@@ -187,6 +230,7 @@ final class PaintDocument: NSDocument {
         switch item.action {
         case #selector(undoStroke(_:)): return undoManager?.canUndo == true
         case #selector(redoStroke(_:)): return undoManager?.canRedo == true
+        case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false
         case #selector(toggleUtilityPanel(_:)):
             if let menuItem = item as? NSMenuItem, let kind = UtilityPanels.Kind(rawValue: menuItem.tag) {
                 menuItem.state = editor?.isPanelShown(kind) == true ? .on : .off
@@ -205,6 +249,7 @@ final class PaintDocument: NSDocument {
             case .delete: return stack.layers.count > 1
             case .duplicate: return stack.canDuplicate
             case .mergeDown: return stack.canMergeDown
+            case .importFromFile: return stack.canDuplicate && windowForSheet?.attachedSheet == nil
             case .properties: return windowForSheet?.attachedSheet == nil
             }
         default: return super.validateUserInterfaceItem(item)

@@ -1,7 +1,8 @@
 import Foundation
 
 // Serialized by the Paint.NET 5.2 document engine from known BGRA samples.
-let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
+let fixture = URL(fileURLWithPath: CommandLine.arguments[1])
+let data = try Data(contentsOf: fixture)
 let imported = try PDNFile.read(data)
 let reopened = try PDNFile.read(PDNFile.write(imported))
 
@@ -53,4 +54,25 @@ let merged = try PDNFile.read(PDNFile.write(layers))
 precondition(merged.activeLayer.pdnPixels == layers.activeLayer.pdnPixels)
 precondition(merged.activeLayer.pdnPixels?[4..<12] == Data([49, 255, 2, 255, 255, 152, 13, 255]))
 precondition(!layers.mergeActiveLayerDown())
+
+let incoming = try PaintFiles.layersForImport(from: fixture)
+precondition(incoming.map(\.name) == ["Layers52: Base", "Layers52: Top – 日本"])
+precondition(incoming.map(\.isVisible) == [true, false])
+let widePixels = Data([255, 0, 0, 255, 0, 0, 0, 0, 0, 255, 0, 255])
+let wideImage = BGRA8.image(from: widePixels, width: 3, height: 1)!
+var expanded = imported
+try expanded.importLayers(incoming + [PaintLayer(name: "Wide", image: wideImage, pdnPixels: widePixels)])
+precondition(expanded.layers.count == 5 && expanded.activeLayer.name == "Wide")
+precondition(expanded.layers.allSatisfy { $0.image.width == 3 && $0.image.height == 3 })
+precondition(expanded.layers[0].pdnPixels?[0..<12] == Data(base.prefix(8)) + Data(count: 4))
+precondition(expanded.activeLayer.pdnPixels == widePixels + Data(count: 24))
+
+expanded.layers[4].blendMode = .screen
+expanded.layers[4].opacity = 128
+let flattened = expanded.flattenedLayer()!
+precondition(flattened.name == "Background" && flattened.isBackground)
+precondition(flattened.opacity == 255 && flattened.isVisible && flattened.blendMode == .normal)
+let flatDoc = LayerStack(layers: [flattened], active: 0)
+let flatAgain = try PDNFile.read(PDNFile.write(flatDoc))
+precondition(flatAgain.activeLayer.pdnPixels == expanded.blendComposite()?.pixels)
 print("Paint.NET 5.2 layer round-trip passed")
