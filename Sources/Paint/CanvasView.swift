@@ -141,7 +141,7 @@ final class CanvasView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        let zooming = event.modifierFlags.contains(.control)
+        let zooming = event.modifierFlags.contains(.command)
         if !event.momentumPhase.isEmpty {
             if !zooming && !zoomingScrollGesture { super.scrollWheel(with: event) }
             return
