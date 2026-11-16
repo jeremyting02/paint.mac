@@ -20,7 +20,7 @@ final class PaintDocument: NSDocument {
         }
         undoManager?.setActionName(actionName)
         image = replacement
-        editor?.canvas.needsDisplay = true
+        editor?.refreshImage()
         editor?.updateHistory(undoManager)
     }
 
