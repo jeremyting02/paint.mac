@@ -74,10 +74,19 @@ struct SelectedPixelsTransform {
         self.cleared = cleared
     }
 
-    func transformed(to destination: CGRect) -> PaintLayer? {
-        if destination == selection { return layer }
+    static func rotatedBounds(of rect: CGRect, by angle: CGFloat) -> CGRect {
+        if angle == 0 { return rect }
+        let width = abs(cos(angle)) * rect.width + abs(sin(angle)) * rect.height
+        let height = abs(sin(angle)) * rect.width + abs(cos(angle)) * rect.height
+        let bounds = CGRect(x: rect.midX - width / 2, y: rect.midY - height / 2, width: width, height: height)
+        // Avoid expanding exact pixel edges due to trigonometric rounding at right angles.
+        return bounds.insetBy(dx: 1e-9, dy: 1e-9).integral
+    }
+
+    func transformed(to destination: CGRect, rotation: CGFloat = 0) -> PaintLayer? {
+        if destination == selection && rotation == 0 { return layer }
         let width = layer.image.width
-        let target = destination.intersection(bounds)
+        let target = Self.rotatedBounds(of: destination, by: rotation).intersection(bounds)
         var pixels = cleared
         if !target.isEmpty {
             let rowBytes = Int(target.width) * 4
@@ -85,15 +94,15 @@ struct SelectedPixelsTransform {
             let foreground: Data
             let foregroundStart: Int
             let foregroundStride: Int
-            if destination.size == selection.size {
+            if rotation == 0 && destination.size == selection.size {
                 foreground = source
                 let sourceX = Int(selection.minX + target.minX - destination.minX)
                 let sourceY = Int(selection.minY + target.minY - destination.minY)
                 foregroundStart = (sourceY * width + sourceX) * 4
                 foregroundStride = width * 4
             } else {
-                guard let scaled = scaledPixels(destination: destination, visible: target) else { return nil }
-                foreground = scaled
+                guard let rendered = renderPixels(destination: destination, visible: target, rotation: rotation) else { return nil }
+                foreground = rendered
                 foregroundStart = 0
                 foregroundStride = rowBytes
             }
@@ -118,12 +127,14 @@ struct SelectedPixelsTransform {
         return moved
     }
 
-    private func scaledPixels(destination: CGRect, visible: CGRect) -> Data? {
+    private func renderPixels(destination: CGRect, visible: CGRect, rotation: CGFloat) -> Data? {
         guard let image = layer.image.cropping(to: selection) else { return nil }
         // Rasterize only the on-canvas portion. The drawing context has a bottom-left origin.
         return BGRA8.render(width: Int(visible.width), height: Int(visible.height)) { bitmap in
             bitmap.interpolationQuality = .low
-            bitmap.draw(image, in: CGRect(x: destination.minX - visible.minX, y: visible.maxY - destination.maxY,
+            bitmap.translateBy(x: destination.midX - visible.minX, y: visible.maxY - destination.midY)
+            bitmap.rotate(by: rotation)
+            bitmap.draw(image, in: CGRect(x: -destination.width / 2, y: -destination.height / 2,
                                           width: destination.width, height: destination.height))
         }
     }

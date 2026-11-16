@@ -26,8 +26,10 @@ its top-left pixel. To crop, choose **Image → Crop to Selection**
 
 Choose **Move Selected Pixels** in **Tools**, then drag from inside the
 selection to move pixels on the active layer. Drag a corner or edge handle to
-resize. The canvas previews the change as you drag. Release to commit, or press
-**Escape** during the drag to cancel. One undo restores the original pixels and
+resize, or drag the round handle above the selection to rotate around its center.
+The canvas previews the change as you drag. Release to commit, or press
+**Escape** during the drag to cancel. After rotation, the selection becomes a
+rectangle around the rotated area. One undo restores the original pixels and
 selection. Pixels past the canvas edge are clipped on commit.
 
 **Fit** shows the whole image, and **100%** shows one image pixel per display
