@@ -32,6 +32,11 @@ hide or show it. The arrows move the selected layer and the trash button deletes
 it. The **Layer** menu offers the same commands. A document can have up to eight
 layers. Crop applies to the whole stack.
 
+**Duplicate Layer** (Shift-Command-D) copies the selected layer above itself.
+**Merge Layer Down** (Command-M) blends the selected layer into the one below
+and keeps the lower layer's properties. Both commands are in the **Layer** menu
+and the floating **Layers** window.
+
 Double-click a layer or press **F4** to open **Layer Properties**. Set its name,
 visibility, opacity (0–255), and blend mode. The canvas previews the changes,
 and **OK** applies them as one undo step.

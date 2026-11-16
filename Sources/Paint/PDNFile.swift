@@ -155,7 +155,7 @@ enum PDNFile {
         var writer = PDNWriter(width: width, height: height, stack: stack)
         guard writer.data.count <= graphLimit else { throw PDNError.unsupported("oversized project metadata") }
         for layer in stack.layers {
-            guard let pixels = layer.pdnPixels ?? BGRA8.pixels(from: layer.image) else { throw CocoaError(.fileWriteUnknown) }
+            guard let pixels = layer.straightPixels else { throw CocoaError(.fileWriteUnknown) }
             try writer.pixels(pixels)
         }
         return writer.data

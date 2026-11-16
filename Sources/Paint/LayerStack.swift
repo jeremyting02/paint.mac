@@ -12,6 +12,8 @@ struct PaintLayer {
     var metadata: [PDNMetadata] = []
     var pdnPixels: Data?
 
+    var straightPixels: Data? { pdnPixels ?? BGRA8.pixels(from: image) }
+
     mutating func crop(to rect: CGRect) -> Bool {
         guard let cropped = image.cropping(to: rect) else { return false }
         let original = pdnPixels
@@ -36,8 +38,38 @@ struct LayerStack {
     var metadata: [PDNMetadata] = []
 
     var activeLayer: PaintLayer { layers[active] }
+    var canDuplicate: Bool { layers.count < Self.limit }
+    var canMergeDown: Bool { active > 0 }
     var needsBlendComposite: Bool {
         layers.lazy.filter { $0.isVisible && $0.opacity > 0 }.dropFirst().contains { $0.blendMode != .normal }
+    }
+
+    mutating func duplicateActiveLayer() -> Bool {
+        guard canDuplicate else { return false }
+        var copy = activeLayer
+        copy.isBackground = false
+        active += 1
+        layers.insert(copy, at: active)
+        return true
+    }
+
+    mutating func mergeActiveLayerDown() -> Bool {
+        guard canMergeDown else { return false }
+        let upper = activeLayer
+        var lower = layers[active - 1]
+        // Paint.NET applies the upper layer's settings to the pixels and keeps the lower layer's properties.
+        if upper.opacity > 0 {
+            guard let source = upper.straightPixels, var pixels = lower.straightPixels else { return false }
+            upper.blendMode.composite(source, onto: &pixels, opacity: upper.opacity)
+            guard let image = BGRA8.image(from: pixels, width: lower.image.width, height: lower.image.height)
+            else { return false }
+            lower.image = image
+            lower.pdnPixels = pixels
+            layers[active - 1] = lower
+        }
+        layers.remove(at: active)
+        active -= 1
+        return true
     }
 
     func draw(in context: CGContext, rect: CGRect, preview: CGImage? = nil) {
@@ -64,8 +96,8 @@ struct LayerStack {
         var pixels = Data(count: image.width * image.height * 4)
         for (index, layer) in layers.enumerated() where layer.isVisible && layer.opacity > 0 {
             let source = index == active ? preview : nil
-            let stored = source == nil ? layer.pdnPixels : nil
-            guard let bytes = stored ?? BGRA8.pixels(from: source ?? layer.image) else { return nil }
+            let sourcePixels = if let source { BGRA8.pixels(from: source) } else { layer.straightPixels }
+            guard let bytes = sourcePixels else { return nil }
             layer.blendMode.composite(bytes, onto: &pixels, opacity: layer.opacity)
         }
         return BGRA8.image(from: pixels, width: image.width, height: image.height)

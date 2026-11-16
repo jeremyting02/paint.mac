@@ -34,4 +34,23 @@ for mode in LayerBlendMode.allCases {
 var blend = Data([200, 0, 255, 255, 0, 0, 0, 0])
 LayerBlendMode.additive.composite(Data([100, 64, 31, 255, 100, 64, 31, 255]), onto: &blend, opacity: 128)
 precondition(blend == Data([228, 32, 255, 255, 100, 64, 31, 128]))
+
+var layers = imported
+layers.layers[0].opacity = 128
+layers.layers[0].blendMode = .multiply
+layers.layers[1].blendMode = .screen
+precondition(layers.duplicateActiveLayer())
+precondition(layers.active == 2 && layers.layers.count == 3)
+precondition(layers.activeLayer.name == "Top – 日本" && layers.activeLayer.pdnPixels == Data(top))
+precondition(layers.activeLayer.opacity == 161 && layers.activeLayer.blendMode == .screen)
+precondition(!layers.activeLayer.isVisible && !layers.activeLayer.isBackground)
+layers.layers[2].opacity = 0
+precondition(layers.mergeActiveLayerDown() && layers.activeLayer.pdnPixels == Data(top))
+precondition(layers.mergeActiveLayerDown() && layers.active == 0 && layers.layers.count == 1)
+precondition(layers.activeLayer.name == "Base" && layers.activeLayer.isVisible)
+precondition(layers.activeLayer.opacity == 128 && layers.activeLayer.blendMode == .multiply)
+let merged = try PDNFile.read(PDNFile.write(layers))
+precondition(merged.activeLayer.pdnPixels == layers.activeLayer.pdnPixels)
+precondition(merged.activeLayer.pdnPixels?[4..<12] == Data([49, 255, 2, 255, 255, 152, 13, 255]))
+precondition(!layers.mergeActiveLayerDown())
 print("Paint.NET 5.2 layer round-trip passed")

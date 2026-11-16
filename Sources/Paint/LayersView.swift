@@ -7,6 +7,8 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
     private let up = EditorView.icon("arrow.up", label: "Move Layer Up")
     private let down = EditorView.icon("arrow.down", label: "Move Layer Down")
     private let delete = EditorView.icon("trash", label: "Delete Layer")
+    private let duplicate = EditorView.icon("plus.square.on.square", label: "Duplicate Layer")
+    private let merge = EditorView.icon("arrow.down.to.line", label: "Merge Layer Down")
     private let properties = EditorView.icon("wrench", label: "Layer Properties")
     private var refreshing = false
 
@@ -38,16 +40,18 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
         scroll.heightAnchor.constraint(equalToConstant: 102).isActive = true
         scroll.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
 
-        let buttons = NSStackView(views: [add, up, down, delete, properties])
+        let buttons = NSStackView(views: [add, delete, duplicate, merge, up, down, properties])
         buttons.spacing = 3
         addArrangedSubview(buttons)
-        for button in [add, up, down, delete, properties] { button.target = self }
+        for button in [add, delete, duplicate, merge, up, down, properties] { button.target = self }
         add.action = #selector(addLayer(_:))
         up.action = #selector(moveLayer(_:))
         down.action = #selector(moveLayer(_:))
         up.tag = 1
         down.tag = -1
         delete.action = #selector(deleteLayer(_:))
+        duplicate.action = #selector(duplicateLayer(_:))
+        merge.action = #selector(mergeLayerDown(_:))
         properties.action = #selector(openProperties(_:))
     }
 
@@ -65,6 +69,8 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
         up.isEnabled = stack.active < stack.layers.count - 1
         down.isEnabled = stack.active > 0
         delete.isEnabled = stack.layers.count > 1
+        duplicate.isEnabled = stack.canDuplicate
+        merge.isEnabled = stack.canMergeDown
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { document?.stack?.layers.count ?? 0 }
@@ -97,6 +103,8 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
 
     @objc private func addLayer(_ sender: NSButton) { document?.addLayer() }
     @objc private func deleteLayer(_ sender: NSButton) { document?.deleteLayer() }
+    @objc private func duplicateLayer(_ sender: NSButton) { document?.duplicateLayer() }
+    @objc private func mergeLayerDown(_ sender: NSButton) { document?.mergeLayerDown() }
     @objc private func openProperties(_ sender: NSButton) { document?.showLayerProperties() }
     @objc private func openClickedLayer(_ sender: NSTableView) {
         guard sender.clickedRow >= 0, let document, let stack = document.stack else { return }

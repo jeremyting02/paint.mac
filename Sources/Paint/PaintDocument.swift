@@ -4,11 +4,11 @@ import UniformTypeIdentifiers
 @objc(PaintDocument)
 final class PaintDocument: NSDocument {
     enum LayerCommand: Int, CaseIterable {
-        case add, selectAbove, selectBelow, toggleVisibility, moveUp, moveDown, delete, properties
+        case add, delete, duplicate, mergeDown, selectAbove, selectBelow, toggleVisibility, moveUp, moveDown, properties
 
         var title: String {
-            ["Add Layer", "Select Layer Above", "Select Layer Below", "Show Layer",
-             "Move Layer Up", "Move Layer Down", "Delete Layer", "Layer Properties…"][rawValue]
+            ["Add Layer", "Delete Layer", "Duplicate Layer", "Merge Layer Down", "Select Layer Above", "Select Layer Below",
+             "Show Layer", "Move Layer Up", "Move Layer Down", "Layer Properties…"][rawValue]
         }
     }
 
@@ -72,6 +72,16 @@ final class PaintDocument: NSDocument {
         next.layers.remove(at: next.active)
         next.active = min(next.active, next.layers.count - 1)
         replaceStack(with: next, actionName: "Delete Layer")
+    }
+
+    func duplicateLayer() {
+        guard var next = stack, next.duplicateActiveLayer() else { return }
+        replaceStack(with: next, actionName: LayerCommand.duplicate.title)
+    }
+
+    func mergeLayerDown() {
+        guard var next = stack, next.mergeActiveLayerDown() else { return }
+        replaceStack(with: next, actionName: LayerCommand.mergeDown.title)
     }
 
     func showLayerProperties() {
@@ -150,6 +160,8 @@ final class PaintDocument: NSDocument {
         case .moveUp: moveLayer(by: 1)
         case .moveDown: moveLayer(by: -1)
         case .delete: deleteLayer()
+        case .duplicate: duplicateLayer()
+        case .mergeDown: mergeLayerDown()
         case .properties: showLayerProperties()
         }
     }
@@ -191,6 +203,8 @@ final class PaintDocument: NSDocument {
                 menuItem.title = stack.activeLayer.isVisible ? "Hide Layer" : "Show Layer"
                 return true
             case .delete: return stack.layers.count > 1
+            case .duplicate: return stack.canDuplicate
+            case .mergeDown: return stack.canMergeDown
             case .properties: return windowForSheet?.attachedSheet == nil
             }
         default: return super.validateUserInterfaceItem(item)
