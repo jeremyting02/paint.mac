@@ -1,7 +1,53 @@
 import AppKit
 
 final class CanvasView: NSView {
-    enum Tool { case brush, eraser, crop }
+    enum Tool { case brush, eraser, rectangleSelect, moveSelectedPixels }
+
+    private struct MoveDrag {
+        let pixels: SelectedPixelsTransform
+        let anchor: CGPoint
+        let handle: ResizeHandle?
+        var destination: CGRect
+        var preview: PaintLayer?
+    }
+
+    private enum HandleEdge: CGFloat, CaseIterable {
+        case minimum = 0, middle = 0.5, maximum = 1
+
+        func resized(_ range: ClosedRange<CGFloat>, by offset: CGFloat) -> ClosedRange<CGFloat> {
+            switch self {
+            case .minimum: return min(range.lowerBound + offset, range.upperBound - 1)...range.upperBound
+            case .middle: return range
+            case .maximum: return range.lowerBound...max(range.upperBound + offset, range.lowerBound + 1)
+            }
+        }
+    }
+
+    private struct ResizeHandle {
+        let horizontal: HandleEdge
+        let vertical: HandleEdge
+
+        static let all: [ResizeHandle] = HandleEdge.allCases.flatMap { vertical in
+            HandleEdge.allCases.compactMap { horizontal in
+                horizontal == .middle && vertical == .middle ? nil : ResizeHandle(horizontal: horizontal, vertical: vertical)
+            }
+        }
+
+        func resized(_ rect: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
+            let x = horizontal.resized(rect.minX...rect.maxX, by: dx)
+            let y = vertical.resized(rect.minY...rect.maxY, by: dy)
+            return CGRect(x: x.lowerBound, y: y.lowerBound,
+                          width: x.upperBound - x.lowerBound, height: y.upperBound - y.lowerBound)
+        }
+
+        func frame(in marquee: CGRect) -> CGRect {
+            // Spread handles out on small selections so the center remains draggable.
+            let width = max(marquee.width, 28), height = max(marquee.height, 28)
+            let x = marquee.midX + (horizontal.rawValue - 0.5) * width
+            let y = marquee.midY + (vertical.rawValue - 0.5) * height
+            return CGRect(x: x - 4, y: y - 4, width: 8, height: 8)
+        }
+    }
 
     private static let zoomSteps: [CGFloat] = [
         1, 2, 3, 5, 6, 8, 12.5, 16, 25, 33, 50, 66, 75, 100, 150, 200, 300, 400, 500,
@@ -11,7 +57,7 @@ final class CanvasView: NSView {
 
     private weak var document: PaintDocument?
     var tool = Tool.brush {
-        didSet { if tool != oldValue { clearSelection() } }
+        didSet { if tool != oldValue { cancelMove() } }
     }
     private(set) var zoomPercent: CGFloat?
     private(set) var displayedZoomPercent: CGFloat = 0
@@ -21,6 +67,7 @@ final class CanvasView: NSView {
     var selectionDidChange: (() -> Void)?
     var layerPreview: LayerStack? {
         didSet {
+            cancelMove()
             composite = nil
             needsDisplay = true
         }
@@ -35,7 +82,8 @@ final class CanvasView: NSView {
     }
     private var selectionAnchor: CGPoint?
 
-    private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String)?
+    private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String, imageSelection: CGRect?)?
+    private var move: MoveDrag?
     private var panLocation: CGPoint?
     private var zoomScrollDistance: CGFloat = 0
     private var zoomingScrollGesture = false
@@ -116,10 +164,12 @@ final class CanvasView: NSView {
                                                    name: NSWindow.didResignKeyNotification, object: newWindow)
         }
         panLocation = nil
+        cancelMove()
         super.viewWillMove(toWindow: newWindow)
     }
 
     @objc private func windowDidResignKey(_ notification: Notification) {
+        cancelMove()
         guard panLocation != nil else { return }
         panLocation = nil
         window?.invalidateCursorRects(for: self)
@@ -156,7 +206,7 @@ final class CanvasView: NSView {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, panLocation == nil,
+        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, move == nil, panLocation == nil,
               let scrollView = enclosingScrollView else { return }
 
         let steps: Int
@@ -193,7 +243,7 @@ final class CanvasView: NSView {
             super.otherMouseDown(with: event)
             return
         }
-        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil else { return }
+        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, move == nil else { return }
         panLocation = event.locationInWindow
         NSCursor.closedHand.set()
         window?.invalidateCursorRects(for: self)
@@ -244,30 +294,56 @@ final class CanvasView: NSView {
 
     func clearSelection() {
         selectionAnchor = nil
-        if selection != .zero { selection = .zero }
+        setSelection(.zero)
     }
 
-    func cancelStroke() {
+    func setSelection(_ rect: CGRect) {
+        let rect = rect.isEmpty ? .zero : rect
+        if selection != rect { selection = rect }
+    }
+
+    func cancelEditingGesture() {
         stroke = nil
+        selectionAnchor = nil
+        cancelMove()
         composite = nil
     }
 
-    var cropRect: CGRect? {
-        guard let image = document?.image, !selection.isEmpty,
-              selection.size != CGSize(width: image.width, height: image.height) else { return nil }
-        // The canvas uses a bottom-left origin. CGImage cropping starts at the top left.
-        return CGRect(x: selection.minX, y: CGFloat(image.height) - selection.maxY,
-                      width: selection.width, height: selection.height)
+    private func cancelMove() {
+        guard move != nil else { return }
+        move = nil
+        composite = nil
+        needsDisplay = true
+        selectionDidChange?()
     }
 
-    func cropSelection() {
-        if let cropRect { document?.crop(to: cropRect) }
+    var imageSelection: CGRect? {
+        guard let image = document?.image, !selection.isEmpty else { return nil }
+        return topLeftRect(selection, imageHeight: image.height)
+    }
+
+    private func topLeftRect(_ rect: CGRect, imageHeight: Int) -> CGRect {
+        // The canvas and bitmap context use a bottom-left origin. CGImage rows start at the top.
+        return CGRect(x: rect.minX, y: CGFloat(imageHeight) - rect.maxY, width: rect.width, height: rect.height)
+    }
+
+    private func marquee(for selection: CGRect, imageWidth: Int) -> CGRect {
+        let scale = imageRect.width / CGFloat(imageWidth)
+        return CGRect(x: imageRect.minX + selection.minX * scale, y: imageRect.minY + selection.minY * scale,
+                      width: selection.width * scale, height: selection.height * scale)
+    }
+
+    var cropRect: CGRect? {
+        guard move == nil, let image = document?.image, let imageSelection,
+              imageSelection.size != CGSize(width: image.width, height: image.height) else { return nil }
+        return imageSelection
     }
 
     override func keyDown(with event: NSEvent) {
-        if tool == .crop && (event.keyCode == 36 || event.keyCode == 76) {
-            cropSelection()
-        } else if tool == .crop && event.keyCode == 53 {
+        if event.keyCode == 53 && event.isARepeat { return }
+        if event.keyCode == 53 && move != nil {
+            cancelMove()
+        } else if event.keyCode == 53 && (!selection.isEmpty || selectionAnchor != nil) {
             clearSelection()
         } else {
             super.keyDown(with: event)
@@ -277,26 +353,39 @@ final class CanvasView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard panLocation == nil else { return }
         let location = convert(event.locationInWindow, from: nil)
-        guard imageRect.contains(location), let image = document?.image else {
-            clearSelection()
+        guard let image = document?.image else { return }
+        let handle: ResizeHandle? = if tool == .moveSelectedPixels && !selection.isEmpty {
+            ResizeHandle.all.first { $0.frame(in: marquee(for: selection, imageWidth: image.width)).contains(location) }
+        } else { nil }
+        guard imageRect.contains(location) || handle != nil else {
+            if tool == .rectangleSelect { clearSelection() }
             return
         }
 
         window?.makeFirstResponder(self)
-        if tool == .crop {
+        if tool == .rectangleSelect {
             selectionAnchor = pixelEdge(at: location, in: image)
             selection = .zero
             return
         }
 
-        guard document?.stack?.activeLayer.isVisible == true else {
+        guard let layer = document?.stack?.activeLayer, layer.isVisible else {
             NSSound.beep()
+            return
+        }
+        if tool == .moveSelectedPixels {
+            let point = imagePoint(location)
+            guard handle != nil || selection.contains(point), let imageSelection,
+                  let pixels = SelectedPixelsTransform(layer: layer, selection: imageSelection) else { return }
+            move = MoveDrag(pixels: pixels, anchor: point, handle: handle, destination: selection)
+            selectionDidChange?()
             return
         }
         guard let bitmap = LayerStack.makeBitmap(width: image.width, height: image.height) else { return }
         let isErasing = tool == .eraser
         bitmap.setBlendMode(.copy)
         bitmap.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        if !selection.isEmpty { bitmap.clip(to: selection) }
         bitmap.setBlendMode(isErasing ? .clear : .normal)
         let color = (brushColor.usingColorSpace(.sRGB) ?? .black).withAlphaComponent(1).cgColor
         bitmap.setFillColor(color)
@@ -307,7 +396,7 @@ final class CanvasView: NSView {
         let point = imagePoint(location)
         bitmap.fillEllipse(in: CGRect(x: point.x - brushSize / 2, y: point.y - brushSize / 2,
                                      width: brushSize, height: brushSize))
-        stroke = (bitmap, point, isErasing ? "Eraser" : "Paintbrush")
+        stroke = (bitmap, point, isErasing ? "Eraser" : "Paintbrush", imageSelection)
         needsDisplay = true
     }
 
@@ -318,6 +407,20 @@ final class CanvasView: NSView {
             let end = pixelEdge(at: location, in: image)
             selection = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
                                width: abs(start.x - end.x), height: abs(start.y - end.y))
+            return
+        }
+        if var drag = move, let image = document?.image {
+            let point = imagePoint(location)
+            let width = CGFloat(image.width), height = CGFloat(image.height)
+            let dx = max(-width, min(width, (point.x - drag.anchor.x).rounded()))
+            let dy = max(-height, min(height, (point.y - drag.anchor.y).rounded()))
+            let destination = drag.handle?.resized(selection, dx: dx, dy: dy) ?? selection.offsetBy(dx: dx, dy: dy)
+            guard destination != drag.destination else { return }
+            drag.destination = destination
+            drag.preview = destination == selection ? nil : drag.pixels.transformed(to: topLeftRect(destination, imageHeight: image.height))
+            move = drag
+            composite = nil
+            needsDisplay = true
             return
         }
         guard let current = stroke else { return }
@@ -333,10 +436,20 @@ final class CanvasView: NSView {
     override func mouseUp(with event: NSEvent) {
         mouseDragged(with: event)
         selectionAnchor = nil
+        if let drag = move {
+            cancelMove()
+            if let preview = drag.preview {
+                let bounds = CGRect(x: 0, y: 0, width: preview.image.width, height: preview.image.height)
+                let destination = drag.destination.intersection(bounds)
+                let actionName = drag.handle == nil ? "Move Selected Pixels" : "Resize Selected Pixels"
+                document?.commitSelectedPixelsTransform(preview, from: selection, to: destination, actionName: actionName)
+            }
+            return
+        }
         guard let current = stroke else { return }
         stroke = nil
         if let image = current.bitmap.makeImage() {
-            document?.replaceImage(with: image, actionName: current.actionName)
+            document?.replaceImage(with: image, actionName: current.actionName, in: current.imageSelection)
         }
         needsDisplay = true
     }
@@ -348,8 +461,16 @@ final class CanvasView: NSView {
         dirtyRect.fill()
         let rect = imageRect
         let visible = rect.intersection(dirtyRect)
-        guard !visible.isEmpty, let context = NSGraphicsContext.current?.cgContext,
-              let stack = layerPreview ?? document?.stack else { return }
+        guard let context = NSGraphicsContext.current?.cgContext,
+              var stack = layerPreview ?? document?.stack else { return }
+        if let preview = move?.preview { stack.layers[stack.active] = preview }
+        let marquee = marquee(for: move?.destination ?? selection, imageWidth: stack.activeLayer.image.width)
+        defer {
+            if tool == .moveSelectedPixels && !marquee.isEmpty && stack.activeLayer.isVisible {
+                drawResizeHandles(around: marquee, in: context)
+            }
+        }
+        guard !visible.isEmpty else { return }
 
         context.saveGState()
         context.clip(to: rect)
@@ -365,7 +486,6 @@ final class CanvasView: NSView {
                                     y: rect.minY + CGFloat(row) * square, width: square, height: square))
             }
         }
-        let imageWidth = CGFloat(stack.activeLayer.image.width)
         if displayedZoomPercent >= 100 {
             context.interpolationQuality = .none
         }
@@ -380,10 +500,7 @@ final class CanvasView: NSView {
         } else {
             stack.draw(in: context, rect: rect, preview: strokeImage)
         }
-        if !selection.isEmpty {
-            let scale = rect.width / imageWidth
-            let marquee = CGRect(x: rect.minX + selection.minX * scale, y: rect.minY + selection.minY * scale,
-                                 width: selection.width * scale, height: selection.height * scale)
+        if !marquee.isEmpty {
             context.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor)
             context.fill(marquee)
             context.setStrokeColor(NSColor.white.cgColor)
@@ -392,6 +509,20 @@ final class CanvasView: NSView {
             context.setStrokeColor(NSColor.black.cgColor)
             context.setLineDash(phase: 0, lengths: [4, 3])
             context.stroke(marquee)
+        }
+        context.restoreGState()
+    }
+
+    private func drawResizeHandles(around marquee: CGRect, in context: CGContext) {
+        context.saveGState()
+        context.clip(to: imageRect.insetBy(dx: -20, dy: -20))
+        context.setFillColor(NSColor.white.cgColor)
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1)
+        for handle in ResizeHandle.all {
+            let frame = handle.frame(in: marquee)
+            context.fill(frame)
+            context.stroke(frame)
         }
         context.restoreGState()
     }

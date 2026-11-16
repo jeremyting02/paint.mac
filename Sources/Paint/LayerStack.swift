@@ -49,6 +49,86 @@ struct PaintLayer {
     }
 }
 
+struct SelectedPixelsTransform {
+    private let layer: PaintLayer
+    private let source: Data
+    private let cleared: Data
+    private let selection: CGRect
+    private let bounds: CGRect
+
+    init?(layer: PaintLayer, selection: CGRect) {
+        let width = layer.image.width, height = layer.image.height
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        guard !selection.isEmpty, bounds.contains(selection), selection == selection.integral,
+              let source = layer.straightPixels else { return nil }
+        self.layer = layer
+        self.source = source
+        self.selection = selection
+        self.bounds = bounds
+
+        var cleared = source
+        for row in Int(selection.minY)..<Int(selection.maxY) {
+            let start = (row * width + Int(selection.minX)) * 4
+            cleared.resetBytes(in: start..<(start + Int(selection.width) * 4))
+        }
+        self.cleared = cleared
+    }
+
+    func transformed(to destination: CGRect) -> PaintLayer? {
+        if destination == selection { return layer }
+        let width = layer.image.width
+        let target = destination.intersection(bounds)
+        var pixels = cleared
+        if !target.isEmpty {
+            let rowBytes = Int(target.width) * 4
+            let targetStart = (Int(target.minY) * width + Int(target.minX)) * 4
+            let foreground: Data
+            let foregroundStart: Int
+            let foregroundStride: Int
+            if destination.size == selection.size {
+                foreground = source
+                let sourceX = Int(selection.minX + target.minX - destination.minX)
+                let sourceY = Int(selection.minY + target.minY - destination.minY)
+                foregroundStart = (sourceY * width + sourceX) * 4
+                foregroundStride = width * 4
+            } else {
+                guard let scaled = scaledPixels(destination: destination, visible: target) else { return nil }
+                foreground = scaled
+                foregroundStart = 0
+                foregroundStride = rowBytes
+            }
+            pixels.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
+                foreground.withUnsafeBytes { (original: UnsafeRawBufferPointer) in
+                    for row in 0..<Int(target.height) {
+                        let start = targetStart + row * width * 4
+                        let sourceStart = foregroundStart + row * foregroundStride
+                        LayerBlendMode.normal.composite(
+                            UnsafeRawBufferPointer(rebasing: original[sourceStart..<(sourceStart + rowBytes)]),
+                            onto: UnsafeMutableRawBufferPointer(rebasing: destination[start..<(start + rowBytes)]),
+                            opacity: 255
+                        )
+                    }
+                }
+            }
+        }
+        guard let image = BGRA8.image(from: pixels, width: width, height: layer.image.height) else { return nil }
+        var moved = layer
+        moved.image = image
+        moved.pdnPixels = pixels
+        return moved
+    }
+
+    private func scaledPixels(destination: CGRect, visible: CGRect) -> Data? {
+        guard let image = layer.image.cropping(to: selection) else { return nil }
+        // Rasterize only the on-canvas portion. The drawing context has a bottom-left origin.
+        return BGRA8.render(width: Int(visible.width), height: Int(visible.height)) { bitmap in
+            bitmap.interpolationQuality = .low
+            bitmap.draw(image, in: CGRect(x: destination.minX - visible.minX, y: visible.maxY - destination.maxY,
+                                          width: destination.width, height: destination.height))
+        }
+    }
+}
+
 struct LayerStack {
     static let limit = 8
     static func supportsCanvas(width: Int, height: Int) -> Bool {

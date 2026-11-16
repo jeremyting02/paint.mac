@@ -27,18 +27,44 @@ final class PaintDocument: NSDocument {
         editor?.refreshImage()
     }
 
-    func replaceImage(with replacement: CGImage, actionName: String) {
+    func replaceImage(with replacement: CGImage, actionName: String, in selection: CGRect?) {
         guard var next = stack else { return }
-        next.layers[next.active].image = replacement
+        if let selection, var pixels = next.activeLayer.pdnPixels {
+            // Compare renderer output and keep the original straight-alpha bytes for untouched pixels.
+            guard let region = replacement.cropping(to: selection),
+                  let originalRegion = next.activeLayer.image.cropping(to: selection),
+                  let edited = BGRA8.pixels(from: region), let original = BGRA8.pixels(from: originalRegion),
+                  edited != original else { return }
+            let regionPixelCount = edited.count / 4
+            let origin = Int(selection.minY) * replacement.width + Int(selection.minX)
+            pixels.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
+                edited.withUnsafeBytes { (after: UnsafeRawBufferPointer) in
+                    original.withUnsafeBytes { (before: UnsafeRawBufferPointer) in
+                        for pixel in 0..<regionPixelCount {
+                            let source = pixel * 4
+                            let updated = after.loadUnaligned(fromByteOffset: source, as: UInt32.self)
+                            guard updated != before.loadUnaligned(fromByteOffset: source, as: UInt32.self) else { continue }
+                            let offset = origin + pixel / region.width * replacement.width + pixel % region.width
+                            destination.storeBytes(of: updated, toByteOffset: offset * 4, as: UInt32.self)
+                        }
+                    }
+                }
+            }
+            guard let image = BGRA8.image(from: pixels, width: replacement.width, height: replacement.height) else { return }
+            next.layers[next.active].image = image
+            next.layers[next.active].pdnPixels = pixels
+        } else {
+            next.layers[next.active].image = replacement
+        }
         replaceStack(with: next, actionName: actionName)
     }
 
-    func crop(to rect: CGRect) {
-        guard var next = stack else { return }
+    @objc func cropSelection(_ sender: Any?) {
+        guard let rect = editor?.canvas.cropRect, var next = stack else { return }
         for index in next.layers.indices {
             guard next.layers[index].crop(to: rect) else { return }
         }
-        replaceStack(with: next, actionName: "Crop")
+        replaceStack(with: next, actionName: "Crop to Selection")
     }
 
     func addLayer() {
@@ -148,10 +174,18 @@ final class PaintDocument: NSDocument {
         }
     }
 
-    private func replaceStack(with replacement: LayerStack, actionName: String) {
+    func commitSelectedPixelsTransform(_ layer: PaintLayer, from source: CGRect, to destination: CGRect, actionName: String) {
+        guard var next = stack else { return }
+        next.layers[next.active] = layer
+        replaceStack(with: next, actionName: actionName, selectionChange: (source, destination))
+    }
+
+    private func replaceStack(with replacement: LayerStack, actionName: String,
+                              selectionChange: (before: CGRect, after: CGRect)? = nil) {
         guard let previous = stack else { return }
         undoManager?.registerUndo(withTarget: self) { document in
-            document.replaceStack(with: previous, actionName: actionName)
+            document.replaceStack(with: previous, actionName: actionName,
+                                  selectionChange: selectionChange.map { ($0.after, $0.before) })
         }
         undoManager?.setActionName(actionName)
         if undoManager?.isUndoing == true {
@@ -164,7 +198,9 @@ final class PaintDocument: NSDocument {
             historyPosition = historyEntries.count - 1
         }
         stack = replacement
-        editor?.refreshImage()
+        let oldImage = previous.activeLayer.image, newImage = replacement.activeLayer.image
+        editor?.refreshImage(clearSelection: oldImage.width != newImage.width || oldImage.height != newImage.height)
+        if let selectionChange { editor?.canvas.setSelection(selectionChange.after) }
         editor?.updateHistory(undoManager)
     }
 
@@ -230,6 +266,7 @@ final class PaintDocument: NSDocument {
         switch item.action {
         case #selector(undoStroke(_:)): return undoManager?.canUndo == true
         case #selector(redoStroke(_:)): return undoManager?.canRedo == true
+        case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
         case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false
         case #selector(toggleUtilityPanel(_:)):
             if let menuItem = item as? NSMenuItem, let kind = UtilityPanels.Kind(rawValue: menuItem.tag) {
@@ -296,7 +333,7 @@ final class PaintDocument: NSDocument {
         undoManager?.removeAllActions()
         historyEntries = ["Open Image"]
         historyPosition = 0
-        editor?.refreshImage()
+        editor?.refreshImage(clearSelection: true)
         editor?.updateHistory(undoManager)
     }
 

@@ -10,8 +10,9 @@ final class EditorView: NSView {
     private let zoomLevel = NSTextField(labelWithString: "")
     private let brush = EditorView.icon("paintbrush", label: "Paintbrush")
     private let eraser = EditorView.icon("eraser", label: "Eraser")
-    private let crop = EditorView.icon("crop", label: "Rectangle Crop")
-    private let applyCrop = NSButton(title: "Crop", target: nil, action: nil)
+    private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
+    private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
+    private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private let color = NSColorWell()
@@ -28,7 +29,7 @@ final class EditorView: NSView {
         layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
-        for button in [brush, eraser, crop] {
+        for button in [brush, eraser, rectangleSelect, moveSelectedPixels] {
             button.setButtonType(.pushOnPushOff)
             button.target = self
             button.action = #selector(selectTool(_:))
@@ -39,8 +40,8 @@ final class EditorView: NSView {
         redo.target = document
         redo.action = #selector(PaintDocument.redoStroke(_:))
         updateHistory(document.undoManager)
-        applyCrop.target = self
-        applyCrop.action = #selector(cropSelection(_:))
+        applyCrop.target = document
+        applyCrop.action = #selector(PaintDocument.cropSelection(_:))
         canvas.selectionDidChange = { [weak self] in self?.updateStatus() }
 
         scrollView.documentView = canvas
@@ -75,7 +76,7 @@ final class EditorView: NSView {
 
         let toolbar = NSStackView(views: [undo, redo, NSTextField(labelWithString: "Size"), size, applyCrop])
         toolbar.spacing = 8
-        for button in [brush, eraser, crop] { toolButtons.addArrangedSubview(button) }
+        for button in [brush, eraser, rectangleSelect, moveSelectedPixels] { toolButtons.addArrangedSubview(button) }
         toolButtons.distribution = .fillEqually
         toolButtons.spacing = 1
         let swatches = NSStackView(views: swatchColors.enumerated().map { index, swatch in
@@ -157,9 +158,9 @@ final class EditorView: NSView {
         canvas.updateViewport()
     }
 
-    func refreshImage() {
-        canvas.cancelStroke()
-        canvas.clearSelection()
+    func refreshImage(clearSelection: Bool = false) {
+        canvas.cancelEditingGesture()
+        if clearSelection { canvas.clearSelection() }
         canvas.updateViewport()
         layersView.refresh()
         updateStatus()
@@ -168,7 +169,7 @@ final class EditorView: NSView {
     private func updateStatus() {
         applyCrop.isEnabled = canvas.cropRect != nil
         let dimensions = document?.image.map { "\($0.width) × \($0.height) px" } ?? ""
-        if let rect = canvas.cropRect {
+        if let rect = canvas.imageSelection {
             status.stringValue = "\(Int(rect.width)) × \(Int(rect.height)) at \(Int(rect.minX)), \(Int(rect.minY))  ·  \(dimensions)"
         } else {
             status.stringValue = dimensions
@@ -200,16 +201,17 @@ final class EditorView: NSView {
     }
 
     @objc private func selectTool(_ sender: NSButton) {
-        for (button, tool) in [(brush, CanvasView.Tool.brush), (eraser, .eraser), (crop, .crop)] {
+        let tools: [(NSButton, CanvasView.Tool)] = [
+            (brush, .brush), (eraser, .eraser), (rectangleSelect, .rectangleSelect),
+            (moveSelectedPixels, .moveSelectedPixels)
+        ]
+        for (button, tool) in tools {
             let selected = button === sender
             button.state = selected ? .on : .off
             button.contentTintColor = selected ? .controlAccentColor : .labelColor
             if selected { canvas.tool = tool }
         }
-    }
-
-    @objc private func cropSelection(_ sender: NSButton) {
-        canvas.cropSelection()
+        canvas.window?.makeFirstResponder(canvas)
     }
 
     private func updateZoom() {

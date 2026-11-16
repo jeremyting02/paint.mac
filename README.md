@@ -18,10 +18,20 @@ Choose **Paintbrush** or **Eraser** in the floating **Tools** window. Pick a
 paint color in **Colors** and use **Size** above the canvas to set the diameter
 in image pixels. Drag on the canvas to paint or erase.
 
-Choose **Rectangle Crop**, drag a rectangle, then click **Crop** or press
-**Return**. Press **Escape** to clear the rectangle. The status bar shows the
-selection size and its top-left pixel. **Fit** shows the whole image, and
-**100%** shows one image pixel per display pixel. Hold **Command** and scroll
+Choose **Rectangle Select** and drag to select an area. The selection stays
+active when you switch tools and limits paintbrush and eraser strokes to that
+area. Press **Escape** to deselect. The status bar shows the selection size and
+its top-left pixel. To crop, choose **Image → Crop to Selection**
+(Shift-Command-X) or click the crop button above the canvas.
+
+Choose **Move Selected Pixels** in **Tools**, then drag from inside the
+selection to move pixels on the active layer. Drag a corner or edge handle to
+resize. The canvas previews the change as you drag. Release to commit, or press
+**Escape** during the drag to cancel. One undo restores the original pixels and
+selection. Pixels past the canvas edge are clipped on commit.
+
+**Fit** shows the whole image, and **100%** shows one image pixel per display
+pixel. Hold **Command** and scroll
 to zoom toward or away from the pointer. Hold the middle mouse button and drag
 to pan the canvas with any tool active. Scrolling without Command moves the view.
 

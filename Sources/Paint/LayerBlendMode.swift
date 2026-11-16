@@ -39,28 +39,32 @@ enum LayerBlendMode: Int, CaseIterable {
     func composite(_ source: Data, onto destination: inout Data, opacity: UInt8) {
         destination.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
             source.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
-                for i in stride(from: 0, to: target.count, by: 4) {
-                    let alpha = Int(source[i + 3]) * Int(opacity)
-                    if alpha == 0 { continue }
-                    let backdropAlpha = Int(target[i + 3])
-                    if backdropAlpha == 0 {
-                        for channel in i..<(i + 3) { target[channel] = source[channel] }
-                        target[i + 3] = UInt8((alpha + 127) / 255)
-                        continue
-                    }
-                    // Blend only the overlap. The uncovered parts keep their original colors.
-                    let backdrop = backdropAlpha * (65025 - alpha)
-                    let foreground = (255 - backdropAlpha) * alpha
-                    let overlap = backdropAlpha * alpha
-                    let total = backdrop + foreground + overlap
-                    for channel in i..<(i + 3) {
-                        let a = Int(target[channel]), b = Int(source[channel])
-                        let sum = backdrop * a + foreground * b + overlap * blend(a, b)
-                        target[channel] = UInt8((sum + total / 2) / total)
-                    }
-                    target[i + 3] = UInt8((total + 32512) / 65025)
-                }
+                composite(source, onto: target, opacity: opacity)
             }
+        }
+    }
+
+    func composite(_ source: UnsafeRawBufferPointer, onto target: UnsafeMutableRawBufferPointer, opacity: UInt8) {
+        for i in stride(from: 0, to: target.count, by: 4) {
+            let alpha = Int(source[i + 3]) * Int(opacity)
+            if alpha == 0 { continue }
+            let backdropAlpha = Int(target[i + 3])
+            if backdropAlpha == 0 || (alpha == 65025 && self == .normal) {
+                for channel in i..<(i + 3) { target[channel] = source[channel] }
+                target[i + 3] = UInt8((alpha + 127) / 255)
+                continue
+            }
+            // Blend only the overlap. The uncovered parts keep their original colors.
+            let backdrop = backdropAlpha * (65025 - alpha)
+            let foreground = (255 - backdropAlpha) * alpha
+            let overlap = backdropAlpha * alpha
+            let total = backdrop + foreground + overlap
+            for channel in i..<(i + 3) {
+                let a = Int(target[channel]), b = Int(source[channel])
+                let sum = backdrop * a + foreground * b + overlap * blend(a, b)
+                target[channel] = UInt8((sum + total / 2) / total)
+            }
+            target[i + 3] = UInt8((total + 32512) / 65025)
         }
     }
 }
@@ -78,14 +82,20 @@ enum BGRA8 {
     }
 
     static func pixels(from image: CGImage) -> Data? {
-        let bytesPerRow = image.width * 4
-        var pixels = Data(count: bytesPerRow * image.height)
+        render(width: image.width, height: image.height) { context in
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        }
+    }
+
+    static func render(width: Int, height: Int, draw: (CGContext) -> Void) -> Data? {
+        let bytesPerRow = width * 4
+        var pixels = Data(count: bytesPerRow * height)
         let converted = pixels.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
-            guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+            guard let context = CGContext(data: bytes.baseAddress, width: width, height: height,
                                           bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace,
                                           bitmapInfo: byteOrder | CGImageAlphaInfo.premultipliedFirst.rawValue)
             else { return false }
-            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            draw(context)
             for index in stride(from: 0, to: bytes.count, by: 4) {
                 let alpha = Int(bytes[index + 3])
                 if alpha == 0 || alpha == 255 { continue }

@@ -31,6 +31,8 @@ editItem.submenu = editMenu
 
 let imageItem = menu.addItem(withTitle: "Image", action: nil, keyEquivalent: "")
 let imageMenu = NSMenu(title: "Image")
+let crop = imageMenu.addItem(withTitle: "Crop to Selection", action: #selector(PaintDocument.cropSelection(_:)), keyEquivalent: "x")
+crop.keyEquivalentModifierMask = [.command, .shift]
 let flatten = imageMenu.addItem(withTitle: "Flatten", action: #selector(PaintDocument.flattenLayers(_:)), keyEquivalent: "f")
 flatten.keyEquivalentModifierMask = [.command, .shift]
 imageItem.submenu = imageMenu
