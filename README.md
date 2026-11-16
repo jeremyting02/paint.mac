@@ -36,10 +36,10 @@ past its opposite edge to flip. **Command**-drag to keep the original pixels
 and transform a copy. Use the arrow keys to nudge one pixel, or hold **Control**
 to nudge ten.
 
-The preview stays editable between drags. Press **Return** or **Escape**, or
-click **Finish**, to commit the transforms as one undo step. Use **Undo** to
-discard the preview. Pixels and selection edges past the canvas are clipped on
-commit.
+The preview stays editable between drags. Each completed transform appears in
+**History**. Press **Return** or **Escape**, or click **Finish**, to commit it as
+**Finish Selection**. Undoing that step restores the editable preview. Pixels
+and selection edges past the canvas are clipped on commit.
 
 Choose **Move Selection** or press **Shift-M** to move, resize, or rotate only
 the outline using the same handles. In the **Edit** menu, **Copy Selection**
@@ -49,18 +49,19 @@ the outline using the same handles. In the **Edit** menu, **Copy Selection**
 Use **Command-X** to cut selected pixels from the active layer and **Command-C**
 to copy them. With no selection, Copy takes the entire active layer.
 **Command-V** pastes a clipboard image into **Move Selected Pixels**, where it
-can be positioned, resized, or rotated before committing. Commit with **Return**,
-**Escape**, or **Finish**, or use **Command-Z** to discard the floating paste.
-Pixels outside the canvas are clipped on commit.
+can be positioned, resized, or rotated before committing. **Paste** has its
+own history entry. Use **Command-Z** to step back through its transforms and
+then remove the floating paste.
 
 **Fit** shows the whole image, and **100%** shows one image pixel per display
 pixel. Hold **Command** and scroll
 to zoom toward or away from the pointer. Hold the middle mouse button and drag
 to pan the canvas with any tool active. Scrolling without Command moves the view.
 
-Use **Command-Z** and **Command-Y** to undo or redo an edit.
-Each document keeps the five most recent undo steps, which you can also select
-in the floating **History** window. In **Layers**, use **+** to insert a transparent
+Use **Command-Z** and **Command-Y** to undo or redo an edit. **Rectangle Select**
+and **Deselect** also appear in **History**.
+Each document keeps its undo history until you close it. Scroll the floating
+**History** window and select an entry to jump to it. In **Layers**, use **+** to insert a transparent
 layer above the selected row, click a row to edit it, and use its checkbox to
 hide or show it. The arrows move the selected layer and the trash button deletes
 it. The **Layer** menu offers the same commands. A document can have up to eight

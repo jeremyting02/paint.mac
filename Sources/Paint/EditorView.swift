@@ -1,6 +1,6 @@
 import AppKit
 
-final class EditorView: NSView {
+final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     let canvas: CanvasView
     private weak var document: PaintDocument?
     private let scrollView = NSScrollView()
@@ -20,7 +20,11 @@ final class EditorView: NSView {
     private let color = NSColorWell()
     private let toolButtons = NSStackView()
     private let colorControls = NSStackView()
-    private let historyRows = NSStackView()
+    private let historyScroll = NSScrollView()
+    private let historyTable = NSTableView()
+    private let historyUndo = EditorView.icon("arrow.uturn.backward", label: "Undo")
+    private let historyRedo = EditorView.icon("arrow.uturn.forward", label: "Redo")
+    private var updatingHistory = false
     private let layersView: LayersView
     private var panels: UtilityPanels?
     private let swatchColors: [(String, NSColor)] = [("Black", .black), ("Red", .systemRed), ("Blue", .systemBlue)]
@@ -37,10 +41,29 @@ final class EditorView: NSView {
             button.action = #selector(selectTool(_:))
         }
         selectTool(brush)
-        undo.target = document
-        undo.action = #selector(PaintDocument.undoStroke(_:))
-        redo.target = document
-        redo.action = #selector(PaintDocument.redoStroke(_:))
+        for button in [undo, historyUndo] {
+            button.target = document
+            button.action = #selector(PaintDocument.undoStroke(_:))
+        }
+        for button in [redo, historyRedo] {
+            button.target = document
+            button.action = #selector(PaintDocument.redoStroke(_:))
+        }
+        let historyColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("History"))
+        historyTable.addTableColumn(historyColumn)
+        historyTable.headerView = nil
+        historyTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        historyTable.allowsEmptySelection = false
+        historyTable.rowHeight = 19
+        historyTable.backgroundColor = .clear
+        historyTable.setAccessibilityLabel("History")
+        historyTable.dataSource = self
+        historyTable.delegate = self
+        historyScroll.documentView = historyTable
+        historyScroll.hasVerticalScroller = true
+        historyScroll.autohidesScrollers = true
+        historyScroll.scrollerStyle = .overlay
+        historyScroll.drawsBackground = false
         updateHistory(document.undoManager)
         applyCrop.target = document
         applyCrop.action = #selector(PaintDocument.cropSelection(_:))
@@ -102,10 +125,6 @@ final class EditorView: NSView {
         colorControls.spacing = 6
         colorControls.addArrangedSubview(color)
         colorControls.addArrangedSubview(swatches)
-        historyRows.orientation = .vertical
-        historyRows.alignment = .leading
-        historyRows.spacing = 2
-
         let panelButtons = NSStackView(views: UtilityPanels.Kind.allCases.map { kind in
             let button = Self.icon(kind.symbol, label: "Toggle \(kind.title)")
             button.tag = kind.rawValue
@@ -145,8 +164,23 @@ final class EditorView: NSView {
     required init?(coder: NSCoder) { nil }
 
     func installPanels(on window: NSWindow) {
+        let historyControls = NSStackView(views: [historyUndo, historyRedo])
+        historyControls.spacing = 2
+        for button in [historyUndo, historyRedo] {
+            button.isBordered = false
+            button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        }
+        let separator = NSBox()
+        separator.boxType = .separator
+        let historyPanel = NSStackView(views: [historyScroll, separator, historyControls])
+        historyPanel.orientation = .vertical
+        historyPanel.alignment = .leading
+        historyPanel.spacing = 3
+        historyScroll.widthAnchor.constraint(equalTo: historyPanel.widthAnchor).isActive = true
+        separator.widthAnchor.constraint(equalTo: historyPanel.widthAnchor).isActive = true
         panels = UtilityPanels(parent: window, contents: [
-            .tools: toolButtons, .colors: colorControls, .history: historyRows, .layers: layersView
+            .tools: toolButtons, .colors: colorControls, .history: historyPanel, .layers: layersView
         ])
         refreshImage()
         updateHistory(document?.undoManager)
@@ -169,7 +203,7 @@ final class EditorView: NSView {
 
     func refreshImage(clearSelection: Bool = false) {
         canvas.cancelEditingGesture()
-        if clearSelection { canvas.clearSelection() }
+        if clearSelection { canvas.setSelection(nil) }
         canvas.updateViewport()
         layersView.refresh()
         updateStatus()
@@ -196,31 +230,39 @@ final class EditorView: NSView {
     }
 
     private func updateUndoButtons(_ history: UndoManager?) {
-        undo.isEnabled = canvas.hasPendingMove || history?.canUndo == true
-        redo.isEnabled = !canvas.hasPendingMove && history?.canRedo == true
+        undo.isEnabled = history?.canUndo == true
+        redo.isEnabled = history?.canRedo == true
+        historyUndo.isEnabled = undo.isEnabled
+        historyRedo.isEnabled = redo.isEnabled
     }
 
     func updateHistory(_ history: UndoManager?) {
         updateUndoButtons(history)
         guard let document else { return }
-        for row in historyRows.arrangedSubviews {
-            historyRows.removeArrangedSubview(row)
-            row.removeFromSuperview()
-        }
-        for (index, name) in document.historyEntries.enumerated() {
-            let current = index == document.historyPosition
-            let row = NSButton(title: current ? "✓  \(name)" : "     \(name)",
-                               target: self, action: #selector(selectHistory(_:)))
-            row.isBordered = false
-            row.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: current ? .semibold : .regular)
-            row.tag = index
-            row.setAccessibilityLabel(current ? "\(name), current" : name)
-            historyRows.addArrangedSubview(row)
-        }
+        updatingHistory = true
+        defer { updatingHistory = false }
+        historyTable.reloadData()
+        historyTable.selectRowIndexes(IndexSet(integer: document.historyPosition), byExtendingSelection: false)
+        historyTable.scrollRowToVisible(document.historyPosition)
     }
 
-    @objc private func selectHistory(_ sender: NSButton) {
-        document?.goToHistoryEntry(sender.tag)
+    func numberOfRows(in tableView: NSTableView) -> Int { document?.historyEntries.count ?? 0 }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let document else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("History Entry")
+        let label = tableView.makeView(withIdentifier: identifier, owner: nil) as? NSTextField
+            ?? NSTextField(labelWithString: "")
+        label.identifier = identifier
+        label.stringValue = document.historyEntries[row]
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.lineBreakMode = .byTruncatingTail
+        return label
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !updatingHistory, historyTable.selectedRow >= 0 else { return }
+        document?.goToHistoryEntry(historyTable.selectedRow)
     }
 
     @objc private func selectTool(_ sender: NSButton) {

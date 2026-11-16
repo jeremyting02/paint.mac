@@ -18,12 +18,17 @@ final class PaintDocument: NSDocument {
     private(set) var stack: LayerStack?
     var image: CGImage? { stack?.activeLayer.image }
     private weak var editor: EditorView?
-    private let undoLimit = 5
     private(set) var historyEntries = ["New Image"]
     private(set) var historyPosition = 0
 
     override var isDocumentEdited: Bool {
         editor?.canvas.hasPendingPixelMove == true || super.isDocumentEdited
+    }
+
+    override func updateChangeCount(_ change: NSDocument.ChangeType) {
+        // Selection and preview steps are undoable, but leave the saved layer data alone.
+        guard change.rawValue & NSDocument.ChangeType.changeDiscardable.rawValue == 0 else { return }
+        super.updateChangeCount(change)
     }
 
     func selectLayer(_ index: Int) {
@@ -62,7 +67,7 @@ final class PaintDocument: NSDocument {
         } else {
             next.layers[next.active].image = replacement
         }
-        replaceStack(with: next, actionName: actionName)
+        applyEdit(replacingStack: next, actionName: actionName)
     }
 
     @objc func cropSelection(_ sender: Any?) {
@@ -73,7 +78,7 @@ final class PaintDocument: NSDocument {
         for index in next.layers.indices {
             guard next.layers[index].crop(to: rect, keeping: mask) else { return }
         }
-        replaceStack(with: next, actionName: "Crop to Selection", selectionChange: (outline, nil))
+        applyEdit(replacingStack: next, actionName: "Crop to Selection", selectionChange: (outline, nil))
     }
 
     @objc func copySelection(_ sender: Any?) {
@@ -111,7 +116,7 @@ final class PaintDocument: NSDocument {
         clipboard.clearContents()
         guard clipboard.setData(data, forType: .png) else { return }
         if let cutLayer {
-            canvas.cancelMove()
+            canvas.completeMoveDrag()
             commitSelectedPixelsTransform(cutLayer, to: nil, actionName: "Cut")
         }
     }
@@ -129,7 +134,8 @@ final class PaintDocument: NSDocument {
 
     @objc func pasteSelection(_ sender: Any?) {
         guard let canvas = editor?.canvas, let outline = clipboardOutline else { return }
-        canvas.finishMove(pasting: outline)
+        canvas.finishMove()
+        commitSelection(outline, actionName: "Paste Selection")
     }
 
     private var clipboardOutline: SelectionOutline? {
@@ -139,8 +145,10 @@ final class PaintDocument: NSDocument {
     }
 
     @objc func deselect(_ sender: Any?) {
-        editor?.canvas.finishMove()
-        editor?.canvas.clearSelection()
+        guard let canvas = editor?.canvas else { return }
+        canvas.finishMove()
+        canvas.cancelEditingGesture()
+        commitSelection(nil, actionName: "Deselect")
     }
 
     func addLayer() {
@@ -153,7 +161,7 @@ final class PaintDocument: NSDocument {
         while names.contains("Layer \(number)") { number += 1 }
         next.active += 1
         next.layers.insert(PaintLayer(name: "Layer \(number)", image: blank), at: next.active)
-        replaceStack(with: next, actionName: "Add Layer")
+        applyEdit(replacingStack: next, actionName: "Add Layer")
     }
 
     func setLayerVisibility(_ visible: Bool, at index: Int) {
@@ -161,7 +169,7 @@ final class PaintDocument: NSDocument {
         guard var next = stack, next.layers.indices.contains(index),
               next.layers[index].isVisible != visible else { return }
         next.layers[index].isVisible = visible
-        replaceStack(with: next, actionName: visible ? "Show Layer" : "Hide Layer")
+        applyEdit(replacingStack: next, actionName: visible ? "Show Layer" : "Hide Layer")
     }
 
     func moveLayer(by offset: Int) {
@@ -169,7 +177,7 @@ final class PaintDocument: NSDocument {
         guard var next = stack, next.layers.indices.contains(next.active + offset) else { return }
         next.layers.swapAt(next.active, next.active + offset)
         next.active += offset
-        replaceStack(with: next, actionName: "Move Layer")
+        applyEdit(replacingStack: next, actionName: "Move Layer")
     }
 
     func deleteLayer() {
@@ -177,19 +185,19 @@ final class PaintDocument: NSDocument {
         guard var next = stack, next.layers.count > 1 else { return }
         next.layers.remove(at: next.active)
         next.active = min(next.active, next.layers.count - 1)
-        replaceStack(with: next, actionName: "Delete Layer")
+        applyEdit(replacingStack: next, actionName: "Delete Layer")
     }
 
     func duplicateLayer() {
         editor?.canvas.finishMove()
         guard var next = stack, next.duplicateActiveLayer() else { return }
-        replaceStack(with: next, actionName: LayerCommand.duplicate.title)
+        applyEdit(replacingStack: next, actionName: LayerCommand.duplicate.title)
     }
 
     func mergeLayerDown() {
         editor?.canvas.finishMove()
         guard var next = stack, next.mergeActiveLayerDown() else { return }
-        replaceStack(with: next, actionName: LayerCommand.mergeDown.title)
+        applyEdit(replacingStack: next, actionName: LayerCommand.mergeDown.title)
     }
 
     private func showImportPanel() {
@@ -222,7 +230,7 @@ final class PaintDocument: NSDocument {
             guard incoming.count <= capacity else { throw PDNError.tooLarge }
         }
         try next.importLayers(incoming)
-        replaceStack(with: next, actionName: "Import From File")
+        applyEdit(replacingStack: next, actionName: "Import From File")
     }
 
     @objc func flattenLayers(_ sender: Any?) {
@@ -234,7 +242,7 @@ final class PaintDocument: NSDocument {
         }
         next.layers = [flat]
         next.active = 0
-        replaceStack(with: next, actionName: "Flatten")
+        applyEdit(replacingStack: next, actionName: "Flatten")
     }
 
     func showLayerProperties() {
@@ -256,64 +264,89 @@ final class PaintDocument: NSDocument {
             guard edited.name != before.name || edited.isVisible != before.isVisible ||
                   edited.opacity != before.opacity || edited.blendMode != before.blendMode else { return }
             next.layers[original.active] = edited
-            self.replaceStack(with: next, actionName: "Layer Properties")
+            self.applyEdit(replacingStack: next, actionName: "Layer Properties")
         }
     }
 
     func commitSelection(_ outline: SelectionOutline?, actionName: String) {
-        guard let stack, let canvas = editor?.canvas, canvas.selectionOutline != outline else { return }
-        replaceStack(with: stack, actionName: actionName, selectionChange: (canvas.selectionOutline, outline))
+        guard let canvas = editor?.canvas, canvas.selectionOutline != outline else { return }
+        applyEdit(actionName: actionName, selectionChange: (canvas.selectionOutline, outline))
     }
 
-    func commitSelectedPixelsTransform(_ layer: PaintLayer, to destination: SelectionOutline?, actionName: String) {
-        guard var next = stack else { return }
-        next.layers[next.active] = layer
-        replaceStack(with: next, actionName: actionName, selectionChange: (editor?.canvas.selectionOutline, destination))
+    func recordMove(from before: CanvasView.MoveSession?, to after: CanvasView.MoveSession, actionName: String) {
+        applyEdit(actionName: actionName, moveChange: (before, after))
     }
 
-    private func replaceStack(with replacement: LayerStack, actionName: String,
-                              selectionChange: (before: SelectionOutline?, after: SelectionOutline?)? = nil) {
+    func commitSelectedPixelsTransform(_ layer: PaintLayer?, to destination: SelectionOutline?, actionName: String) {
+        var replacement: LayerStack?
+        if let layer, var next = stack {
+            next.layers[next.active] = layer
+            replacement = next
+        }
+        applyEdit(replacingStack: replacement, actionName: actionName,
+                  selectionChange: (editor?.canvas.selectionOutline, destination),
+                  moveChange: (editor?.canvas.move, nil))
+    }
+
+    private func applyEdit(replacingStack replacement: LayerStack? = nil, actionName: String,
+                           selectionChange: (before: SelectionOutline?, after: SelectionOutline?)? = nil,
+                           moveChange: (before: CanvasView.MoveSession?, after: CanvasView.MoveSession?)? = nil) {
         guard let previous = stack else { return }
+        // A single UI event can finish a floating selection and then make another edit.
+        let startsGroup = undoManager?.groupingLevel == 0
+        if startsGroup { undoManager?.beginUndoGrouping() }
+        let previousStack = replacement == nil ? nil : previous
         undoManager?.registerUndo(withTarget: self) { document in
-            document.replaceStack(with: previous, actionName: actionName,
-                                  selectionChange: selectionChange.map { ($0.after, $0.before) })
+            document.applyEdit(replacingStack: previousStack, actionName: actionName,
+                               selectionChange: selectionChange.map { ($0.after, $0.before) },
+                               moveChange: moveChange.map { ($0.after, $0.before) })
         }
         undoManager?.setActionName(actionName)
-        if undoManager?.isUndoing == true {
+        undoManager?.setActionIsDiscardable(replacement == nil)
+        let isUndoing = undoManager?.isUndoing == true
+        let isRedoing = undoManager?.isRedoing == true
+        if isUndoing {
             historyPosition -= 1
-        } else if undoManager?.isRedoing == true {
+        } else if isRedoing {
             historyPosition += 1
         } else {
-            historyEntries = Array(historyEntries.prefix(historyPosition + 1)) + [actionName]
-            if historyEntries.count > undoLimit + 1 { historyEntries.removeFirst() }
+            historyEntries.removeLast(historyEntries.count - historyPosition - 1)
+            historyEntries.append(actionName)
             historyPosition = historyEntries.count - 1
         }
-        stack = replacement
-        let oldImage = previous.activeLayer.image, newImage = replacement.activeLayer.image
-        editor?.refreshImage(clearSelection: oldImage.width != newImage.width || oldImage.height != newImage.height)
+        if let replacement { stack = replacement }
+        if let move = moveChange?.after { stack?.active = move.layerIndex }
+        if replacement != nil || previous.active != stack?.active {
+            let oldImage = previous.activeLayer.image
+            editor?.refreshImage(clearSelection: oldImage.width != image?.width || oldImage.height != image?.height)
+        }
         if let selectionChange { editor?.canvas.setSelection(selectionChange.after) }
-        editor?.updateHistory(undoManager)
+        editor?.canvas.restoreMove(moveChange?.after)
+        if startsGroup { undoManager?.endUndoGrouping() }
+        if !isUndoing && !isRedoing { editor?.updateHistory(undoManager) }
     }
 
     @objc func undoStroke(_ sender: Any?) {
-        if editor?.canvas.cancelMove() == true { return }
+        editor?.canvas.cancelEditingGesture()
         undoManager?.undo()
         editor?.updateHistory(undoManager)
     }
 
     @objc func redoStroke(_ sender: Any?) {
-        if editor?.canvas.hasPendingMove == true { return }
+        editor?.canvas.cancelEditingGesture()
         undoManager?.redo()
         editor?.updateHistory(undoManager)
     }
 
     func goToHistoryEntry(_ position: Int) {
-        editor?.canvas.cancelMove()
+        guard historyEntries.indices.contains(position), let undoManager else { return }
+        editor?.canvas.cancelEditingGesture()
         if position < historyPosition {
-            for _ in position..<historyPosition where undoManager?.canUndo == true { undoStroke(nil) }
+            for _ in position..<historyPosition where undoManager.canUndo { undoManager.undo() }
         } else {
-            for _ in historyPosition..<position where undoManager?.canRedo == true { redoStroke(nil) }
+            for _ in historyPosition..<position where undoManager.canRedo { undoManager.redo() }
         }
+        editor?.updateHistory(undoManager)
     }
 
     @objc func toggleUtilityPanel(_ sender: NSMenuItem) {
@@ -359,8 +392,8 @@ final class PaintDocument: NSDocument {
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
-        case #selector(undoStroke(_:)): return editor?.canvas.hasPendingMove == true || undoManager?.canUndo == true
-        case #selector(redoStroke(_:)): return editor?.canvas.hasPendingMove != true && undoManager?.canRedo == true
+        case #selector(undoStroke(_:)): return undoManager?.canUndo == true
+        case #selector(redoStroke(_:)): return undoManager?.canRedo == true
         case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
         case #selector(copySelection(_:)): return editor?.canvas.copyableOutline != nil
         case #selector(cut(_:)): return editor?.canvas.copyableOutline != nil
@@ -448,6 +481,7 @@ final class PaintDocument: NSDocument {
         historyEntries = ["Open Image"]
         historyPosition = 0
         editor?.refreshImage(clearSelection: true)
+        editor?.canvas.restoreMove(nil)
         editor?.updateHistory(undoManager)
     }
 
@@ -460,7 +494,8 @@ final class PaintDocument: NSDocument {
         if stack == nil, let blank = LayerStack.makeBitmap(width: 1024, height: 768)?.makeImage() {
             stack = LayerStack(layers: [PaintLayer(name: "Background", image: blank, isBackground: true)], active: 0)
         }
-        undoManager?.levelsOfUndo = undoLimit
+        undoManager?.levelsOfUndo = 0
+        undoManager?.groupsByEvent = false
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),

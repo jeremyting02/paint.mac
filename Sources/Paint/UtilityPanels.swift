@@ -11,7 +11,7 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         var size: CGSize {
             switch self {
             case .tools: return CGSize(width: 140, height: 76)
-            case .history: return CGSize(width: 160, height: 145)
+            case .history: return CGSize(width: 160, height: 172)
             case .layers: return CGSize(width: 224, height: 151)
             case .colors: return CGSize(width: 144, height: 88)
             }
@@ -80,7 +80,9 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
                 content.topAnchor.constraint(equalTo: body.topAnchor, constant: 8),
                 content.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 8),
                 content.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -8),
-                content.bottomAnchor.constraint(lessThanOrEqualTo: body.bottomAnchor, constant: -8)
+                kind == .history
+                    ? content.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -8)
+                    : content.bottomAnchor.constraint(lessThanOrEqualTo: body.bottomAnchor, constant: -8)
             ])
             panel.contentView = body
             panels[kind] = panel

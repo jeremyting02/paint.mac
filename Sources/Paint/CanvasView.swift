@@ -7,7 +7,7 @@ final class CanvasView: NSView {
         var transformsSelection: Bool { self == .moveSelectedPixels || self == .moveSelection }
     }
 
-    private struct MoveGeometry: Equatable {
+    struct MoveGeometry: Equatable {
         var rect: CGRect
         var pivot: CGPoint
         var angle: CGFloat = 0
@@ -15,7 +15,8 @@ final class CanvasView: NSView {
         var flipY = false
     }
 
-    private struct MoveSession {
+    struct MoveSession {
+        let layerIndex: Int
         let pixels: SelectedPixelsTransform?
         let outline: SelectionOutline
         let source: CGRect
@@ -23,6 +24,7 @@ final class CanvasView: NSView {
         var copy = false
         var preview: PaintLayer?
         var actionName = "Move Selected Pixels"
+        var recorded = false
 
         var isPaste: Bool { pixels?.isPaste == true }
         var changed: Bool { isPaste || geometry.rect != source || geometry.angle != 0 || geometry.flipX || geometry.flipY }
@@ -38,6 +40,7 @@ final class CanvasView: NSView {
     }
 
     private struct MoveDrag {
+        let before: MoveSession?
         let geometry: MoveGeometry
         let anchor: CGPoint
         let handle: TransformHandle
@@ -134,7 +137,6 @@ final class CanvasView: NSView {
     var selectTransformTool: ((Tool) -> Void)?
     var layerPreview: LayerStack? {
         didSet {
-            cancelMove()
             composite = nil
             needsDisplay = true
         }
@@ -143,10 +145,10 @@ final class CanvasView: NSView {
 
     private(set) var selectionOutline: SelectionOutline?
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
-    private var selectionAnchor: CGPoint?
+    private var selectionDrag: (anchor: CGPoint, before: SelectionOutline?)?
 
     private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String, imageSelection: CGRect?)?
-    private var move: MoveSession?
+    private(set) var move: MoveSession?
     private var moveDrag: MoveDrag?
     private var cursorTracking: NSTrackingArea?
     private var panLocation: CGPoint?
@@ -229,12 +231,13 @@ final class CanvasView: NSView {
                                                    name: NSWindow.didResignKeyNotification, object: newWindow)
         }
         panLocation = nil
-        cancelMove()
+        cancelEditingGesture()
         super.viewWillMove(toWindow: newWindow)
     }
 
     @objc private func windowDidResignKey(_ notification: Notification) {
-        moveDrag = nil
+        completeMoveDrag()
+        cancelSelectionDrag()
         guard panLocation != nil else { return }
         panLocation = nil
         window?.invalidateCursorRects(for: self)
@@ -306,7 +309,7 @@ final class CanvasView: NSView {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, moveDrag == nil, panLocation == nil,
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, panLocation == nil,
               let scrollView = enclosingScrollView else { return }
 
         let steps: Int
@@ -343,7 +346,7 @@ final class CanvasView: NSView {
             super.otherMouseDown(with: event)
             return
         }
-        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, moveDrag == nil else { return }
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil else { return }
         panLocation = event.locationInWindow
         NSCursor.closedHand.set()
         window?.invalidateCursorRects(for: self)
@@ -394,9 +397,10 @@ final class CanvasView: NSView {
                        y: min(max(point.y.rounded(), 0), CGFloat(image.height)))
     }
 
-    func clearSelection() {
-        selectionAnchor = nil
-        setSelection(nil)
+    private func cancelSelectionDrag() {
+        guard let drag = selectionDrag else { return }
+        selectionDrag = nil
+        setSelection(drag.before)
     }
 
     func setSelection(_ outline: SelectionOutline?) {
@@ -422,7 +426,8 @@ final class CanvasView: NSView {
     }
 
     func pastePixels(_ pastedImage: CGImage) {
-        guard let layer = copyableLayer, layer.isVisible, layerPreview == nil else { return }
+        guard let document, let stack = document.stack, let layer = copyableLayer,
+              layer.isVisible, layerPreview == nil else { return }
         let visible = imageRect.intersection(visibleRect)
         let corner = visible.isEmpty ? CGPoint(x: 0, y: layer.image.height)
             : pixelEdge(at: CGPoint(x: visible.minX, y: visible.maxY), in: layer.image)
@@ -434,62 +439,54 @@ final class CanvasView: NSView {
               let preview = pixels.transformed(to: destination) else { return }
 
         finishMove()
-        if let selectTransformTool { selectTransformTool(.moveSelectedPixels) }
-        else { tool = .moveSelectedPixels }
+        let session = MoveSession(layerIndex: stack.active, pixels: pixels, outline: outline, source: rect,
+                                  geometry: MoveGeometry(rect: rect, pivot: rect.center), preview: preview, recorded: true)
+        document.recordMove(from: nil, to: session, actionName: "Paste")
         window?.makeFirstResponder(self)
-        move = MoveSession(pixels: pixels, outline: outline, source: rect,
-                           geometry: MoveGeometry(rect: rect, pivot: rect.center), preview: preview, actionName: "Paste")
-        composite = nil
-        needsDisplay = true
-        selectionDidChange?()
     }
 
     func cancelEditingGesture() {
         stroke = nil
-        selectionAnchor = nil
-        cancelMove()
-        composite = nil
-    }
-
-    var hasPendingMove: Bool { move?.changed == true }
-    var hasPendingPixelMove: Bool { move?.preview != nil }
-    var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
-
-    @discardableResult
-    func cancelMove() -> Bool {
-        let hadPreview = hasPendingMove
-        moveDrag = nil
-        guard move != nil else { return false }
-        move = nil
+        cancelSelectionDrag()
+        if let drag = moveDrag {
+            moveDrag = nil
+            move = drag.before
+        }
         composite = nil
         needsDisplay = true
         selectionDidChange?()
-        return hadPreview
     }
 
-    func finishMove(pasting outline: SelectionOutline? = nil) {
-        guard let session = move, let image = document?.image else {
-            if let outline { document?.commitSelection(outline, actionName: "Paste Selection") }
-            return
-        }
-        cancelMove()
-        if let outline {
-            if let preview = session.preview {
-                document?.commitSelectedPixelsTransform(preview, to: outline, actionName: "Paste Selection")
-            } else {
-                document?.commitSelection(outline, actionName: "Paste Selection")
+    var hasPendingMove: Bool { move?.recorded == true || move?.changed == true }
+    var hasPendingPixelMove: Bool { move?.preview != nil }
+    var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
+
+    func restoreMove(_ session: MoveSession?) {
+        move = nil
+        if let session {
+            let transformTool: Tool = session.pixels == nil ? .moveSelection : .moveSelectedPixels
+            if tool != transformTool {
+                if let selectTransformTool { selectTransformTool(transformTool) }
+                else { tool = transformTool }
             }
+        }
+        move = session
+        composite = nil
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
+        selectionDidChange?()
+    }
+
+    func finishMove() {
+        completeMoveDrag()
+        guard let session = move, let image = document?.image else { return }
+        guard session.recorded else {
+            restoreMove(nil)
             return
         }
-        guard session.changed else { return }
-        let destination = session.transformedOutline?.clipped(to: canvasBounds(for: image))
-        if let preview = session.preview {
-            let keepsOutline = session.isPaste || selectionOutline != nil
-            document?.commitSelectedPixelsTransform(preview, to: keepsOutline ? destination : nil,
-                                                    actionName: session.actionName)
-        } else {
-            document?.commitSelection(destination, actionName: session.actionName)
-        }
+        let keepsOutline = session.isPaste || selectionOutline != nil
+        let destination = keepsOutline ? session.transformedOutline?.clipped(to: canvasBounds(for: image)) : nil
+        document?.commitSelectedPixelsTransform(session.preview, to: destination, actionName: "Finish Selection")
     }
 
     var imageSelection: CGRect? {
@@ -551,14 +548,21 @@ final class CanvasView: NSView {
             let outline = event.modifierFlags.contains(.shift) || tool == .moveSelectedPixels
             selectTransformTool(outline ? .moveSelection : .moveSelectedPixels)
         } else if finishesMove {
-            if move != nil { finishMove() } else { clearSelection() }
-        } else if isEscape && (!selection.isEmpty || selectionAnchor != nil) {
-            clearSelection()
+            if move != nil { finishMove() } else { document?.deselect(nil) }
+        } else if isEscape && (!selection.isEmpty || selectionDrag != nil) {
+            document?.deselect(nil)
         } else if tool.transformsSelection, let delta = nudge(for: event), moveDrag == nil,
-                  let layer = document?.stack?.activeLayer, beginMove(on: layer) {
-            let geometry = moveGeometry(for: layer.image)
-            updateMove(with: translated(geometry, by: delta), actionName: "Move Selected Pixels",
-                       copy: false, imageHeight: layer.image.height)
+                  let stack = document?.stack {
+            let before = move
+            if beginMove(on: stack) {
+                let image = stack.activeLayer.image
+                let geometry = moveGeometry(for: image)
+                updateMove(with: translated(geometry, by: delta), actionName: "Move Selected Pixels",
+                           copy: false, imageHeight: image.height)
+                recordMove(from: before, geometry: geometry)
+            } else {
+                super.keyDown(with: event)
+            }
         } else {
             super.keyDown(with: event)
         }
@@ -575,7 +579,8 @@ final class CanvasView: NSView {
         }
     }
 
-    private func beginMove(on layer: PaintLayer) -> Bool {
+    private func beginMove(on stack: LayerStack) -> Bool {
+        let layer = stack.activeLayer
         guard !imageRect.isEmpty, layerPreview == nil,
               tool == .moveSelection ? selectionOutline != nil : layer.isVisible else { return false }
         if move != nil { return true }
@@ -590,18 +595,21 @@ final class CanvasView: NSView {
                   let transform = SelectedPixelsTransform(layer: layer, selection: region, mask: mask) else { return false }
             pixels = transform
         }
-        move = MoveSession(pixels: pixels, outline: outline, source: geometry.rect, geometry: geometry)
+        move = MoveSession(layerIndex: stack.active, pixels: pixels, outline: outline,
+                           source: geometry.rect, geometry: geometry)
         return true
     }
 
     private func beginMoveDrag(with event: NSEvent, rightButton: Bool) {
-        guard panLocation == nil, moveDrag == nil, let layer = document?.stack?.activeLayer,
-              beginMove(on: layer) else { return }
+        let before = move
+        guard panLocation == nil, moveDrag == nil, let stack = document?.stack,
+              beginMove(on: stack) else { return }
+        let image = stack.activeLayer.image
         window?.makeFirstResponder(self)
         let location = convert(event.locationInWindow, from: nil)
-        let handle = rightButton ? .rotate : transformHandle(at: location, image: layer.image)
+        let handle = rightButton ? .rotate : transformHandle(at: location, image: image)
         let point = imagePoint(location)
-        moveDrag = MoveDrag(geometry: moveGeometry(for: layer.image), anchor: point, handle: handle,
+        moveDrag = MoveDrag(before: before, geometry: moveGeometry(for: image), anchor: point, handle: handle,
                             rightButton: rightButton, lastPoint: point)
         updateMoveCursor(at: location)
     }
@@ -648,7 +656,7 @@ final class CanvasView: NSView {
             let center = geometry.pivot + (geometry.rect.center - geometry.pivot).rotated(by: rotation)
             geometry.rect.origin = CGPoint(x: center.x - geometry.rect.width / 2, y: center.y - geometry.rect.height / 2)
             geometry.angle = snapped.remainder(dividingBy: 2 * .pi)
-            actionName = "Rotate Selected Pixels"
+            actionName = "Rotate Pixels"
         }
         let copy = !modifiers.intersection([.control, .command]).isEmpty
         updateMove(with: geometry, actionName: actionName, copy: copy, imageHeight: image.height)
@@ -669,7 +677,7 @@ final class CanvasView: NSView {
             session.preview = nil
         }
         session.copy = keepSource
-        if !session.isPaste { session.actionName = tool == .moveSelection ? "Transform Selection" : actionName }
+        session.actionName = tool == .moveSelection ? "Transform Selection" : actionName
         move = session
         composite = nil
         needsDisplay = true
@@ -679,11 +687,30 @@ final class CanvasView: NSView {
     private func endMoveDrag(with event: NSEvent, rightButton: Bool) {
         guard moveDrag?.rightButton == rightButton else { return }
         updateMoveDrag(with: event, rightButton: rightButton)
-        moveDrag = nil
-        if let session = move, !session.changed, session.geometry.pivot == session.source.center {
-            cancelMove()
-        }
+        completeMoveDrag()
         updateMoveCursor(at: convert(event.locationInWindow, from: nil))
+    }
+
+    func completeMoveDrag() {
+        guard let drag = moveDrag else { return }
+        moveDrag = nil
+        if case .pivot = drag.handle {
+            if let session = move, !session.recorded, session.geometry.pivot == session.source.center {
+                restoreMove(nil)
+            }
+        } else {
+            recordMove(from: drag.before, geometry: drag.geometry)
+        }
+    }
+
+    private func recordMove(from before: MoveSession?, geometry: MoveGeometry) {
+        guard var session = move else { return }
+        guard session.geometry != geometry || (session.changed && session.copy != (before?.copy ?? false)) else {
+            restoreMove(before)
+            return
+        }
+        session.recorded = true
+        document?.recordMove(from: before, to: session, actionName: session.actionName)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -714,13 +741,13 @@ final class CanvasView: NSView {
         }
         let location = convert(event.locationInWindow, from: nil)
         guard imageRect.contains(location), let image = document?.image else {
-            if tool == .rectangleSelect { clearSelection() }
+            if tool == .rectangleSelect { document?.deselect(nil) }
             return
         }
 
         window?.makeFirstResponder(self)
         if tool == .rectangleSelect {
-            selectionAnchor = pixelEdge(at: location, in: image)
+            selectionDrag = (pixelEdge(at: location, in: image), selectionOutline)
             setSelection(nil)
             return
         }
@@ -753,7 +780,7 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard !imageRect.isEmpty else { return }
         let location = convert(event.locationInWindow, from: nil)
-        if let start = selectionAnchor, let image = document?.image {
+        if let start = selectionDrag?.anchor, let image = document?.image {
             let end = pixelEdge(at: location, in: image)
             let rect = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
                               width: abs(start.x - end.x), height: abs(start.y - end.y))
@@ -780,7 +807,12 @@ final class CanvasView: NSView {
             return
         }
         mouseDragged(with: event)
-        selectionAnchor = nil
+        if selectionDrag != nil {
+            let outline = selectionOutline
+            cancelSelectionDrag()
+            document?.commitSelection(outline, actionName: outline == nil ? "Deselect" : "Rectangle Select")
+            return
+        }
         guard let current = stroke else { return }
         stroke = nil
         if let image = current.bitmap.makeImage() {
