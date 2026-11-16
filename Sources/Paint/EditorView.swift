@@ -5,6 +5,9 @@ final class EditorView: NSView {
     private weak var document: PaintDocument?
     private let scrollView = NSScrollView()
     private let status = NSTextField(labelWithString: "")
+    private let zoom = NSSegmentedControl(labels: ["Fit", "100%"], trackingMode: .selectOne,
+                                          target: nil, action: nil)
+    private let zoomLevel = NSTextField(labelWithString: "")
     private let brush = EditorView.icon("paintbrush", label: "Paintbrush")
     private let eraser = EditorView.icon("eraser", label: "Eraser")
     private let crop = EditorView.icon("crop", label: "Rectangle Crop")
@@ -45,12 +48,13 @@ final class EditorView: NSView {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .overlay
-        let zoom = NSSegmentedControl(labels: ["Fit", "100%"], trackingMode: .selectOne,
-                                      target: self, action: #selector(changeZoom(_:)))
+        zoom.target = self
+        zoom.action = #selector(changeZoom(_:))
         zoom.selectedSegment = 0
         zoom.setAccessibilityLabel("Zoom")
         zoom.setToolTip("Fit to window", forSegment: 0)
         zoom.setToolTip("Actual pixels", forSegment: 1)
+        canvas.zoomDidChange = { [weak self] in self?.updateZoom() }
 
         let size = NSPopUpButton()
         for diameter in [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128] {
@@ -102,7 +106,9 @@ final class EditorView: NSView {
         panelButtons.spacing = 3
         status.textColor = .secondaryLabelColor
         status.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        let footer = NSStackView(views: [status, zoom])
+        zoomLevel.textColor = .secondaryLabelColor
+        zoomLevel.font = status.font
+        let footer = NSStackView(views: [status, zoomLevel, zoom])
         footer.spacing = 8
         updateStatus()
 
@@ -148,13 +154,13 @@ final class EditorView: NSView {
 
     override func layout() {
         super.layout()
-        canvas.fitViewport()
+        canvas.updateViewport()
     }
 
     func refreshImage() {
         canvas.cancelStroke()
         canvas.clearSelection()
-        canvas.fitViewport()
+        canvas.updateViewport()
         layersView.refresh()
         updateStatus()
     }
@@ -206,13 +212,16 @@ final class EditorView: NSView {
         canvas.cropSelection()
     }
 
+    private func updateZoom() {
+        let segment = canvas.zoomPercent.map { $0 == 100 ? 1 : -1 } ?? 0
+        if zoom.selectedSegment != segment { zoom.selectedSegment = segment }
+        let scale = Double(canvas.displayedZoomPercent) / 100
+        let label = scale.formatted(.percent.precision(.fractionLength(0...1)))
+        if zoomLevel.stringValue != label { zoomLevel.stringValue = label }
+    }
+
     @objc private func changeZoom(_ sender: NSSegmentedControl) {
-        canvas.fitsToWindow = sender.selectedSegment == 0
-        canvas.fitViewport()
-        let clip = scrollView.contentView
-        clip.scroll(to: CGPoint(x: 0, y: max(0, canvas.bounds.height - clip.bounds.height)))
-        scrollView.reflectScrolledClipView(clip)
-        scrollView.flashScrollers()
+        canvas.setZoom(sender.selectedSegment == 0 ? nil : 100)
     }
 
     @objc private func changeSize(_ sender: NSPopUpButton) {

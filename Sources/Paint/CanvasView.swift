@@ -3,11 +3,19 @@ import AppKit
 final class CanvasView: NSView {
     enum Tool { case brush, eraser, crop }
 
+    private static let zoomSteps: [CGFloat] = [
+        1, 2, 3, 5, 6, 8, 12.5, 16, 25, 33, 50, 66, 75, 100, 150, 200, 300, 400, 500,
+        600, 800, 1000, 1200, 1400, 1600, 2000, 2400, 2800, 3200, 4000, 4800, 5600, 6400,
+        8000, 10000
+    ]
+
     private weak var document: PaintDocument?
     var tool = Tool.brush {
         didSet { if tool != oldValue { clearSelection() } }
     }
-    var fitsToWindow = true
+    private(set) var zoomPercent: CGFloat?
+    private(set) var displayedZoomPercent: CGFloat = 0
+    var zoomDidChange: (() -> Void)?
     var brushColor = NSColor.black
     var brushSize: CGFloat = 12
     var selectionDidChange: (() -> Void)?
@@ -28,6 +36,9 @@ final class CanvasView: NSView {
     private var selectionAnchor: CGPoint?
 
     private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String)?
+    private var panLocation: CGPoint?
+    private var zoomScrollDistance: CGFloat = 0
+    private var zoomingScrollGesture = false
 
     init(document: PaintDocument) {
         self.document = document
@@ -41,38 +52,182 @@ final class CanvasView: NSView {
 
     private let margin: CGFloat = 24
     private var backingScale: CGFloat { window?.backingScaleFactor ?? 1 }
+    private var imageRect = CGRect.zero
+    private var viewportSize = CGSize.zero
 
-    func fitViewport() {
-        guard let viewport = enclosingScrollView?.contentSize, let image = document?.image else { return }
-        var size = viewport
-        if !fitsToWindow {
-            size.width = max(size.width, CGFloat(image.width) / backingScale + 2 * margin)
-            size.height = max(size.height, CGFloat(image.height) / backingScale + 2 * margin)
+    func setZoom(_ percent: CGFloat?) {
+        zoomPercent = percent
+        updateViewport(recenter: true)
+    }
+
+    func updateViewport(anchor: CGPoint? = nil, recenter: Bool = false) {
+        guard let scrollView = enclosingScrollView, let image = document?.image else { return }
+        let viewport = scrollView.contentSize
+        guard viewport.width > 0, viewport.height > 0 else { return }
+        let clip = scrollView.contentView
+        let scale = zoomPercent.map { $0 / (100 * backingScale) }
+            ?? min(max(1, viewport.width - 2 * margin) / CGFloat(image.width),
+                   max(1, viewport.height - 2 * margin) / CGFloat(image.height))
+        let width = CGFloat(image.width) * scale
+        let height = CGFloat(image.height) * scale
+        // A large image can bring either edge to center. A small image can go halfway offscreen.
+        let paddingX = max(viewport.width / 2, viewport.width - width / 2)
+        let paddingY = max(viewport.height / 2, viewport.height - height / 2)
+        let size = CGSize(width: width + 2 * paddingX, height: height + 2 * paddingY)
+        let rect = CGRect(x: (paddingX * backingScale).rounded() / backingScale,
+                          y: (paddingY * backingScale).rounded() / backingScale,
+                          width: width, height: height)
+
+        if rect != imageRect || size != frame.size || recenter || viewport != viewportSize {
+            let center = CGPoint(x: viewport.width / 2, y: viewport.height / 2)
+            let offset = anchor ?? center
+            let oldOffset = anchor ?? CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
+            let oldOrigin = clip.bounds.origin
+            var fraction = CGPoint(x: 0.5, y: 0.5)
+            let refitting = zoomPercent == nil && viewport != viewportSize
+            if !recenter && !refitting && !imageRect.isEmpty {
+                fraction = CGPoint(x: (oldOrigin.x + oldOffset.x - imageRect.minX) / imageRect.width,
+                                   y: (oldOrigin.y + oldOffset.y - imageRect.minY) / imageRect.height)
+            }
+
+            viewportSize = viewport
+            imageRect = rect
+            if frame.size != size { setFrameSize(size) }
+            scroll(to: CGPoint(x: rect.minX + fraction.x * rect.width - offset.x,
+                               y: rect.minY + fraction.y * rect.height - offset.y), in: scrollView)
+            window?.invalidateCursorRects(for: self)
         }
-        if frame.size != size { setFrameSize(size) }
-        window?.invalidateCursorRects(for: self)
+        displayedZoomPercent = zoomPercent ?? scale * backingScale * 100
+        zoomDidChange?()
         needsDisplay = true
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        fitViewport()
+        updateViewport()
     }
 
-    private var imageRect: CGRect {
-        guard let image = document?.image else { return .zero }
-        let available = bounds.insetBy(dx: margin, dy: margin)
-        guard available.width > 0, available.height > 0 else { return .zero }
-        let width = CGFloat(image.width)
-        let height = CGFloat(image.height)
-        let scale = fitsToWindow ? min(available.width / width, available.height / height) : 1 / backingScale
-        return CGRect(x: (available.midX * backingScale - width * scale * backingScale / 2).rounded() / backingScale,
-                      y: (available.midY * backingScale - height * scale * backingScale / 2).rounded() / backingScale,
-                      width: width * scale, height: height * scale)
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let window {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
+        }
+        if let newWindow {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowDidResignKey),
+                                                   name: NSWindow.didResignKeyNotification, object: newWindow)
+        }
+        panLocation = nil
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    @objc private func windowDidResignKey(_ notification: Notification) {
+        guard panLocation != nil else { return }
+        panLocation = nil
+        window?.invalidateCursorRects(for: self)
+    }
+
+    private func scroll(to origin: CGPoint, in scrollView: NSScrollView) {
+        let clip = scrollView.contentView
+        let proposedBounds = CGRect(origin: origin, size: clip.bounds.size)
+        clip.scroll(to: clip.constrainBoundsRect(proposedBounds).origin)
+        scrollView.reflectScrolledClipView(clip)
     }
 
     override func resetCursorRects() {
-        addCursorRect(imageRect, cursor: .crosshair)
+        if panLocation != nil {
+            addCursorRect(visibleRect, cursor: .closedHand)
+        } else if !imageRect.isEmpty {
+            addCursorRect(imageRect, cursor: .crosshair)
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let zooming = event.modifierFlags.contains(.control)
+        if !event.momentumPhase.isEmpty {
+            if !zooming && !zoomingScrollGesture { super.scrollWheel(with: event) }
+            return
+        }
+        if event.phase == .began || event.phase == .mayBegin || !event.hasPreciseScrollingDeltas {
+            zoomingScrollGesture = false
+            zoomScrollDistance = 0
+        }
+        guard zooming else {
+            zoomScrollDistance = 0
+            super.scrollWheel(with: event)
+            return
+        }
+        zoomingScrollGesture = true
+        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil, panLocation == nil,
+              let scrollView = enclosingScrollView else { return }
+
+        let steps: Int
+        if event.hasPreciseScrollingDeltas {
+            let pointsPerStep: CGFloat = 24
+            zoomScrollDistance += event.scrollingDeltaY
+            steps = Int(zoomScrollDistance / pointsPerStep)
+            zoomScrollDistance -= CGFloat(steps) * pointsPerStep
+        } else {
+            steps = Int(event.scrollingDeltaY.rounded(.awayFromZero))
+        }
+        guard steps != 0 else { return }
+
+        let levels = Self.zoomSteps
+        let index: Int
+        if steps > 0 {
+            guard let next = levels.firstIndex(where: { $0 > displayedZoomPercent + 0.0001 }) else { return }
+            index = min(next + steps - 1, levels.count - 1)
+        } else {
+            guard let next = levels.lastIndex(where: { $0 < displayedZoomPercent - 0.0001 }) else { return }
+            index = max(next + steps + 1, 0)
+        }
+        let percent = levels[index]
+
+        let pointer = convert(event.locationInWindow, from: nil)
+        let origin = scrollView.contentView.bounds.origin
+        let anchor = imageRect.contains(pointer) ? CGPoint(x: pointer.x - origin.x, y: pointer.y - origin.y) : nil
+        zoomPercent = percent
+        updateViewport(anchor: anchor)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        guard event.buttonNumber == 2 else {
+            super.otherMouseDown(with: event)
+            return
+        }
+        guard !imageRect.isEmpty, stroke == nil, selectionAnchor == nil else { return }
+        panLocation = event.locationInWindow
+        NSCursor.closedHand.set()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        guard event.buttonNumber == 2 else {
+            super.otherMouseDragged(with: event)
+            return
+        }
+        guard let lastLocation = panLocation, let scrollView = enclosingScrollView else { return }
+        let last = convert(lastLocation, from: nil)
+        let current = convert(event.locationInWindow, from: nil)
+        let origin = scrollView.contentView.bounds.origin
+        panLocation = event.locationInWindow
+        scroll(to: CGPoint(x: origin.x + last.x - current.x, y: origin.y + last.y - current.y), in: scrollView)
+        NSCursor.closedHand.set()
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 2 else {
+            super.otherMouseUp(with: event)
+            return
+        }
+        guard panLocation != nil else { return }
+        otherMouseDragged(with: event)
+        panLocation = nil
+        let location = convert(event.locationInWindow, from: nil)
+        if visibleRect.contains(location) && imageRect.contains(location) {
+            NSCursor.crosshair.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+        window?.invalidateCursorRects(for: self)
     }
 
     private func imagePoint(_ point: CGPoint) -> CGPoint {
@@ -120,6 +275,7 @@ final class CanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard panLocation == nil else { return }
         let location = convert(event.locationInWindow, from: nil)
         guard imageRect.contains(location), let image = document?.image else {
             clearSelection()
@@ -209,7 +365,10 @@ final class CanvasView: NSView {
                                     y: rect.minY + CGFloat(row) * square, width: square, height: square))
             }
         }
-        if !fitsToWindow { context.interpolationQuality = .none }
+        let imageWidth = CGFloat(stack.activeLayer.image.width)
+        if displayedZoomPercent >= 100 {
+            context.interpolationQuality = .none
+        }
         let strokeImage = stroke?.bitmap.makeImage()
         if stack.needsBlendComposite {
             if let strokeImage {
@@ -222,7 +381,7 @@ final class CanvasView: NSView {
             stack.draw(in: context, rect: rect, preview: strokeImage)
         }
         if !selection.isEmpty {
-            let scale = rect.width / CGFloat(stack.activeLayer.image.width)
+            let scale = rect.width / imageWidth
             let marquee = CGRect(x: rect.minX + selection.minX * scale, y: rect.minY + selection.minY * scale,
                                  width: selection.width * scale, height: selection.height * scale)
             context.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor)
