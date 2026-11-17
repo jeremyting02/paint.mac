@@ -1,6 +1,6 @@
 import AppKit
 
-final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
+final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSComboBoxDelegate {
     let canvas: CanvasView
     private weak var document: PaintDocument?
     private weak var enclosingOptionsArea: WorkspaceOptionsArea?
@@ -52,6 +52,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let hexColor = NSTextField()
     private let toolButtons = NSStackView()
     private let brushControls = NSStackView()
+    private let brushSize = NSComboBox()
     private let selectionModes = NSPopUpButton()
     private let floodControls = NSStackView()
     private let floodToleranceValue = NSTextField(labelWithString: "")
@@ -139,15 +140,15 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         configureZoomControls()
         configureRulers()
 
-        let size = NSPopUpButton()
-        for diameter in [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128] {
-            size.addItem(withTitle: "\(diameter) px")
-            size.lastItem?.tag = diameter
-        }
-        size.selectItem(withTitle: "12 px")
-        size.setAccessibilityLabel("Brush size")
-        size.target = self
-        size.action = #selector(changeSize(_:))
+        brushSize.addItems(withObjectValues: [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128].map(String.init))
+        brushSize.numberOfVisibleItems = 8
+        brushSize.setAccessibilityLabel("Brush size in pixels")
+        brushSize.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        brushSize.delegate = self
+        brushSize.target = self
+        brushSize.action = #selector(changeSize(_:))
+        canvas.brushSizeDidChange = { [weak self] in self?.refreshBrushSize() }
+        refreshBrushSize()
 
         color.color = .black
         secondaryColor.color = .white
@@ -163,8 +164,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
 
         brushControls.spacing = 8
-        brushControls.addArrangedSubview(NSTextField(labelWithString: "Size"))
-        brushControls.addArrangedSubview(size)
+        brushControls.addArrangedSubview(NSTextField(labelWithString: "Size (px)"))
+        brushControls.addArrangedSubview(brushSize)
         selectionModes.addItems(withTitles: SelectionOutline.Mode.allCases.map(\.rawValue))
         selectionModes.setAccessibilityLabel("Selection Mode")
         selectionModes.toolTip = "Selection Mode"
@@ -193,7 +194,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         })
         panelsBar.spacing = 3
         configureCommandToolbarButtons()
-        let commands = NSStackView(views: [command("doc.badge.plus", "New", #selector(NSDocumentController.newDocument(_:))),
+        let commands = NSStackView(views: [command("doc.badge.plus", "New", #selector(NewImageCommand.show(_:)),
+                                                    target: NewImageCommand.shared),
                                              command("folder", "Open", #selector(NSDocumentController.openDocument(_:))),
                                              command("internaldrive", "Save", #selector(NSDocument.save(_:)), target: document),
                                              undo, redo, applyCrop, rulersButton, gridButton])
@@ -517,10 +519,30 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         canvas.setZoom(next)
     }
 
-    @objc private func changeSize(_ sender: NSPopUpButton) {
-        if let pixels = sender.selectedItem?.tag {
+    @objc private func changeSize(_ sender: NSComboBox) {
+        setBrushSize(from: sender.stringValue)
+        window?.makeFirstResponder(canvas)
+    }
+
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        if let selected = brushSize.objectValueOfSelectedItem as? String { setBrushSize(from: selected) }
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        if (notification.object as? NSComboBox) === brushSize { setBrushSize(from: brushSize.stringValue) }
+    }
+
+    private func setBrushSize(from string: String) {
+        if let pixels = (try? Double(string, format: .number)) ?? Double(string),
+           CanvasView.brushSizeRange.contains(CGFloat(pixels)) {
             canvas.brushSize = CGFloat(pixels)
+        } else {
+            refreshBrushSize()
         }
+    }
+
+    private func refreshBrushSize() {
+        brushSize.stringValue = Double(canvas.brushSize).formatted(.number.grouping(.never).precision(.fractionLength(0...8)))
     }
 
     @objc private func changeSelectionMode(_ sender: NSPopUpButton) {

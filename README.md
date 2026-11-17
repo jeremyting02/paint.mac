@@ -11,8 +11,10 @@ sh build.sh
 open .build/paint.mac.app
 ```
 
-Use **File → New** for a 1024 × 768 transparent canvas or **File → Open** for a
-Paint.NET project or bitmap image. **Save** and **Save As** write `.pdn` projects.
+Use **File → New** to choose the pixel dimensions and resolution of a white
+canvas. The suggested size is 800 × 600, or the size of an image on the
+clipboard. Use **File → Open** for a Paint.NET project or bitmap image.
+**Save** and **Save As** write `.pdn` projects.
 Saving an opened bitmap creates a separate project. **File → Export** writes a
 flat copy of the visible layers. Its format menu offers the installed macOS
 encoders, including PNG and JPEG. Bitmap support includes TIFF, BMP, GIF, HEIC,
@@ -29,9 +31,12 @@ rotation, perspective tilt, panning, or scaling on the active layer. Choose a
 sampling and tiling mode to control edges, then click **Apply**. When a
 selection is active, only pixels inside it change. These edits can be undone.
 
-Choose **Paintbrush** or **Eraser** in the floating **Tools** window. Pick a
-paint color in **Colors** and use **Size** above the canvas to set the diameter
-in image pixels. Drag on the canvas to paint or erase.
+Choose **Paintbrush** or **Eraser** in **Tools** and use **Size (px)** to enter
+a diameter, including decimal values. Press **[** or **]** to adjust by one
+pixel, or hold **Control** to adjust by five. Toggle **Antialias** for softer
+stroke edges. Paintbrush uses the primary color with the left button and the
+secondary color with the right button. Eraser uses the opacity of the
+corresponding color to determine how much to erase.
 
 Use **Pencil** for single-pixel strokes. **Color Picker** samples the active
 layer or the visible image and can average a square around the pointer. Left
@@ -48,9 +53,12 @@ alignment, and style before choosing **Finish** to apply the drawing to the
 active layer as one undo step.
 
 Choose **Rectangle Select** or **Ellipse Select** and drag to select an area.
-Hold **Shift** with Ellipse Select to draw a circle, using the start and end of
-the drag as opposite points on its edge. With **Lasso Select**, drag a freehand
-outline. The tool closes it with a straight line back to the start.
+Hold **Shift** to draw a square or circle. With Ellipse Select the drag
+endpoints lie on opposite sides of the circle. Rectangle Select offers **Fixed
+Ratio** for a specified aspect ratio and **Fixed Size** for a set width and
+height in pixels, inches, or centimeters. Drag to position a fixed-size
+selection. With **Lasso Select**, drag a freehand outline. The tool closes it
+with a straight line back to the start.
 
 Choose **Magic Wand** and click a pixel to select similar colors. Adjust
 **Tolerance** before or after clicking. Drag the four-arrow handle to move the
@@ -85,6 +93,9 @@ Use the toolbar's **Selection Mode** menu with any selection tool. **Replace**
 starts a new selection, **Add** combines both areas, **Subtract** removes the
 new area, **Intersect** keeps only the overlap, and **XOR** keeps only the areas
 outside the overlap. Each completed change can be undone in one step.
+Hold **Control** with the left mouse button to add or with the right mouse
+button to XOR. Hold **Option** with the left button to subtract or with the
+right button to intersect.
 
 The **Edit** menu can select the entire canvas, invert a selection, fill it
 with the primary color, or erase it to transparency. Erasing also deselects.
@@ -183,6 +194,12 @@ filters. They operate on the active visible layer and honor the selection.
 Configurable filters preview changes as you adjust their values. **Apply**
 adds a single history entry and **Cancel** discards the preview. **Effects →
 Repeat Last Effect** reuses the most recently applied effect settings.
+
+In **Curves**, drag or add control points to adjust luminosity or selected RGB
+channels. Right-click an interior point to remove it. In **Levels**, choose the
+channels to edit, then adjust the input and output points or gamma while
+watching both histograms update. **Auto** fits the selected channels using the
+colors in the active selection or, with no selection, the layer.
 
 Use the toolbar buttons or **Window** menu to show or hide each utility
 window (F5–F8). Drag a window by its title bar or use **Window → Reset Panel

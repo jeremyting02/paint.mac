@@ -12,7 +12,7 @@ appItem.submenu = appMenu
 
 let fileItem = menu.addItem(withTitle: "File", action: nil, keyEquivalent: "")
 let fileMenu = NSMenu(title: "File")
-fileMenu.addItem(withTitle: "New", action: #selector(NSDocumentController.newDocument(_:)), keyEquivalent: "n")
+fileMenu.addItem(withTitle: "New…", action: #selector(NewImageCommand.show(_:)), keyEquivalent: "n").target = NewImageCommand.shared
 fileMenu.addItem(withTitle: "Open…", action: #selector(NSDocumentController.openDocument(_:)), keyEquivalent: "o")
 fileMenu.addItem(.separator())
 fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -125,7 +125,7 @@ let adjustmentShortcuts: [String: (key: String, modifiers: NSEvent.ModifierFlags
     "Sepia": ("e", [.command, .shift])
 ]
 for (index, filter) in RasterFilter.adjustments.enumerated() {
-    let title = filter.title + (filter.controls.isEmpty ? "" : "…")
+    let title = filter.title + (filter.controls.isEmpty && filter.editor == nil ? "" : "…")
     let shortcut = adjustmentShortcuts[filter.title]
     let item = adjustmentsMenu.addItem(withTitle: title, action: #selector(PaintDocument.applyAdjustment(_:)),
                                        keyEquivalent: shortcut?.key ?? "")

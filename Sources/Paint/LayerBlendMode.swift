@@ -82,9 +82,52 @@ enum BGRA8 {
     }
 
     static func pixels(from image: CGImage) -> Data? {
+        if let straight = straightProviderPixels(from: image) { return straight }
+        return rasterizedPixels(from: image)
+    }
+
+    static func rasterizedPixels(from image: CGImage) -> Data? {
         render(width: image.width, height: image.height) { context in
             context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         }
+    }
+
+    private static func straightProviderPixels(from image: CGImage) -> Data? {
+        guard image.bitsPerComponent == 8, image.bitsPerPixel == 32, image.decode == nil,
+              image.colorSpace?.name == CGColorSpace.sRGB else { return nil }
+        let order = image.bitmapInfo.intersection(.byteOrderMask)
+        let bgra = image.alphaInfo == .first && order == .byteOrder32Little
+        let rgba = image.alphaInfo == .last && (order == .byteOrderDefault || order == .byteOrder32Big)
+        guard bgra || rgba, let providerData = image.dataProvider?.data else { return nil }
+        let data = providerData as Data
+        let rowBytes = image.width * 4
+        let rowStride = image.bytesPerRow
+        let (lastRow, overflow) = (image.height - 1).multipliedReportingOverflow(by: rowStride)
+        guard rowStride >= rowBytes, !overflow, lastRow <= data.count, rowBytes <= data.count - lastRow
+        else { return nil }
+        if bgra && rowStride == rowBytes { return Data(data.prefix(lastRow + rowBytes)) }
+
+        // Reading straight-alpha bytes directly preserves RGB at zero and low alpha.
+        var pixels = Data(count: rowBytes * image.height)
+        pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+            data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                for row in 0..<image.height {
+                    let input = row * rowStride
+                    let output = row * rowBytes
+                    if bgra {
+                        target[output..<(output + rowBytes)].copyBytes(from: source[input..<(input + rowBytes)])
+                    } else {
+                        for column in stride(from: 0, to: rowBytes, by: 4) {
+                            target[output + column] = source[input + column + 2]
+                            target[output + column + 1] = source[input + column + 1]
+                            target[output + column + 2] = source[input + column]
+                            target[output + column + 3] = source[input + column + 3]
+                        }
+                    }
+                }
+            }
+        }
+        return pixels
     }
 
     static func render(width: Int, height: Int, opaque: Bool = false, draw: (CGContext) -> Void) -> Data? {

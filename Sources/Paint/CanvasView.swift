@@ -29,6 +29,7 @@ final class CanvasView: NSView {
         let before: SelectionOutline?
         let mode: SelectionOutline.Mode
         let lassoPath: CGMutablePath?
+        let rightButton: Bool
     }
 
     private struct FloodEdit {
@@ -214,7 +215,15 @@ final class CanvasView: NSView {
             updateDrawingPreview()
         }
     }
-    var brushSize: CGFloat = 12 { didSet { updateDrawingPreview() } }
+    static let brushSizeRange: ClosedRange<CGFloat> = 0.1...4096
+    var brushSize: CGFloat = 12 {
+        didSet {
+            updateDrawingPreview()
+            brushSizeDidChange?()
+        }
+    }
+    var brushSizeDidChange: (() -> Void)?
+    var brushAntialiased = true
     var drawingStyle = DrawingStyle() { didSet { updateDrawingPreview() } }
     var gradientOptions = GradientOptions() { didSet { invalidateGradientPreview() } }
     var pickerSampling: FloodSettings.Sampling = .layer
@@ -241,6 +250,8 @@ final class CanvasView: NSView {
 
     private(set) var selectionOutline: SelectionOutline?
     var selectionMode: SelectionOutline.Mode = .replace
+    var rectangleSelection = RectangleSelection()
+    var imageResolution: ImageResolution { document?.stack?.resolution ?? .standard }
     var floodSettings = FloodSettings()
     private var floodEdit: FloodEdit?
     private var fillPreview: PaintLayer?
@@ -258,7 +269,22 @@ final class CanvasView: NSView {
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionDrag: SelectionDrag?
 
-    private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String, imageSelection: CGRect?)?
+    private struct BrushStroke {
+        let bitmap: CGContext
+        let eraser: EraserStroke?
+        let imageSelection: CGRect?
+        let rightButton: Bool
+        let outset: CGFloat
+        var lastPoint: CGPoint
+        var affectedBounds: CGRect
+
+        mutating func extend(to point: CGPoint) {
+            affectedBounds = affectedBounds.union(CGRect(x: point.x - outset, y: point.y - outset,
+                                                        width: outset * 2, height: outset * 2))
+            lastPoint = point
+        }
+    }
+    private var stroke: BrushStroke?
     private(set) var move: MoveSession?
     private var moveDrag: MoveDrag?
     private var cursorTracking: NSTrackingArea?
@@ -575,6 +601,51 @@ final class CanvasView: NSView {
         setSelection(drag.before)
     }
 
+    private func selectionMode(at modifiers: NSEvent.ModifierFlags, rightButton: Bool) -> SelectionOutline.Mode {
+        if modifiers.contains(.control) { return rightButton ? .xor : .add }
+        if modifiers.contains(.option) { return rightButton ? .intersect : .subtract }
+        return selectionMode
+    }
+
+    private func beginSelectionDrag(at location: CGPoint, in image: CGImage,
+                                    modifiers: NSEvent.ModifierFlags, rightButton: Bool) {
+        guard selectionDrag == nil else { return }
+        let anchor = pixelEdge(at: location, in: image)
+        let path = tool == .lassoSelect ? CGMutablePath() : nil
+        path?.move(to: anchor)
+        selectionDrag = SelectionDrag(anchor: anchor, end: anchor, before: selectionOutline,
+                                      mode: selectionMode(at: modifiers, rightButton: rightButton),
+                                      lassoPath: path, rightButton: rightButton)
+        updateSelectionDrag(in: image, modifiers: modifiers)
+    }
+
+    private func dragSelection(with event: NSEvent, rightButton: Bool) -> Bool {
+        guard var drag = selectionDrag, let image = document?.image else { return false }
+        guard drag.rightButton == rightButton else { return true }
+        let location = convert(event.locationInWindow, from: nil)
+        let point = imagePoint(location)
+        let end = drag.lassoPath == nil ? pixelEdge(at: location, in: image)
+            : CGPoint(x: point.x.rounded(), y: point.y.rounded())
+        if end != drag.end {
+            drag.lassoPath?.addLine(to: end)
+            drag.end = end
+            selectionDrag = drag
+        }
+        updateSelectionDrag(in: image, modifiers: event.modifierFlags)
+        return true
+    }
+
+    private func finishSelectionDrag(with event: NSEvent, rightButton: Bool) -> Bool {
+        guard let drag = selectionDrag, let name = tool.selectionName else { return false }
+        guard drag.rightButton == rightButton else { return true }
+        _ = dragSelection(with: event, rightButton: rightButton)
+        let outline = selectionOutline
+        cancelSelectionDrag()
+        let actionName = drag.mode == .replace ? (outline == nil ? "Deselect" : name) : "\(name) (\(drag.mode.rawValue))"
+        document?.commitSelection(outline, actionName: actionName)
+        return true
+    }
+
     private func updateSelectionDrag(in image: CGImage, modifiers: NSEvent.ModifierFlags) {
         guard let drag = selectionDrag else { return }
         let outline: SelectionOutline?
@@ -582,17 +653,20 @@ final class CanvasView: NSView {
             path.closeSubpath()
             outline = SelectionOutline(path: path.normalized(using: .evenOdd))
         } else {
-            outline = shapeSelection(from: drag.anchor, to: drag.end, modifiers: modifiers)
+            outline = shapeSelection(from: drag.anchor, to: drag.end, in: image, modifiers: modifiers)
         }
         let clipped = outline?.clipped(to: canvasBounds(for: image))
         setSelection(drag.mode.applying(clipped, to: drag.before))
     }
 
-    private func shapeSelection(from anchor: CGPoint, to end: CGPoint,
+    private func shapeSelection(from anchor: CGPoint, to end: CGPoint, in image: CGImage,
                                 modifiers: NSEvent.ModifierFlags) -> SelectionOutline? {
+        if tool == .rectangleSelect {
+            return SelectionOutline(rect: rectangleSelection.bounds(from: anchor, to: end, canvas: canvasBounds(for: image),
+                                                                     resolution: imageResolution, square: modifiers.contains(.shift)))
+        }
         let rect = CGRect(x: min(anchor.x, end.x), y: min(anchor.y, end.y),
                           width: abs(anchor.x - end.x), height: abs(anchor.y - end.y))
-        guard tool == .ellipseSelect else { return SelectionOutline(rect: rect) }
         var bounds = rect
         if modifiers.contains(.shift) {
             // The drag endpoints define the diameter, in any direction.
@@ -622,7 +696,8 @@ final class CanvasView: NSView {
 
     private var pixelPreview: PaintLayer? {
         renderGradientPreviewIfNeeded()
-        return move?.preview ?? fillPreview ?? gradientEdit?.preview ?? drawingDraft?.preview ?? rasterDrawing?.preview
+        return move?.preview ?? fillPreview ?? gradientEdit?.preview ?? drawingDraft?.preview
+            ?? rasterDrawing?.preview ?? stroke?.eraser?.preview
     }
     var copyableLayer: PaintLayer? { pixelPreview ?? document?.stack?.activeLayer }
     var canCopyPixels: Bool {
@@ -814,6 +889,13 @@ final class CanvasView: NSView {
         }
         if (holdingSpace || tool == .pan), let delta = nudge(for: event), let scrollView = enclosingScrollView {
             scroll(to: scrollView.contentView.bounds.origin + delta, in: scrollView)
+            return
+        }
+        if tool.usesBrushSize, let key = event.charactersIgnoringModifiers, key == "[" || key == "]",
+           event.modifierFlags.intersection([.command, .option]).isEmpty {
+            let step: CGFloat = event.modifierFlags.contains(.control) ? 5 : 1
+            let newSize = brushSize + (key == "]" ? step : -step)
+            brushSize = min(max(newSize, Self.brushSizeRange.lowerBound), Self.brushSizeRange.upperBound)
             return
         }
         let isEscape = event.keyCode == 53
@@ -1020,11 +1102,17 @@ final class CanvasView: NSView {
         guard panDrag == nil else { return }
         if tool.transformsSelection { beginMoveDrag(with: event, rightButton: true) }
         else if tool == .gradient { beginGradient(with: event, rightButton: true) }
-        else if tool == .paintBucket {
+        else if tool.usesFlood || tool.drawsSelection {
             let location = convert(event.locationInWindow, from: nil)
-            if imageRect.contains(location) {
-                window?.makeFirstResponder(self)
+            guard imageRect.contains(location), let image = document?.image else {
+                if tool.drawsSelection { document?.deselect(nil) }
+                return
+            }
+            window?.makeFirstResponder(self)
+            if tool.usesFlood {
                 beginFloodEdit(at: imagePoint(location), modifiers: event.modifierFlags, secondary: true)
+            } else {
+                beginSelectionDrag(at: location, in: image, modifiers: event.modifierFlags, rightButton: true)
             }
         }
         else if tool.usesRasterDrawing || tool.usesVectorDrawing || tool == .colorPicker || tool == .zoom {
@@ -1037,8 +1125,9 @@ final class CanvasView: NSView {
         if panDrag != nil { dragPan(with: event); return }
         if tool.transformsSelection { updateMoveDrag(with: event, rightButton: true) }
         else if tool == .gradient { dragGradient(with: event, rightButton: true) }
+        else if dragSelection(with: event, rightButton: true) { return }
         else if updateToolGesture(with: event) { return }
-        else if stroke != nil { updateBrush(with: event) }
+        else if stroke != nil { updateBrush(with: event, rightButton: true) }
         else { super.rightMouseDragged(with: event) }
     }
 
@@ -1046,14 +1135,15 @@ final class CanvasView: NSView {
         if panDrag != nil { finishPan(with: event); return }
         if tool.transformsSelection { endMoveDrag(with: event, rightButton: true) }
         else if tool == .gradient { endGradientDrag(with: event, rightButton: true) }
+        else if finishSelectionDrag(with: event, rightButton: true) { return }
         else if endToolGesture(with: event) { return }
-        else if stroke != nil { endBrush(with: event) }
+        else if stroke != nil { endBrush(with: event, rightButton: true) }
         else { super.rightMouseUp(with: event) }
     }
 
     override func flagsChanged(with event: NSEvent) {
         if let point = moveDrag?.lastPoint { updateMoveDrag(at: point, modifiers: event.modifierFlags) }
-        if tool == .ellipseSelect, selectionDrag != nil, let image = document?.image {
+        if (tool == .rectangleSelect || tool == .ellipseSelect), selectionDrag != nil, let image = document?.image {
             updateSelectionDrag(in: image, modifiers: event.modifierFlags)
         }
         super.flagsChanged(with: event)
@@ -1187,12 +1277,7 @@ final class CanvasView: NSView {
             return
         }
         if tool.drawsSelection {
-            let anchor = pixelEdge(at: location, in: image)
-            let path = tool == .lassoSelect ? CGMutablePath() : nil
-            path?.move(to: anchor)
-            selectionDrag = SelectionDrag(anchor: anchor, end: anchor, before: selectionOutline,
-                                          mode: selectionMode, lassoPath: path)
-            if selectionMode == .replace { setSelection(nil) }
+            beginSelectionDrag(at: location, in: image, modifiers: event.modifierFlags, rightButton: false)
             return
         }
         beginBrush(with: event, secondary: false)
@@ -1200,31 +1285,52 @@ final class CanvasView: NSView {
 
     private func beginBrush(with event: NSEvent, secondary: Bool) {
         let location = convert(event.locationInWindow, from: nil)
-        guard panDrag == nil, stroke == nil, imageRect.contains(location), let image = document?.image else { return }
+        guard panDrag == nil, stroke == nil, imageRect.contains(location), let layer = document?.stack?.activeLayer else { return }
+        let image = layer.image
         window?.makeFirstResponder(self)
-        guard document?.stack?.activeLayer.isVisible == true else {
+        guard layer.isVisible else {
             NSSound.beep()
             return
         }
-        guard let bitmap = LayerStack.makeBitmap(width: image.width, height: image.height) else { return }
-        let isErasing = tool == .eraser
-        bitmap.setBlendMode(.copy)
-        bitmap.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let brushColor = secondary ? secondaryColor : self.brushColor
+        let bitmap: CGContext
+        let eraser: EraserStroke?
+        if tool == .eraser {
+            guard let alphaBrush = EraserStroke(layer: layer, opacity: DrawingColor(brushColor).alpha, diameter: brushSize)
+            else { return }
+            eraser = alphaBrush
+            bitmap = alphaBrush.coverage
+            bitmap.setFillColor(gray: 1, alpha: 1)
+            bitmap.setStrokeColor(gray: 1, alpha: 1)
+        } else {
+            guard let context = LayerStack.makeBitmap(width: image.width, height: image.height) else { return }
+            eraser = nil
+            bitmap = context
+            bitmap.setBlendMode(.copy)
+            bitmap.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            bitmap.setBlendMode(.normal)
+            let color = (brushColor.usingColorSpace(.sRGB) ?? .black).cgColor
+            bitmap.setFillColor(color)
+            bitmap.setStrokeColor(color)
+        }
         if let selectionOutline {
             bitmap.addPath(selectionOutline.path)
             bitmap.clip(using: .evenOdd)
         }
-        bitmap.setBlendMode(isErasing ? .clear : .normal)
-        let color = ((secondary ? secondaryColor : brushColor).usingColorSpace(.sRGB) ?? .black).cgColor
-        bitmap.setFillColor(color)
-        bitmap.setStrokeColor(color)
+        bitmap.setShouldAntialias(brushAntialiased)
         bitmap.setLineCap(.round)
         bitmap.setLineWidth(brushSize)
 
         let point = imagePoint(location)
         bitmap.fillEllipse(in: CGRect(x: point.x - brushSize / 2, y: point.y - brushSize / 2,
                                      width: brushSize, height: brushSize))
-        stroke = (bitmap, point, isErasing ? "Eraser" : "Paintbrush", imageSelection)
+        let outset = brushSize / 2 + 1
+        stroke = BrushStroke(bitmap: bitmap, eraser: eraser, imageSelection: imageSelection,
+                             rightButton: secondary, outset: outset, lastPoint: point,
+                             affectedBounds: CGRect(x: point.x - outset, y: point.y - outset,
+                                                    width: outset * 2, height: outset * 2))
+        eraser?.changed(from: point, to: point)
+        composite = nil
         needsDisplay = true
     }
 
@@ -1255,7 +1361,7 @@ final class CanvasView: NSView {
             }
             operation = .fill(layer: layer, mask: mask)
         } else {
-            operation = .select(mode: selectionMode, before: selectionOutline)
+            operation = .select(mode: selectionMode(at: modifiers, rightButton: secondary), before: selectionOutline)
         }
         let flood = modifiers.contains(.shift) ? (floodSettings.flood == .global ? FloodSettings.Flood.contiguous : .global) : floodSettings.flood
         floodEdit = FloodEdit(source: source, x: x, y: y, flood: flood, secondary: secondary, operation: operation)
@@ -1332,34 +1438,25 @@ final class CanvasView: NSView {
             }
             return
         }
-        if var drag = selectionDrag, let image = document?.image {
-            let point = imagePoint(location)
-            let end = drag.lassoPath == nil ? pixelEdge(at: location, in: image)
-                : CGPoint(x: point.x.rounded(), y: point.y.rounded())
-            if end != drag.end {
-                drag.lassoPath?.addLine(to: end)
-                drag.end = end
-                selectionDrag = drag
-            }
-            updateSelectionDrag(in: image, modifiers: event.modifierFlags)
-            return
-        }
+        if dragSelection(with: event, rightButton: false) { return }
         if moveDrag != nil {
             updateMoveDrag(with: event, rightButton: false)
             return
         }
-        updateBrush(with: event)
+        updateBrush(with: event, rightButton: false)
     }
 
-    private func updateBrush(with event: NSEvent) {
-        guard let current = stroke else { return }
+    private func updateBrush(with event: NSEvent, rightButton: Bool) {
+        guard let current = stroke, current.rightButton == rightButton else { return }
         let location = convert(event.locationInWindow, from: nil)
         let point = imagePoint(location)
         guard point != current.lastPoint else { return }
         current.bitmap.move(to: current.lastPoint)
         current.bitmap.addLine(to: point)
         current.bitmap.strokePath()
-        stroke?.lastPoint = point
+        current.eraser?.changed(from: current.lastPoint, to: point)
+        stroke?.extend(to: point)
+        composite = nil
         needsDisplay = true
     }
 
@@ -1374,28 +1471,28 @@ final class CanvasView: NSView {
             endMoveDrag(with: event, rightButton: false)
             return
         }
+        if finishSelectionDrag(with: event, rightButton: false) { return }
         mouseDragged(with: event)
         if floodDrag != nil {
             floodDrag = nil
             updateFloodCursor(at: convert(event.locationInWindow, from: nil))
             return
         }
-        if let drag = selectionDrag, let name = tool.selectionName {
-            let outline = selectionOutline
-            cancelSelectionDrag()
-            let actionName = drag.mode == .replace ? (outline == nil ? "Deselect" : name) : "\(name) (\(drag.mode.rawValue))"
-            document?.commitSelection(outline, actionName: actionName)
-            return
-        }
-        endBrush(with: event)
+        endBrush(with: event, rightButton: false)
     }
 
-    private func endBrush(with event: NSEvent) {
-        updateBrush(with: event)
-        guard let current = stroke else { return }
+    private func endBrush(with event: NSEvent, rightButton: Bool) {
+        guard let current = stroke, current.rightButton == rightButton else { return }
+        updateBrush(with: event, rightButton: rightButton)
+        let bounds = stroke?.affectedBounds ?? current.affectedBounds
         stroke = nil
-        if let image = current.bitmap.makeImage() {
-            document?.replaceImage(with: image, actionName: current.actionName, in: current.imageSelection)
+        composite = nil
+        if let eraser = current.eraser {
+            if let preview = eraser.preview { document?.commitPaintLayer(preview, actionName: "Eraser") }
+        } else if let image = current.bitmap.makeImage() {
+            let raster = topLeftRect(bounds, imageHeight: image.height).integral
+            let target = current.imageSelection ?? canvasBounds(for: image)
+            document?.replaceImage(with: image, actionName: "Paintbrush", in: raster.intersection(target))
         }
         needsDisplay = true
     }
@@ -1442,7 +1539,7 @@ final class CanvasView: NSView {
         if displayedZoomPercent >= 100 {
             context.interpolationQuality = .none
         }
-        let strokeImage = stroke?.bitmap.makeImage()
+        let strokeImage = stroke?.eraser == nil ? stroke?.bitmap.makeImage() : nil
         if stack.needsBlendComposite {
             if let strokeImage {
                 if let image = stack.blendComposite(preview: strokeImage)?.image { context.draw(image, in: rect) }

@@ -2,6 +2,11 @@ import AppKit
 
 final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     private weak var canvas: CanvasView?
+    private let rectangleSizing = NSPopUpButton()
+    private let rectangleWidth = NSTextField()
+    private let rectangleHeight = NSTextField()
+    private let rectangleUnit = NSPopUpButton()
+    private let brushAntialias = NSButton(checkboxWithTitle: "Antialias", target: nil, action: nil)
     private let sampleSource = NSPopUpButton()
     private let sampleSize = NSPopUpButton()
     private let after = NSPopUpButton()
@@ -32,6 +37,17 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     func configure(canvas: CanvasView) {
         self.canvas = canvas
         spacing = 6
+        configure(rectangleSizing, "Rectangle Selection Sizing", RectangleSelection.Sizing.allCases.map(\.rawValue))
+        configure(rectangleUnit, "Rectangle Selection Units", RectangleSelection.Unit.allCases.map(\.rawValue))
+        for (field, label) in [(rectangleWidth, "Selection Width"), (rectangleHeight, "Selection Height")] {
+            field.delegate = self
+            field.alignment = .right
+            field.placeholderString = label
+            field.toolTip = label
+            field.setAccessibilityLabel(label)
+            field.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        }
+        refreshRectangleDimensions()
         configure(sampleSource, "Color Picker Sampling", FloodSettings.Sampling.allCases.map(\.rawValue))
         configure(sampleSize, "Color Picker Sample Size", sampleSizes.map { "\($0) × \($0)" })
         configure(after, "After Picking", CanvasView.PickerAfter.allCases.map(\.rawValue))
@@ -55,11 +71,12 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         configure(fontSize, "Font Size", fontSizes.map { "\($0) px" })
         fontSize.selectItem(withTitle: "16 px")
         configure(textAlignment, "Text Alignment", TextAlignment.allCases.map(\.rawValue))
-        for button in [smoothing, bold, italic] {
+        for button in [brushAntialias, smoothing, bold, italic] {
             button.target = self
             button.action = #selector(change(_:))
         }
         smoothing.state = .on
+        brushAntialias.state = canvas.brushAntialiased ? .on : .off
         text.delegate = self
         text.target = self
         text.action = #selector(finishText(_:))
@@ -67,7 +84,8 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         text.setAccessibilityLabel("Text to draw")
         text.widthAnchor.constraint(equalToConstant: 128).isActive = true
         font.widthAnchor.constraint(lessThanOrEqualToConstant: 140).isActive = true
-        for view in [sampleSource, sampleSize, after, gradientShape, gradientRepeat, gradientMode, gradientBlend,
+        for view in [rectangleSizing, rectangleWidth, rectangleHeight, rectangleUnit, brushAntialias,
+                     sampleSource, sampleSize, after, gradientShape, gradientRepeat, gradientMode, gradientBlend,
                      toleranceLabel, tolerance, shape, fill, cornerRadius, curve, linePattern, vectorBlend,
                      smoothing, text, font, fontSize, textAlignment, bold, italic] as [NSView] {
             addArrangedSubview(view)
@@ -84,6 +102,13 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     func update() {
         guard let canvas else { return }
         let tool = canvas.tool
+        let brushTool = tool == .brush || tool == .eraser
+        brushAntialias.isHidden = !brushTool
+        rectangleSizing.isHidden = tool != .rectangleSelect
+        let rectangleDimensionsVisible = tool == .rectangleSelect && canvas.rectangleSelection.sizing != .anySize
+        rectangleWidth.isHidden = !rectangleDimensionsVisible
+        rectangleHeight.isHidden = !rectangleDimensionsVisible
+        rectangleUnit.isHidden = tool != .rectangleSelect || canvas.rectangleSelection.sizing != .fixedSize
         sampleSource.isHidden = tool != .colorPicker
         sampleSize.isHidden = tool != .colorPicker
         after.isHidden = tool != .colorPicker
@@ -102,17 +127,47 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         smoothing.isHidden = !tool.usesVectorDrawing
         for view in [text, font, fontSize, textAlignment, bold, italic] as [NSView] { view.isHidden = tool != .text }
         text.isEnabled = canvas.hasPendingDrawing
-        isHidden = tool != .colorPicker && tool != .recolor && tool != .gradient && !tool.usesVectorDrawing
+        isHidden = !brushTool && tool != .colorPicker && tool != .recolor && tool != .gradient &&
+            tool != .rectangleSelect && !tool.usesVectorDrawing
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        canvas?.drawingStyle.text = text.stringValue
+        guard let field = obj.object as? NSTextField else { return }
+        if field === text {
+            canvas?.drawingStyle.text = text.stringValue
+        } else if field === rectangleWidth || field === rectangleHeight {
+            updateRectangleDimension(field)
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, field === rectangleWidth || field === rectangleHeight else { return }
+        updateRectangleDimension(field)
+        refreshRectangleDimensions()
+    }
+
+    private func updateRectangleDimension(_ field: NSTextField) {
+        guard let canvas, let value = (try? Double(field.stringValue, format: .number)) ?? Double(field.stringValue),
+              value.isFinite, value > 0 else { return }
+        let isRatio = canvas.rectangleSelection.sizing == .fixedRatio
+        var dimensions = isRatio ? canvas.rectangleSelection.ratio : canvas.rectangleSelection.size
+        if field === rectangleWidth { dimensions.width = value } else { dimensions.height = value }
+        if isRatio { canvas.rectangleSelection.ratio = dimensions } else { canvas.rectangleSelection.size = dimensions }
+    }
+
+    private func refreshRectangleDimensions() {
+        guard let options = canvas?.rectangleSelection else { return }
+        let dimensions = options.sizing == .fixedRatio ? options.ratio : options.size
+        let format = FloatingPointFormatStyle<Double>.number.grouping(.never).precision(.fractionLength(0...8))
+        rectangleWidth.stringValue = Double(dimensions.width).formatted(format)
+        rectangleHeight.stringValue = Double(dimensions.height).formatted(format)
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
             commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            finishText(nil)
+            if control === text { finishText(nil) }
+            else { window?.makeFirstResponder(canvas) }
             return true
         }
         return false
@@ -134,7 +189,19 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
 
     @objc private func change(_ sender: NSControl) {
         guard let canvas else { return }
-        if sender === sampleSource {
+        if sender === brushAntialias {
+            canvas.brushAntialiased = brushAntialias.state == .on
+        } else if sender === rectangleSizing {
+            canvas.rectangleSelection.sizing = RectangleSelection.Sizing.allCases[rectangleSizing.indexOfSelectedItem]
+            refreshRectangleDimensions()
+            update()
+            // The options row is horizontally scrollable and must remeasure when fields appear.
+            canvas.selectionDidChange?()
+        } else if sender === rectangleUnit {
+            canvas.rectangleSelection.changeUnit(to: RectangleSelection.Unit.allCases[rectangleUnit.indexOfSelectedItem],
+                                                 resolution: canvas.imageResolution)
+            refreshRectangleDimensions()
+        } else if sender === sampleSource {
             canvas.pickerSampling = FloodSettings.Sampling.allCases[sampleSource.indexOfSelectedItem]
         } else if sender === sampleSize {
             canvas.pickerSampleSize = sampleSizes[sampleSize.indexOfSelectedItem]

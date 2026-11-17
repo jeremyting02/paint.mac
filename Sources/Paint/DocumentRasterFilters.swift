@@ -37,7 +37,7 @@ extension PaintDocument {
 
     func showFilter(_ filter: RasterFilter) {
         guard canFilterActiveLayer, let window = windowForSheet, let input = filterInput() else { return }
-        if filter.controls.isEmpty {
+        if filter.controls.isEmpty && filter.editor == nil {
             applyFilter(filter, input: input, values: [])
             return
         }

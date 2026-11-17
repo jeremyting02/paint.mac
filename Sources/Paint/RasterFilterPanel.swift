@@ -32,6 +32,7 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
     }()
     private let filter: RasterFilter
     private let input: RasterFilter.Input
+    private let specializedControls: (any TonalAdjustmentControls)?
     private let apply = NSButton(title: "Apply", target: nil, action: nil)
     private let status = NSTextField(labelWithString: "")
     private var fields: [Field] = []
@@ -44,8 +45,19 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
     init(filter: RasterFilter, input: RasterFilter.Input) {
         self.filter = filter
         self.input = input
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 440, height: 100 + 34 * filter.controls.count),
-                   styleMask: [.titled], backing: .buffered, defer: false)
+        let size: NSSize
+        switch filter.editor {
+        case .curves:
+            specializedControls = CurvesControls()
+            size = NSSize(width: 416, height: 450)
+        case .levels:
+            specializedControls = LevelsControls(input: input)
+            size = NSSize(width: 560, height: 340)
+        case nil:
+            specializedControls = nil
+            size = NSSize(width: 440, height: 100 + 34 * filter.controls.count)
+        }
+        super.init(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
         title = filter.title
         let form = NSStackView()
         form.orientation = .vertical
@@ -53,6 +65,12 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
         form.spacing = 8
         form.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
 
+        if let specializedControls {
+            let view = specializedControls.view
+            form.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalTo: form.widthAnchor, constant: -32).isActive = true
+            specializedControls.didChange = { [weak self] in self?.updatePreview() }
+        }
         for (index, control) in filter.controls.enumerated() {
             let label = NSTextField(labelWithString: control.title)
             let row: NSStackView
@@ -104,7 +122,7 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
     func updatePreview() {
         revision += 1
         let requestedRevision = revision
-        let input = self.input, filter = self.filter, values = self.values
+        let input = self.input, filter = specializedControls?.renderFilter() ?? self.filter, values = self.values
         renderRequest?.cancel()
         result = nil
         status.stringValue = "Rendering…"
@@ -156,6 +174,7 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
     @objc private func changeChoice(_ sender: NSPopUpButton) { updatePreview() }
 
     @objc private func resetValues(_ sender: Any?) {
+        specializedControls?.reset()
         for (index, control) in filter.controls.enumerated() {
             fields[index].setValue(control.initial)
         }

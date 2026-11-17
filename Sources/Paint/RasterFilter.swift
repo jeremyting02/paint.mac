@@ -2,6 +2,10 @@ import AppKit
 import CoreImage
 
 struct RasterFilter {
+    enum Editor {
+        case curves, levels
+    }
+
     struct Control {
         let title: String
         let range: ClosedRange<Double>
@@ -35,7 +39,8 @@ struct RasterFilter {
     let title: String
     let category: String?
     let controls: [Control]
-    private let process: (Data, Int, Int, [Double], () -> Bool) -> Data?
+    let editor: Editor?
+    private let process: (Data, Int, Int, Data?, [Double], () -> Bool) -> Data?
 
     init(_ title: String, category: String? = nil, _ controls: [Control] = [],
          process: @escaping (Data, Int, Int, [Double]) -> Data?) {
@@ -44,12 +49,20 @@ struct RasterFilter {
         })
     }
 
-    init(_ title: String, category: String? = nil, _ controls: [Control] = [],
+    init(_ title: String, category: String? = nil, _ controls: [Control] = [], editor: Editor? = nil,
          render: @escaping (Data, Int, Int, [Double], () -> Bool) -> Data?) {
+        self.init(title, category: category, controls, editor: editor) { pixels, width, height, _, values, isCancelled in
+            render(pixels, width, height, values, isCancelled)
+        }
+    }
+
+    init(_ title: String, category: String? = nil, _ controls: [Control] = [], editor: Editor? = nil,
+         renderSelected: @escaping (Data, Int, Int, Data?, [Double], () -> Bool) -> Data?) {
         self.title = title
         self.category = category
         self.controls = controls
-        self.process = render
+        self.editor = editor
+        process = renderSelected
     }
 
     struct Input {
@@ -75,7 +88,7 @@ struct RasterFilter {
         func render(_ filter: RasterFilter, values: [Double], isCancelled: () -> Bool = { false }) -> PaintLayer? {
             guard values.count == filter.controls.count, !isCancelled() else { return nil }
             let settings = zip(filter.controls, values).map { $0.snapped($1) }
-            guard var result = filter.process(pixels, layer.image.width, layer.image.height, settings, isCancelled),
+            guard var result = filter.process(pixels, layer.image.width, layer.image.height, mask, settings, isCancelled),
                   result.count == pixels.count, !isCancelled() else { return nil }
             // SelectionOutline supplies a binary mask in top-to-bottom pixel order.
             if let mask {

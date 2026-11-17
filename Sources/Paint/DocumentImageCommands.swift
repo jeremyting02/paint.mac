@@ -60,7 +60,8 @@ extension PaintDocument {
         alert.messageText = canvasOnly ? "Canvas Size" : "Resize"
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
-        let options = ImageSizeOptions(width: image.width, height: image.height, canvasOnly: canvasOnly,
+        let options = ImageSizeOptions(width: image.width, height: image.height,
+                                       purpose: canvasOnly ? .canvasSize : .resize,
                                        resolution: stack?.resolution ?? .standard)
         alert.accessoryView = options.view
         options.acceptButton = alert.buttons.first
@@ -108,7 +109,44 @@ extension PaintDocument {
     }
 }
 
+final class NewImageCommand: NSObject {
+    static let shared = NewImageCommand()
+    static let defaultWidth = 800
+    static let defaultHeight = 600
+
+    @MainActor @objc func show(_ sender: Any?) {
+        let parent = (sender as? NSView)?.window ?? NSApp.mainWindow
+        guard parent?.attachedSheet == nil else { return }
+        let clipboard = PaintDocument.image(on: .general)
+        let alert = NSAlert()
+        alert.messageText = "New Image"
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        let options = ImageSizeOptions(width: clipboard?.width ?? Self.defaultWidth,
+                                       height: clipboard?.height ?? Self.defaultHeight,
+                                       purpose: .newImage, resolution: .standard)
+        alert.accessoryView = options.view
+        options.acceptButton = alert.buttons.first
+        options.updateValidation()
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .alertFirstButtonReturn, let size = options.size,
+                  let resolution = options.resolution,
+                  let document = PaintDocument.newImage(width: size.width, height: size.height, resolution: resolution)
+            else { return }
+            NSDocumentController.shared.addDocument(document)
+            document.makeWindowControllers()
+            document.showWindows()
+        }
+        if let parent {
+            alert.beginSheetModal(for: parent, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
+        }
+    }
+}
+
 private final class ImageSizeOptions: NSObject, NSTextFieldDelegate {
+    enum Purpose { case newImage, resize, canvasSize }
     let view: NSView
     weak var acceptButton: NSButton?
     private let originalWidth: Int
@@ -126,7 +164,7 @@ private final class ImageSizeOptions: NSObject, NSTextFieldDelegate {
     private let gamma = NSButton(checkboxWithTitle: "Gamma correction", target: nil, action: nil)
     private let message = NSTextField(labelWithString: "")
 
-    init(width: Int, height: Int, canvasOnly: Bool, resolution: ImageResolution) {
+    init(width: Int, height: Int, purpose: Purpose, resolution: ImageResolution) {
         originalWidth = width
         originalHeight = height
         widthField = NSTextField(string: String(width))
@@ -148,7 +186,7 @@ private final class ImageSizeOptions: NSObject, NSTextFieldDelegate {
             field.delegate = self
             field.alignment = .right
         }
-        aspect.state = canvasOnly ? .off : .on
+        aspect.state = purpose == .resize ? .on : .off
         aspect.target = self
         aspect.action = #selector(changeOptions)
         anchorChoice.addItems(withTitles: CanvasAnchor.allCases.map(\.rawValue))
@@ -158,11 +196,17 @@ private final class ImageSizeOptions: NSObject, NSTextFieldDelegate {
         message.textColor = .secondaryLabelColor
         message.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
-        let rows: [(String, NSView)] = [
-            ("Size", dimensionMode), ("Width (px)", widthField), ("Height (px)", heightField),
-            ("Percentage", percentageField), ("", aspect),
+        var rows: [(String, NSView)] = [("Width (px)", widthField), ("Height (px)", heightField)]
+        if purpose != .newImage {
+            rows.insert(("Size", dimensionMode), at: 0)
+            rows.append(("Percentage", percentageField))
+        }
+        rows += [
+            ("", aspect),
             ("Horizontal resolution (dpi)", horizontalDPI), ("Vertical resolution (dpi)", verticalDPI)
-        ] + (canvasOnly ? [("Anchor", anchorChoice), ("Fill", fillChoice)] : [("Resampling", samplingChoice), ("", gamma)])
+        ]
+        if purpose == .canvasSize { rows += [("Anchor", anchorChoice), ("Fill", fillChoice)] }
+        if purpose == .resize { rows += [("Resampling", samplingChoice), ("", gamma)] }
         let grid = NSGridView(views: rows.map { [NSTextField(labelWithString: $0.0), $0.1] })
         grid.columnSpacing = 9
         grid.rowSpacing = 6
@@ -181,7 +225,7 @@ private final class ImageSizeOptions: NSObject, NSTextFieldDelegate {
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
         view.setFrameSize(NSSize(width: 330, height: stack.fittingSize.height))
-        changeOptions()
+        if purpose == .newImage { updateValidation() } else { changeOptions() }
     }
 
     var anchor: CanvasAnchor { CanvasAnchor.allCases[anchorChoice.indexOfSelectedItem] }

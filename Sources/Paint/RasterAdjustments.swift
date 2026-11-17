@@ -4,7 +4,9 @@ extension RasterFilter {
     static let adjustments: [Self] = [
         autoLevel,
         point("Black and White") { pixel, _ in
-            let gray = luminance(pixel)
+            // Paint.NET weights encoded RGB and rounds the sum in the byte domain.
+            let channels = pixel * 255
+            let gray = (channels.x * 0.299 + channels.y * 0.587 + channels.z * 0.114).rounded() / 255
             return Pixel(gray, gray, gray, pixel.w)
         },
         point("Brightness / Contrast", [.init("Brightness", -100...100, 0), .init("Contrast", -100...100, 0)]) {
@@ -15,19 +17,7 @@ extension RasterFilter {
             output.w = pixel.w
             return output
         },
-        point("Curves", [.init("Quarter tones", 0...255, 64), .init("Midtones", 0...255, 128),
-                         .init("Three-quarter tones", 0...255, 191)]) { pixel, values in
-            let points = [0, values[0], values[1], values[2], 255]
-            let stops = [0.0, 64, 128, 191, 255]
-            var output = pixel
-            for channel in 0..<3 {
-                let value = pixel[channel] * 255
-                let index = stops.dropFirst().firstIndex { value <= $0 }.map { $0 - 1 } ?? 3
-                let t = (value - stops[index]) / (stops[index + 1] - stops[index])
-                output[channel] = (points[index] + t * (points[index + 1] - points[index])) / 255
-            }
-            return output
-        },
+        CurveSettings().filter(),
         coreImage("Exposure", [.init("Exposure (EV)", -8...8, 0, step: 0.01)]) { image, values in
             image.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: values[0]])
         },
@@ -47,18 +37,7 @@ extension RasterFilter {
         },
         point("Invert Alpha") { pixel, _ in Pixel(pixel.x, pixel.y, pixel.z, 1 - pixel.w) },
         point("Invert Colors") { pixel, _ in Pixel(1 - pixel.x, 1 - pixel.y, 1 - pixel.z, pixel.w) },
-        point("Levels", [.init("Input Black", 0...254, 0), .init("Input White", 1...255, 255),
-                         .init("Gamma", 0.1...10, 1, step: 0.01),
-                         .init("Output Black", 0...255, 0), .init("Output White", 0...255, 255)]) { pixel, values in
-            let black = min(values[0], values[1] - 1)
-            let range = values[1] - black
-            var output = pixel
-            for channel in 0..<3 {
-                let level = min(1, max(0, (pixel[channel] * 255 - black) / range))
-                output[channel] = (values[3] + pow(level, 1 / values[2]) * (values[4] - values[3])) / 255
-            }
-            return output
-        },
+        LevelSettings().filter(),
         point("Posterize", [.init("Red Levels", 2...64, 16), .init("Green Levels", 2...64, 16),
                             .init("Blue Levels", 2...64, 16)]) { pixel, values in
             var output = pixel
@@ -79,29 +58,4 @@ extension RasterFilter {
             ])
         }
     ]
-
-    private static let autoLevel = Self("Auto-Level") { source, _, _, _ in
-        var minimum = [UInt8](repeating: 255, count: 3)
-        var maximum = [UInt8](repeating: 0, count: 3)
-        source.withUnsafeBytes { (pixels: UnsafeRawBufferPointer) in
-            for index in stride(from: 0, to: pixels.count, by: 4) where pixels[index + 3] > 0 {
-                for channel in 0..<3 {
-                    minimum[channel] = min(minimum[channel], pixels[index + channel])
-                    maximum[channel] = max(maximum[channel], pixels[index + channel])
-                }
-            }
-        }
-        var result = source
-        result.withUnsafeMutableBytes { (pixels: UnsafeMutableRawBufferPointer) in
-            for index in stride(from: 0, to: pixels.count, by: 4) where pixels[index + 3] > 0 {
-                for channel in 0..<3 where maximum[channel] > minimum[channel] {
-                    let low = Int(minimum[channel])
-                    let range = Int(maximum[channel]) - low
-                    let value = (Int(pixels[index + channel]) - low) * 255
-                    pixels[index + channel] = UInt8((value + range / 2) / range)
-                }
-            }
-        }
-        return result
-    }
 }

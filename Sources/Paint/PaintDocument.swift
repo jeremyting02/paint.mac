@@ -38,35 +38,33 @@ final class PaintDocument: NSDocument {
         editor?.refreshImage()
     }
 
-    func replaceImage(with replacement: CGImage, actionName: String, in selection: CGRect?) {
-        guard var next = stack else { return }
-        if let selection, var pixels = next.activeLayer.pdnPixels {
-            // Compare renderer output and keep the original straight-alpha bytes for untouched pixels.
-            guard let region = replacement.cropping(to: selection),
-                  let originalRegion = next.activeLayer.image.cropping(to: selection),
-                  let edited = BGRA8.pixels(from: region), let original = BGRA8.pixels(from: originalRegion),
-                  edited != original else { return }
-            let regionPixelCount = edited.count / 4
-            let origin = Int(selection.minY) * replacement.width + Int(selection.minX)
-            pixels.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
-                edited.withUnsafeBytes { (after: UnsafeRawBufferPointer) in
-                    original.withUnsafeBytes { (before: UnsafeRawBufferPointer) in
-                        for pixel in 0..<regionPixelCount {
-                            let source = pixel * 4
-                            let updated = after.loadUnaligned(fromByteOffset: source, as: UInt32.self)
-                            guard updated != before.loadUnaligned(fromByteOffset: source, as: UInt32.self) else { continue }
-                            let offset = origin + pixel / region.width * replacement.width + pixel % region.width
-                            destination.storeBytes(of: updated, toByteOffset: offset * 4, as: UInt32.self)
-                        }
+    func replaceImage(with replacement: CGImage, actionName: String, in rect: CGRect) {
+        guard var next = stack, let image,
+              replacement.width == image.width, replacement.height == image.height else { return }
+        let rect = rect.integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard var pixels = next.activeLayer.straightPixels, !rect.isEmpty,
+              let region = replacement.cropping(to: rect),
+              let originalRegion = image.cropping(to: rect),
+              // Quantize both sides the same way to distinguish changes made by the brush.
+              let edited = BGRA8.rasterizedPixels(from: region),
+              let original = BGRA8.rasterizedPixels(from: originalRegion),
+              edited != original else { return }
+        let origin = Int(rect.minY) * replacement.width + Int(rect.minX)
+        pixels.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
+            edited.withUnsafeBytes { (after: UnsafeRawBufferPointer) in
+                original.withUnsafeBytes { (before: UnsafeRawBufferPointer) in
+                    for pixel in 0..<(edited.count / 4) {
+                        let source = pixel * 4
+                        let updated = after.loadUnaligned(fromByteOffset: source, as: UInt32.self)
+                        guard updated != before.loadUnaligned(fromByteOffset: source, as: UInt32.self) else { continue }
+                        let offset = origin + pixel / region.width * replacement.width + pixel % region.width
+                        destination.storeBytes(of: updated, toByteOffset: offset * 4, as: UInt32.self)
                     }
                 }
             }
-            guard let image = BGRA8.image(from: pixels, width: replacement.width, height: replacement.height) else { return }
-            next.layers[next.active].image = image
-            next.layers[next.active].pdnPixels = pixels
-        } else {
-            next.layers[next.active].image = replacement
         }
+        guard let editedLayer = next.activeLayer.withPixels(pixels) else { return }
+        next.layers[next.active] = editedLayer
         applyEdit(replacingStack: next, actionName: actionName)
     }
 
@@ -628,9 +626,26 @@ final class PaintDocument: NSDocument {
         return try PDNFile.write(stack)
     }
 
+    static func newImage(width: Int, height: Int, resolution: ImageResolution) -> PaintDocument? {
+        guard let stack = newImageStack(width: width, height: height, resolution: resolution) else { return nil }
+        let document = PaintDocument()
+        document.fileType = projectType
+        document.stack = stack
+        return document
+    }
+
+    private static func newImageStack(width: Int, height: Int, resolution: ImageResolution) -> LayerStack? {
+        guard LayerStack.supportsCanvas(width: width, height: height) else { return nil }
+        let pixels = Data(repeating: 255, count: width * height * 4)
+        guard let image = BGRA8.image(from: pixels, width: width, height: height) else { return nil }
+        let layer = PaintLayer(name: "Background", image: image, isBackground: true, pdnPixels: pixels)
+        return LayerStack(layers: [layer], active: 0, metadata: resolution.updating([]))
+    }
+
     override func makeWindowControllers() {
-        if stack == nil, let blank = LayerStack.makeBitmap(width: 1024, height: 768)?.makeImage() {
-            stack = LayerStack(layers: [PaintLayer(name: "Background", image: blank, isBackground: true)], active: 0)
+        if stack == nil {
+            stack = Self.newImageStack(width: NewImageCommand.defaultWidth, height: NewImageCommand.defaultHeight,
+                                       resolution: .standard)
         }
         undoManager?.levelsOfUndo = 0
         undoManager?.groupsByEvent = false
