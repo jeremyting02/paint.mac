@@ -88,7 +88,7 @@ struct RectangleSelectionTests {
     @MainActor private func makeEditor() throws -> (PaintDocument, CanvasView) {
         _ = NSApplication.shared
         let document = PaintDocument()
-        document.makeWindowControllers()
+        document.showWindows()
         let editor = try #require(document.editor)
         editor.layoutSubtreeIfNeeded()
         let canvas = editor.canvas

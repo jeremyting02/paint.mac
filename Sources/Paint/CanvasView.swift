@@ -390,6 +390,12 @@ final class CanvasView: NSView {
         if let window {
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
             NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: window)
+            if newWindow == nil {
+                // A tab can leave the workspace window without losing its editable preview.
+                resetWindowInteraction()
+            } else if newWindow !== window {
+                cancelEditingGesture()
+            }
         }
         if let clip = enclosingScrollView?.contentView {
             NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: clip)
@@ -400,10 +406,6 @@ final class CanvasView: NSView {
             NotificationCenter.default.addObserver(self, selector: #selector(refreshBrushCursor(_:)),
                                                    name: NSWindow.didBecomeKeyNotification, object: newWindow)
         }
-        brushCursor = nil
-        panDrag = nil
-        holdingSpace = false
-        cancelEditingGesture()
         super.viewWillMove(toWindow: newWindow)
     }
 
@@ -422,6 +424,10 @@ final class CanvasView: NSView {
     }
 
     @objc private func windowDidResignKey(_ notification: Notification) {
+        resetWindowInteraction()
+    }
+
+    private func resetWindowInteraction() {
         completeMoveDrag()
         cancelSelectionDrag()
         floodDrag = nil

@@ -146,7 +146,7 @@ struct DrawingToolTests {
         let document = PaintDocument()
         let fixture = try transparentLayer(width: 10, height: 10)
         try document.read(from: PDNFile.write(LayerStack(layers: [fixture], active: 0)), ofType: "Paint.NET Project")
-        document.makeWindowControllers()
+        document.showWindows()
         defer { document.close() }
         let editor = try #require(document.editor)
         let canvas = editor.canvas
@@ -180,6 +180,14 @@ struct DrawingToolTests {
         canvas.mouseUp(with: try click(.leftMouseUp, x: 7, y: 8))
         #expect(canvas.hasPendingDrawing)
         #expect(document.stack?.activeLayer.straightPixels == drawn)
+
+        let other = PaintDocument()
+        defer { other.close() }
+        other.showWindows()
+        document.showWindows()
+        #expect(canvas.hasPendingDrawing)
+        #expect(document.stack?.activeLayer.straightPixels == drawn)
+
         canvas.finishLiveEdit()
         #expect(!canvas.hasPendingDrawing)
         #expect(document.historyEntries.last == "Line / Curve")

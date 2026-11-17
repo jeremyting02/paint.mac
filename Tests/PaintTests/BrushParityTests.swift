@@ -299,7 +299,7 @@ struct BrushParityTests {
         let fixture = PaintLayer(name: "Brush Test", image: image, pdnPixels: pixels)
         let document = PaintDocument()
         try document.read(from: PDNFile.write(LayerStack(layers: [fixture], active: 0)), ofType: "Paint.NET Project")
-        document.makeWindowControllers()
+        document.showWindows()
         let editor = try #require(document.editor)
         editor.layoutSubtreeIfNeeded()
         editor.canvas.updateViewport()

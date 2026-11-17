@@ -58,7 +58,7 @@ struct CanvasNavigationTests {
     private func editor() throws -> (PaintDocument, CanvasView, NSScrollView) {
         _ = NSApplication.shared
         let document = PaintDocument()
-        document.makeWindowControllers()
+        document.showWindows()
         let editor = try #require(document.editor)
         editor.layoutSubtreeIfNeeded()
         let canvas = editor.canvas

@@ -14,6 +14,7 @@ open .build/paint.mac.app
 Use **File → New** to choose the pixel dimensions and resolution of a white
 canvas. The suggested size is 800 × 600, or the size of an image on the
 clipboard. Use **File → Open** for a Paint.NET project or bitmap image.
+New and opened images appear as thumbnail tabs in the current editor window.
 **Save** and **Save As** write `.pdn` projects.
 Saving an opened bitmap creates a separate project. **File → Export** writes a
 flat copy of the visible layers. Its format menu offers the installed macOS
@@ -158,9 +159,9 @@ the clipboard image. When a paste is larger than the current canvas, you can
 expand the canvas before placing it.
 
 The top toolbar shows common commands, open image thumbnails, and utility panel
-toggles. Click a thumbnail to bring that document window forward or drag one to
-reorder the list. An asterisk marks unsaved changes. The row below shows options
-for the selected tool.
+toggles. Click a thumbnail to switch to its document tab or drag one to reorder
+the thumbnail list. An asterisk marks unsaved changes. Press **Command-W** to
+close the active tab. The row below shows options for the selected tool.
 
 **Fit** shows the whole image, and **100%** shows one image pixel per display
 pixel. Use the zoom buttons or slider, type a percentage in the status bar, or

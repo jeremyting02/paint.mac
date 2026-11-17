@@ -6,13 +6,11 @@ final class WorkspaceDocuments: NSObject {
 
     @MainActor final class Entry {
         weak var document: PaintDocument?
-        weak var window: NSWindow?
         let id = UUID()
         var thumbnail: NSImage?
 
-        init(document: PaintDocument, window: NSWindow) {
+        init(document: PaintDocument) {
             self.document = document
-            self.window = window
         }
 
         var title: String {
@@ -24,33 +22,106 @@ final class WorkspaceDocuments: NSObject {
     private(set) var entries: [Entry] = []
     private let strips = NSHashTable<DocumentStrip>.weakObjects()
     private var pendingThumbnails: Set<UUID> = []
+    private var controller: NSWindowController?
+    private var pendingActivation: UUID?
+    private var isConfirmingClose = false
 
     override init() {
         super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(windowClosed(_:)),
-                                               name: NSWindow.willCloseNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(windowUpdated(_:)),
                                                name: NSWindow.didUpdateNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sheetEnded(_:)),
+                                               name: NSWindow.didEndSheetNotification, object: nil)
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
-    @discardableResult
-    func register(document: PaintDocument, window: NSWindow, strip: DocumentStrip) -> UUID {
-        let entry = Entry(document: document, window: window)
+    func show(_ document: PaintDocument) {
+        guard let strip = document.editor?.documentStrip else { return }
+        if let entry = entries.first(where: { $0.document === document }) {
+            activate(entry.id)
+            return
+        }
+        let entry = Entry(document: document)
         entries.append(entry)
         strip.bind(entry.id)
         strips.add(strip)
         invalidateThumbnail(for: document)
         updateStrips()
-        return entry.id
+        activate(entry.id)
     }
 
     func activate(_ id: UUID) {
-        guard let window = entries.first(where: { $0.id == id })?.window else { return }
+        guard let document = entries.first(where: { $0.id == id })?.document else { return }
+        if controller?.window?.attachedSheet != nil || isConfirmingClose {
+            pendingActivation = id
+            return
+        }
+        pendingActivation = nil
+        display(document)?.makeKeyAndOrderFront(nil)
+    }
+
+    private func display(_ document: PaintDocument) -> NSWindow? {
+        guard let editor = document.editor else { return nil }
+        let controller = controller ?? makeWindowController()
+        guard let window = controller.window else { return nil }
+        if controller.document as? PaintDocument !== document {
+            (window.contentView as? EditorView)?.setWorkspaceActive(false)
+            window.contentView = editor
+            // AppKit transfers ownership, including document commands and the window title.
+            document.addWindowController(controller)
+            editor.installPanels(on: window)
+            editor.setWorkspaceActive(true)
+            window.initialFirstResponder = editor.canvas
+            window.makeFirstResponder(editor.canvas)
+        }
         if window.isMiniaturized { window.deminiaturize(nil) }
-        window.makeKeyAndOrderFront(nil)
-        if let editor = window.contentView as? EditorView { window.makeFirstResponder(editor.canvas) }
+        return window
+    }
+
+    private func makeWindowController() -> NSWindowController {
+        let window = WorkspaceWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered, defer: false
+        )
+        window.workspace = self
+        window.tabbingMode = .disallowed
+        window.contentMinSize = NSSize(width: 420, height: 420)
+        window.center()
+        let controller = NSWindowController(window: window)
+        self.controller = controller
+        return controller
+    }
+
+    fileprivate func closeActiveTab() {
+        guard !isConfirmingClose, let controller, controller.window?.attachedSheet == nil,
+              let document = controller.document as? PaintDocument else { return }
+        isConfirmingClose = true
+        document.canClose(withDelegate: self, shouldClose: #selector(tabCanClose(_:shouldClose:contextInfo:)),
+                          contextInfo: nil)
+    }
+
+    @objc private func tabCanClose(_ document: NSDocument, shouldClose: Bool, contextInfo: UnsafeMutableRawPointer?) {
+        isConfirmingClose = false
+        if shouldClose { document.close() }
+        if let pendingActivation { activate(pendingActivation) }
+    }
+
+    func remove(_ document: PaintDocument) {
+        guard let index = entries.firstIndex(where: { $0.document === document }) else { return }
+        let id = entries.remove(at: index).id
+        pendingThumbnails.remove(id)
+        if pendingActivation == id { pendingActivation = nil }
+        if controller?.document as? PaintDocument === document {
+            if let next = entries.isEmpty ? nil : entries[min(index, entries.count - 1)].document {
+                _ = display(next)
+            } else {
+                // Let NSDocument close the workspace window along with the last tab.
+                controller = nil
+            }
+        }
+        updateStrips()
     }
 
     func reorder(_ source: UUID, before successor: UUID?) {
@@ -94,17 +165,28 @@ final class WorkspaceDocuments: NSObject {
         for strip in strips.allObjects { strip.show(entries) }
     }
 
-    @objc private func windowClosed(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              let index = entries.firstIndex(where: { $0.window === window }) else { return }
-        pendingThumbnails.remove(entries.remove(at: index).id)
-        updateStrips()
+    @objc private func sheetEnded(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === controller?.window,
+              pendingActivation != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let pendingActivation else { return }
+            activate(pendingActivation)
+        }
     }
 
     @objc private func windowUpdated(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              let entry = entries.first(where: { $0.window === window }) else { return }
+        guard let window = notification.object as? NSWindow, window === controller?.window,
+              let document = controller?.document as? PaintDocument,
+              let entry = entries.first(where: { $0.document === document }) else { return }
         for strip in strips.allObjects { strip.update(entry) }
+    }
+}
+
+private final class WorkspaceWindow: NSWindow {
+    weak var workspace: WorkspaceDocuments?
+
+    override func performClose(_ sender: Any?) {
+        workspace?.closeActiveTab()
     }
 }
 

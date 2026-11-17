@@ -165,27 +165,42 @@ struct WorkspaceTests {
         #expect(LayersView.dropDestination(from: 0, above: 5, count: 4) == nil)
     }
 
-    @Test func documentStripKeepsOneOrderAndTracksClosedWindows() {
+    @Test func documentTabsShareOneWindowAndKeepTheirEditors() throws {
         _ = NSApplication.shared
-        let workspace = WorkspaceDocuments()
-        let windows = (0..<3).map { _ in
-            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 420, height: 420),
-                                  styleMask: [.titled], backing: .buffered, defer: true)
-            window.isReleasedWhenClosed = false
-            return window
+        let workspace = WorkspaceDocuments.shared
+        let first = PaintDocument()
+        let second = PaintDocument()
+        defer {
+            first.close()
+            second.close()
         }
-        let documents = (0..<3).map { _ in PaintDocument() }
-        let strips = (0..<3).map { _ in DocumentStrip(workspace: workspace) }
-        let ids = windows.indices.map { workspace.register(document: documents[$0], window: windows[$0], strip: strips[$0]) }
-        #expect(strips.map(\.currentDocument) == ids.map(Optional.some))
-        workspace.reorder(ids[2], before: ids[0])
-        #expect(workspace.entries.map(\.id) == [ids[2], ids[0], ids[1]])
-        workspace.reorder(ids[2], before: nil)
-        #expect(workspace.entries.map(\.id) == ids)
-        windows[1].close()
-        #expect(workspace.entries.map(\.id) == [ids[0], ids[2]])
-        windows[0].close()
-        windows[2].close()
+        first.showWindows()
+        let window = try #require(first.windowForSheet)
+        let firstEditor = try #require(first.editor)
+        let firstID = try #require(firstEditor.documentStrip.currentDocument)
+        firstEditor.toggleGrid()
+        second.showWindows()
+        let secondEditor = try #require(second.editor)
+        let secondID = try #require(secondEditor.documentStrip.currentDocument)
+        #expect(first.windowForSheet == nil)
+        #expect(second.windowForSheet === window)
+        #expect(window.contentView === secondEditor)
+        #expect(window.tabGroup?.isTabBarVisible != true)
+        #expect(!secondEditor.showsGrid)
+
+        workspace.reorder(secondID, before: firstID)
+        #expect(workspace.entries.map(\.id) == [secondID, firstID])
+        workspace.activate(firstID)
+        #expect(first.windowForSheet === window)
+        #expect(second.windowForSheet == nil)
+        #expect(window.contentView === firstEditor)
+        #expect(firstEditor.showsGrid)
+
+        window.performClose(nil)
+        #expect(workspace.entries.map(\.id) == [secondID])
+        #expect(second.windowForSheet === window)
+        #expect(window.contentView === secondEditor)
+        second.close()
         #expect(workspace.entries.isEmpty)
     }
 

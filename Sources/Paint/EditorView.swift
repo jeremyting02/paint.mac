@@ -5,7 +5,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     private weak var document: PaintDocument?
     private weak var enclosingOptionsArea: WorkspaceOptionsArea?
     private let scrollView = NSScrollView()
-    private let documentStrip = DocumentStrip()
+    let documentStrip = DocumentStrip()
     private let toolOptions = ToolOptionsView()
     private let status = NSTextField(labelWithString: "")
     private let coordinates = NSTextField(labelWithString: "")
@@ -237,6 +237,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     required init?(coder: NSCoder) { nil }
 
     func installPanels(on window: NSWindow) {
+        guard panels == nil else { return }
         let historyControls = NSStackView(views: [historyUndo, historyRedo])
         historyControls.spacing = 2
         for button in [historyUndo, historyRedo] {
@@ -264,10 +265,10 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
             panels?.resizeColors(to: colors.panelSize)
         }
         updatePanelButtons()
-        if let document { WorkspaceDocuments.shared.register(document: document, window: window, strip: documentStrip) }
-        refreshImage()
         updateHistory(document?.undoManager)
     }
+
+    func setWorkspaceActive(_ active: Bool) { panels?.isWorkspaceActive = active }
 
     func isPanelShown(_ kind: UtilityPanels.Kind) -> Bool { panels?.isShown(kind) == true }
 

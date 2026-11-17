@@ -64,6 +64,9 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     private var placements: [Kind: Placement] = [:]
     private var parentFrame: CGRect = .zero
     private var shown = Set(Kind.allCases)
+    var isWorkspaceActive = false {
+        didSet { if oldValue != isWorkspaceActive { updateVisibility() } }
+    }
     var visibilityDidChange: (() -> Void)?
 
     init(parent: NSWindow, colorsSize: CGSize, contents: [Kind: NSView]) {
@@ -232,7 +235,7 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     private func updateVisibility() {
         guard let parent else { return }
         for (kind, panel) in panels {
-            if parent.isMainWindow && !parent.isMiniaturized && shown.contains(kind) {
+            if isWorkspaceActive && parent.isMainWindow && !parent.isMiniaturized && shown.contains(kind) {
                 if !panel.isVisible { panel.orderFront(nil) }
             } else {
                 panel.orderOut(nil)

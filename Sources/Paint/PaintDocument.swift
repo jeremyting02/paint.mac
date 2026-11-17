@@ -17,7 +17,7 @@ final class PaintDocument: NSDocument {
     private static let pixelClipboardTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .init(UTType.jpeg.identifier)]
     private(set) var stack: LayerStack?
     var image: CGImage? { stack?.activeLayer.image }
-    private(set) weak var editor: EditorView?
+    private(set) var editor: EditorView?
     private(set) var historyEntries = ["New Image"]
     private(set) var historyPosition = 0
 
@@ -620,25 +620,24 @@ final class PaintDocument: NSDocument {
     }
 
     override func makeWindowControllers() {
+        guard editor == nil else { return }
         if stack == nil {
             stack = Self.newImageStack(width: NewImageCommand.defaultWidth, height: NewImageCommand.defaultHeight,
                                        resolution: .standard)
         }
         undoManager?.levelsOfUndo = 0
         undoManager?.groupsByEvent = false
+        editor = EditorView(document: self)
+        editor?.refreshImage()
+    }
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered, defer: false
-        )
-        let editor = EditorView(document: self)
-        self.editor = editor
-        window.contentView = editor
-        window.contentMinSize = NSSize(width: 420, height: 420)
-        window.initialFirstResponder = editor.canvas
-        window.center()
-        editor.installPanels(on: window)
-        addWindowController(NSWindowController(window: window))
+    override func showWindows() {
+        makeWindowControllers()
+        WorkspaceDocuments.shared.show(self)
+    }
+
+    override func close() {
+        WorkspaceDocuments.shared.remove(self)
+        super.close()
     }
 }
