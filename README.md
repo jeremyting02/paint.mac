@@ -29,7 +29,7 @@ new area, **Intersect** keeps only the overlap, and **XOR** keeps only the areas
 outside the overlap. Each completed change can be undone in one step.
 
 The selection stays active when you switch tools and limits paintbrush and
-eraser strokes to that area. Press **Escape** to deselect. The status bar shows
+eraser strokes to that area. Press **Return** or **Escape** to deselect. The status bar shows
 the selection size and its top-left pixel. To crop, choose **Image → Crop to Selection**
 (Shift-Command-X) or click the crop button above the canvas.
 
@@ -46,9 +46,10 @@ and transform a copy. Use the arrow keys to nudge one pixel, or hold **Control**
 to nudge ten.
 
 The preview stays editable between drags. Each completed transform appears in
-**History**. Press **Return** or **Escape**, or click **Finish**, to commit it as
-**Finish Selection**. Undoing that step restores the editable preview. Pixels
-and selection edges past the canvas are clipped on commit.
+**History**. Press **Return** or **Escape** to commit the transform and deselect.
+Click **Finish** to commit the transform and keep the selection. Undoing
+**Finish Selection** restores the editable preview. Pixels and selection edges
+past the canvas are clipped on commit.
 
 Choose **Move Selection** or press **Shift-M** to move, resize, or rotate only
 the outline using the same handles. In the **Edit** menu, **Copy Selection**

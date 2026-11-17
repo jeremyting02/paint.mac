@@ -74,7 +74,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         applyCrop.action = #selector(PaintDocument.cropSelection(_:))
         finishMove.target = self
         finishMove.action = #selector(commitMove(_:))
-        finishMove.toolTip = "Finish the current transform (Return or Escape)"
+        finishMove.toolTip = "Finish the current transform and keep the selection"
         canvas.selectionDidChange = { [weak self] in self?.updateStatus() }
         canvas.selectTransformTool = { [weak self] tool in
             guard let self else { return }

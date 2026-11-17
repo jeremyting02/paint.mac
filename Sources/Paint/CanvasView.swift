@@ -603,16 +603,14 @@ final class CanvasView: NSView {
     override func keyDown(with event: NSEvent) {
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76
-        let finishesMove = tool.transformsSelection && (isEscape || isReturn)
-        if event.isARepeat && (isEscape || finishesMove) { return }
+        let deselects = (isEscape || isReturn) && (move != nil || !selection.isEmpty || selectionDrag != nil)
+        if event.isARepeat && (isEscape || deselects) { return }
         if !event.isARepeat, event.charactersIgnoringModifiers?.lowercased() == "m",
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            let selectTransformTool {
             let outline = event.modifierFlags.contains(.shift) || tool == .moveSelectedPixels
             selectTransformTool(outline ? .moveSelection : .moveSelectedPixels)
-        } else if finishesMove {
-            if move != nil { finishMove() } else { document?.deselect(nil) }
-        } else if isEscape && (!selection.isEmpty || selectionDrag != nil) {
+        } else if deselects {
             document?.deselect(nil)
         } else if tool.transformsSelection, let delta = nudge(for: event), moveDrag == nil,
                   let stack = document?.stack {
