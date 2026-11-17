@@ -70,6 +70,7 @@ final class RasterDrawing {
     private let operation: Operation
     private let radius: CGFloat
     private let options: BrushOptions
+    private let tip: BrushTip?
     private let mask: Data?
     private var pixels: Data
     private var coverage: [UInt8]
@@ -89,6 +90,11 @@ final class RasterDrawing {
         self.operation = operation
         radius = diameter / 2
         self.options = options
+        if case .paint = operation, options.antialiased {
+            tip = BrushTip(radius: diameter / 2, hardness: options.hardness)
+        } else {
+            tip = nil
+        }
         path = BrushPath(diameter: diameter, options: options)
         let width = layer.image.width, height = layer.image.height
         coverage = [UInt8](repeating: 0, count: width * height)
@@ -106,7 +112,7 @@ final class RasterDrawing {
         guard point.x.isFinite, point.y.isFinite else { return }
         let width = layer.image.width, height = layer.image.height
         // Cap out-of-canvas drags so a distant pointer cannot produce an unbounded line.
-        let margin = if case .pencil = operation { CGFloat(1) } else { radius + 1 }
+        let margin = if case .pencil = operation { CGFloat(1) } else { (tip?.reach(radius: radius) ?? radius) + 1 }
         let point = CGPoint(x: min(max(point.x, -margin), CGFloat(width) + margin),
                             y: min(max(point.y, -margin), CGFloat(height) + margin))
         if case .pencil = operation {
@@ -165,8 +171,8 @@ final class RasterDrawing {
             center = CGPoint(x: snap(sample.point.x), y: CGFloat(height) - snap(CGFloat(height) - sample.point.y))
         }
         let x = center.x, y = center.y
-        let reach = size + (options.antialiased ? 0.5 : 0)
-        let core = size * CGFloat(min(max(options.hardness, 0), 100)) / 100
+        let reach = tip?.reach(radius: size) ?? (size + (options.antialiased ? 0.5 : 0))
+        let core = size * CGFloat(min(100, max(0, options.hardness))) / 100
         let left = max(0, Int(floor(x - reach))), right = min(width - 1, Int(ceil(x + reach)))
         let bottom = max(0, Int(floor(y - reach))), top = min(height - 1, Int(ceil(y + reach)))
         guard left <= right, bottom <= top else { return }
@@ -177,16 +183,16 @@ final class RasterDrawing {
                     let dx = CGFloat(column) + 0.5 - x, dy = CGFloat(yPixel) + 0.5 - y
                     let squared = dx * dx + dy * dy
                     guard squared <= reach * reach else { continue }
-                    let fraction: CGFloat
-                    if options.antialiased {
-                        // High hardness limits falloff to the antialiased edge.
+                    let amount: UInt8
+                    if let tip {
+                        amount = tip.coverage(distance: sqrt(squared), radius: size)
+                    } else if options.antialiased {
                         let falloff = min(1, (reach - sqrt(squared)) / (reach - max(0, core - 0.5)))
                         let strength = min(1, 4 * size * size)
-                        fraction = falloff * strength
+                        amount = UInt8(clamping: Int((falloff * strength * 255).rounded()))
                     } else {
-                        fraction = 1
+                        amount = 255
                     }
-                    let amount = UInt8(clamping: Int((fraction * 255).rounded()))
                     apply(to: target, column: column, row: row, coverage: amount)
                 }
             }

@@ -128,4 +128,23 @@ one opaque black dab at each marker with the normal blend mode and solid fill.
 The regression compares all 289 pixels in the right-hand region. The brush
 click snaps to a pixel intersection and produces the captured 8 × 8
 footprint. The other dabs record antialiasing and hardness output at their
-observed subpixel click positions. Their edge coverage remains different.
+observed subpixel click positions. The exact click coordinates were not
+recorded. For the 9 px antialiased dabs, the tests estimate each center from
+the alpha-weighted centroid of the black pixels and compare alpha coverage
+over the corresponding 16 × 17 region. These captures informed the feathered
+tip approximation. They allow an alpha RMSE of 5 at 100% hardness and 1.5
+at 25% hardness.
+
+`brush-paths.json` records dab centers emitted by the Paint.NET
+`5.200.9793.3533` round brush path sampler at 9 px, full flow, and with
+pressure and smoothing disabled. The 100% and 25% hardness cases emitted
+the same centers, so they share one fixture. Positions are top-left image
+coordinates. The cases include two fixed dab positions, a straight stroke
+at 60% spacing, and a diagonal stroke at 15% spacing. The stroke inputs in
+the fixture come from Paint.NET's filtered path after pointer debouncing.
+The same centers were obtained with two placeholder sprite sizes, which
+allowed the path sampler to run independently of the graphics backend.
+The stroke regression checks those centers, then compares paint.mac's
+stroke coverage with the union of its individual dabs at those centers.
+Wine rejected the reference Direct2D mask render, so the fixed-position
+fixture contains path coordinates only. All input points are synthetic.

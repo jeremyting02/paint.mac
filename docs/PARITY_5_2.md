@@ -31,9 +31,11 @@ modes, including RGB at alpha zero. The tests compare the composite, exported
 PNG, and Copy Flattened, including a rectangular clipboard crop.
 
 An 8-pixel opaque Paintbrush dab with antialiasing off matches every byte
-in its 17 × 17 reference region. Hard and soft antialiased dabs are captured
-as well. Their coverage and differing subpixel click positions still need
-to be resolved.
+in its 17 × 17 reference region. The 9-pixel hard and soft dab coverage tests
+compare against the earlier Paint.NET image using centers inferred from its
+alpha values. Fixed-position dabs and unsmoothed short strokes match the
+captured path sampler's dab centers. Reference coverage at those fixed
+positions remains unverified because Wine rejected Direct2D brush-mask rendering.
 
 Paint.NET 5.2 reopened and resaved a Mac-edited 8 × 6 PDN. All 144 stored
 pixels across three layers, layer properties and resolution matched after

@@ -41,7 +41,8 @@ and Recolor show a circle under the pointer that previews the brush diameter
 at the current zoom. These tools share **Hardness**, **Spacing**,
 **Smooth Path**, and **Antialias** controls. Lower the hardness for a softer
 edge, or raise the spacing to leave gaps between tips. Hardness has an effect
-when antialiasing is enabled.
+when antialiasing is enabled. At low hardness, an isolated Paintbrush dab can
+remain translucent even at its center.
 **Pen Pressure** appears when a tablet supplies pressure events and controls
 whether pressure changes the tip size. Use **Smooth Selection** or
 **Pixelated Selection** to control how a drawing stroke meets a selection.

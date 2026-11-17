@@ -87,14 +87,16 @@ struct BrushParityTests {
         let center = CGPoint(x: 4.5, y: 4.5)
         canvas.brushOptions.hardness = 100
         try click(center, in: canvas)
-        #expect(pixel(in: document.stack?.activeLayer.straightPixels, x: 6, y: 4)?[3] == 255)
+        let hardAlpha = try #require(pixel(in: document.stack?.activeLayer.straightPixels, x: 6, y: 4)?[3])
+        #expect(hardAlpha >= 250)
         document.undoStroke(nil)
 
         canvas.brushOptions.hardness = 0
         try click(center, in: canvas)
         let softAlpha = try #require(pixel(in: document.stack?.activeLayer.straightPixels, x: 6, y: 4)?[3])
-        #expect((1...254).contains(softAlpha))
-        #expect(pixel(in: document.stack?.activeLayer.straightPixels, x: 4, y: 4)?[3] == 255)
+        #expect(softAlpha > 0 && softAlpha < hardAlpha)
+        let softCenter = try #require(pixel(in: document.stack?.activeLayer.straightPixels, x: 4, y: 4)?[3])
+        #expect(softCenter > softAlpha && softCenter < 255)
         document.undoStroke(nil)
 
         canvas.brushAntialiased = false
