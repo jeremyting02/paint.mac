@@ -3,6 +3,44 @@ import Testing
 @testable import Paint
 
 struct MoveResamplingTests {
+    @Test func integralWholeLayerMoveReusesImageAndClipsCommittedPixels() throws {
+        let color: [UInt8] = [13, 65, 205, 192]
+        let source = try makeLayer(width: 8, height: 8, points: [(0, 5, color), (7, 2, color)])
+        let bounds = CGRect(x: 0, y: 0, width: 8, height: 8)
+        let move = try #require(SelectedPixelsTransform(layer: source, selection: bounds))
+        let translation = CGAffineTransform(translationX: 2, y: 1)
+        #expect(move.retainedImageOffset(by: translation, copy: false) == CGPoint(x: 2, y: 1))
+        #expect(move.retainedImageOffset(by: translation, copy: true) == nil)
+        #expect(move.retainedImageOffset(by: CGAffineTransform(translationX: 0.5, y: 1), copy: false) == nil)
+        let committed = try #require(move.transformed(by: translation)?.straightPixels)
+        #expect(pixel(committed, width: 8, x: 2, y: 4) == color)
+        #expect(committed.enumerated().filter { $0.offset % 4 == 3 && $0.element > 0 }.count == 1)
+        let patch = try #require(move.renderedPixels(in: CGRect(x: 1, y: 3, width: 2, height: 2),
+                                                      by: translation, copy: false, sampling: .bicubic))
+        #expect(pixel(patch, width: 2, x: 1, y: 1) == color)
+        let copied = try #require(move.transformed(by: translation, copy: true)?.straightPixels)
+        #expect(pixel(copied, width: 8, x: 0, y: 5) == color)
+    }
+
+    @Test func parallelMovePreviewPublishesTheSameTilesAsSerialRendering() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 512, height: 384)
+        let source = try makeLayer(width: 512, height: 384, points: [
+            (96, 107, [13, 65, 205, 192]), (283, 247, [43, 90, 164, 221])
+        ])
+        let pixels = try #require(SelectedPixelsTransform(layer: source, selection: bounds))
+        let preview = try #require(MoveTilePreview(stack: LayerStack(layers: [source], active: 0), pixels: pixels))
+        for transform in [CGAffineTransform(translationX: 24, y: -18), CGAffineTransform(rotationAngle: 0.14)] {
+            let tiles = preview.tiles(in: bounds, by: transform, copy: false, sampling: .bicubic)
+            #expect(tiles.count == 12)
+            for tile in tiles {
+                let serial = preview.compositedPixels(in: tile.padded, by: transform, copy: false, sampling: .bicubic)
+                let rendered = BGRA8.pixels(from: tile.image)
+                #expect(rendered != nil)
+                #expect(rendered == serial)
+            }
+        }
+    }
+
     @Test(arguments: MoveResampler.Mode.allCases)
     func fractionalMovePreservesColorAndDistributesAlpha(_ mode: MoveResampler.Mode) throws {
         let color: [UInt8] = [13, 65, 205, 192]

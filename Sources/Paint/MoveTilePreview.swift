@@ -25,6 +25,34 @@ final class MoveTilePreview {
         let sampling: MoveResampler.Mode
     }
 
+    private struct TileRequest {
+        let tile: Tile
+        let core: CGRect
+        let padded: CGRect
+        let movesPixels: Bool
+        let cached: CGImage?
+    }
+
+    // Only published results are shared. Each worker renders its own tile buffers.
+    private final class TileResults: @unchecked Sendable {
+        private let lock = NSLock()
+        private var images: [CGImage?]
+
+        init(count: Int) { images = Array(repeating: nil, count: count) }
+
+        func set(_ image: CGImage?, at index: Int) {
+            lock.lock()
+            images[index] = image
+            lock.unlock()
+        }
+
+        func take() -> [CGImage?] {
+            lock.lock()
+            defer { lock.unlock() }
+            return images
+        }
+    }
+
     private let pixels: SelectedPixelsTransform
     private let sources: [Source]
     private let bounds: CGRect
@@ -69,7 +97,7 @@ final class MoveTilePreview {
         let size = CGFloat(Tile.size)
         let columns = Int(visible.minX / size)..<Int(ceil(visible.maxX / size))
         let rows = Int(visible.minY / size)..<Int(ceil(visible.maxY / size))
-        var tiles: [(CGRect, CGRect, CGImage)] = []
+        var requests: [TileRequest] = []
         for y in rows {
             for x in columns {
                 let tile = Tile(x: x, y: y)
@@ -80,17 +108,35 @@ final class MoveTilePreview {
                 // Keep neighboring pixels available for scaling at the tile boundary.
                 let padded = core.insetBy(dx: -2, dy: -2).intersection(bounds)
                 let movesPixels = padded.intersects(destination)
-                let cached = movesPixels ? frameTiles[tile] : clearedTiles[tile]
-                guard let image = cached ?? render(padded, frame: next) else { continue }
-                if movesPixels {
-                    frameTiles[tile] = image
-                } else if clearedTiles.count < 64 {
-                    clearedTiles[tile] = image
-                }
-                tiles.append((core, padded, image))
+                requests.append(TileRequest(tile: tile, core: core, padded: padded, movesPixels: movesPixels,
+                                            cached: movesPixels ? frameTiles[tile] : clearedTiles[tile]))
             }
         }
-        return tiles
+        let missing = requests.compactMap { $0.cached == nil ? $0.padded : nil }
+        var rendered = render(missing, frame: next).makeIterator()
+        return requests.compactMap { request in
+            if let cached = request.cached { return (request.core, request.padded, cached) }
+            guard let image = rendered.next() ?? nil else { return nil }
+            if request.movesPixels {
+                frameTiles[request.tile] = image
+            } else if clearedTiles.count < 64 {
+                clearedTiles[request.tile] = image
+            }
+            return (request.core, request.padded, image)
+        }
+    }
+
+    private func render(_ regions: [CGRect], frame: Frame) -> [CGImage?] {
+        // Avoid dispatch overhead for small updates. Bound workers for large zoomed-out previews.
+        let workers = min(8, ProcessInfo.processInfo.activeProcessorCount, regions.count / 4)
+        guard workers > 1 else { return regions.map { render($0, frame: frame) } }
+        let results = TileResults(count: regions.count)
+        DispatchQueue.concurrentPerform(iterations: workers) { worker in
+            for index in stride(from: worker, to: regions.count, by: workers) {
+                results.set(render(regions[index], frame: frame), at: index)
+            }
+        }
+        return results.take()
     }
 
     private func render(_ region: CGRect, frame: Frame) -> CGImage? {

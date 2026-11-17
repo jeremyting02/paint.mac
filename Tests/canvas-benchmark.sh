@@ -2,14 +2,13 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-initial_only=false
-if [ "${1:-}" = --initial ]; then
-    initial_only=true
-    shift
-fi
+mode=
+case "${1:-}" in
+    --initial|--move) mode=$1; shift ;;
+esac
 
 if [ "$#" -gt 1 ]; then
-    echo "Usage: sh Tests/canvas-benchmark.sh [--initial] [baseline-ref]" >&2
+    echo "Usage: sh Tests/canvas-benchmark.sh [--initial|--move] [baseline-ref]" >&2
     exit 2
 fi
 
@@ -30,8 +29,8 @@ run_benchmark() {
     label=$1
     executable=$2/benchmark
     printf '\n%s\n' "$label"
-    if [ "$initial_only" = true ]; then
-        "$executable" --initial
+    if [ -n "$mode" ]; then
+        "$executable" "$mode"
     else
         "$executable"
         "$executable" --history

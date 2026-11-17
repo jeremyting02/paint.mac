@@ -1714,6 +1714,15 @@ final class CanvasView: NSView {
     }
 
     private func drawMovePreview(_ session: MoveSession, stack: LayerStack, visible: CGRect, in context: CGContext) {
+        let image = stack.activeLayer.image
+        let transform = session.transform
+        if !stack.needsBlendComposite,
+           let offset = session.pixels?.retainedImageOffset(by: transform, copy: session.copy) {
+            // The canvas clip exposes the checkerboard wherever the translated image leaves a gap.
+            let scale = imageRect.width / CGFloat(image.width)
+            context.draw(image, in: imageRect.offsetBy(dx: offset.x * scale, dy: offset.y * scale))
+            return
+        }
         if moveTilePreview == nil, let pixels = session.pixels {
             moveTilePreview = MoveTilePreview(stack: stack, pixels: pixels)
         }
@@ -1727,9 +1736,8 @@ final class CanvasView: NSView {
             }
             return
         }
-        let image = stack.activeLayer.image
         let dirtyImage = imageRegion(for: visible, width: image.width)
-        let tiles = moveTilePreview.tiles(in: dirtyImage, by: session.transform, copy: session.copy,
+        let tiles = moveTilePreview.tiles(in: dirtyImage, by: transform, copy: session.copy,
                                          sampling: session.sampling)
         if tiles.isEmpty {
             drawStack(stack, visible: visible, in: context)

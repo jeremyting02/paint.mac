@@ -70,6 +70,49 @@ if CommandLine.arguments.contains("--initial") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--move") {
+    for count in [1, 4] {
+        let document = makeDocument(width: 2048, height: 1536, layerCount: count)
+        let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 900, height: 600))
+        let canvas = CanvasView(document: document)
+        scroll.documentView = canvas
+        canvas.tool = .moveSelectedPixels
+        for zoom: CGFloat? in [100, nil] {
+            canvas.setZoom(zoom)
+            let viewport = canvas.visibleRect
+            let image = canvas.canvasImageRect
+            let output = LayerStack.makeBitmap(width: 900, height: 600)!
+            output.translateBy(x: -viewport.minX, y: -viewport.minY)
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: output, flipped: false)
+            defer { NSGraphicsContext.current = nil }
+            canvas.draw(viewport)
+            for rotation in [false, true] {
+                func event(_ type: NSEvent.EventType, step: Int) -> NSEvent {
+                    let point = CGPoint(x: image.midX + 135, y: image.midY + 30 + CGFloat(step * 4))
+                    return NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil),
+                        modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                        eventNumber: 0, clickCount: 1, pressure: 1)!
+                }
+                let down = event(rotation ? .rightMouseDown : .leftMouseDown, step: 0)
+                let start = time { if rotation { canvas.rightMouseDown(with: down) } else { canvas.mouseDown(with: down) } }
+                let samples = (1...15).map { step in
+                    let drag = event(rotation ? .rightMouseDragged : .leftMouseDragged, step: step)
+                    return time {
+                        if rotation { canvas.rightMouseDragged(with: drag) } else { canvas.mouseDragged(with: drag) }
+                        canvas.draw(viewport)
+                    }
+                }
+                precondition(canvas.hasPendingMove)
+                let label = "2048x1536 / \(count) layers / \(zoom == nil ? "fit" : "100%") / \(rotation ? "rotate" : "translate")"
+                stats("\(label) / gesture start", [start])
+                stats("\(label) / drag + viewport draw", Array(samples.dropFirst()))
+                canvas.cancelEditingGesture()
+            }
+        }
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--history") {
     let document = PaintDocument.newImage(width: 2048, height: 2048, resolution: resolution)!
     document.undoManager = UndoManager()
