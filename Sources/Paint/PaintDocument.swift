@@ -33,7 +33,7 @@ final class PaintDocument: NSDocument {
 
     func selectLayer(_ index: Int) {
         guard let stack, stack.layers.indices.contains(index), index != stack.active else { return }
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         self.stack?.active = index
         editor?.refreshImage()
     }
@@ -78,6 +78,7 @@ final class PaintDocument: NSDocument {
         for index in next.layers.indices {
             guard next.layers[index].crop(to: rect, keeping: mask) else { return }
         }
+        canvas.finishWandSelection()
         applyEdit(replacingStack: next, actionName: "Crop to Selection", selectionChange: (outline, nil))
     }
 
@@ -116,6 +117,7 @@ final class PaintDocument: NSDocument {
         clipboard.clearContents()
         guard clipboard.setData(data, forType: .png) else { return }
         if let cutLayer {
+            canvas.finishWandSelection()
             canvas.completeMoveDrag()
             commitSelectedPixelsTransform(cutLayer, to: nil, actionName: "Cut")
         }
@@ -134,7 +136,7 @@ final class PaintDocument: NSDocument {
 
     @objc func pasteSelection(_ sender: Any?) {
         guard let canvas = editor?.canvas, let outline = clipboardOutline else { return }
-        canvas.finishMove()
+        canvas.finishSelection()
         commitSelection(outline, actionName: "Paste Selection")
     }
 
@@ -146,13 +148,13 @@ final class PaintDocument: NSDocument {
 
     @objc func deselect(_ sender: Any?) {
         guard let canvas = editor?.canvas else { return }
-        canvas.finishMove()
+        canvas.finishSelection()
         canvas.cancelEditingGesture()
         commitSelection(nil, actionName: "Deselect")
     }
 
     func addLayer() {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, next.layers.count < LayerStack.limit else { return }
         let image = next.activeLayer.image
         guard let blank = LayerStack.makeBitmap(width: image.width, height: image.height)?.makeImage() else { return }
@@ -165,7 +167,7 @@ final class PaintDocument: NSDocument {
     }
 
     func setLayerVisibility(_ visible: Bool, at index: Int) {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, next.layers.indices.contains(index),
               next.layers[index].isVisible != visible else { return }
         next.layers[index].isVisible = visible
@@ -173,7 +175,7 @@ final class PaintDocument: NSDocument {
     }
 
     func moveLayer(by offset: Int) {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, next.layers.indices.contains(next.active + offset) else { return }
         next.layers.swapAt(next.active, next.active + offset)
         next.active += offset
@@ -181,7 +183,7 @@ final class PaintDocument: NSDocument {
     }
 
     func deleteLayer() {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, next.layers.count > 1 else { return }
         next.layers.remove(at: next.active)
         next.active = min(next.active, next.layers.count - 1)
@@ -189,19 +191,19 @@ final class PaintDocument: NSDocument {
     }
 
     func duplicateLayer() {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, next.duplicateActiveLayer() else { return }
         applyEdit(replacingStack: next, actionName: LayerCommand.duplicate.title)
     }
 
     func mergeLayerDown() {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, next.mergeActiveLayerDown() else { return }
         applyEdit(replacingStack: next, actionName: LayerCommand.mergeDown.title)
     }
 
     private func showImportPanel() {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard let window = windowForSheet, window.attachedSheet == nil, stack?.canDuplicate == true else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, Self.projectContentType]
@@ -219,7 +221,7 @@ final class PaintDocument: NSDocument {
     }
 
     func importLayerFiles(_ urls: [URL]) throws {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, !urls.isEmpty else { return }
         let capacity = LayerStack.limit - next.layers.count
         guard urls.count <= capacity else { throw PDNError.tooLarge }
@@ -234,7 +236,7 @@ final class PaintDocument: NSDocument {
     }
 
     @objc func flattenLayers(_ sender: Any?) {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard var next = stack, next.layers.count > 1 else { return }
         guard let flat = next.flattenedLayer() else {
             presentError(CocoaError(.fileWriteUnknown))
@@ -246,7 +248,7 @@ final class PaintDocument: NSDocument {
     }
 
     func showLayerProperties() {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard let original = stack, let window = windowForSheet, window.attachedSheet == nil,
               let canvas = editor?.canvas else { return }
         let panel = LayerPropertiesPanel(layer: original.activeLayer)
@@ -327,12 +329,14 @@ final class PaintDocument: NSDocument {
     }
 
     @objc func undoStroke(_ sender: Any?) {
+        editor?.canvas.finishWandSelection()
         editor?.canvas.cancelEditingGesture()
         undoManager?.undo()
         editor?.updateHistory(undoManager)
     }
 
     @objc func redoStroke(_ sender: Any?) {
+        guard editor?.canvas.hasWandSelectionChange != true else { return }
         editor?.canvas.cancelEditingGesture()
         undoManager?.redo()
         editor?.updateHistory(undoManager)
@@ -373,7 +377,7 @@ final class PaintDocument: NSDocument {
     }
 
     @objc func exportPNG(_ sender: Any?) {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         guard let window = windowForSheet, let stack else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
@@ -392,8 +396,8 @@ final class PaintDocument: NSDocument {
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
-        case #selector(undoStroke(_:)): return undoManager?.canUndo == true
-        case #selector(redoStroke(_:)): return undoManager?.canRedo == true
+        case #selector(undoStroke(_:)): return undoManager?.canUndo == true || editor?.canvas.hasWandSelectionChange == true
+        case #selector(redoStroke(_:)): return undoManager?.canRedo == true && editor?.canvas.hasWandSelectionChange != true
         case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
         case #selector(copySelection(_:)): return editor?.canvas.copyableOutline != nil
         case #selector(cut(_:)): return editor?.canvas.copyableOutline != nil
@@ -401,7 +405,9 @@ final class PaintDocument: NSDocument {
         case #selector(paste(_:)): return stack?.activeLayer.isVisible == true
             && NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
         case #selector(pasteSelection(_:)): return clipboardOutline != nil
-        case #selector(deselect(_:)): return editor?.canvas.imageSelection != nil || editor?.canvas.hasPendingMove == true
+        case #selector(deselect(_:)):
+            guard let canvas = editor?.canvas else { return false }
+            return canvas.imageSelection != nil || canvas.hasPendingMove || canvas.hasPendingWandSelection
         case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false
         case #selector(toggleUtilityPanel(_:)):
             if let menuItem = item as? NSMenuItem, let kind = UtilityPanels.Kind(rawValue: menuItem.tag) {
@@ -449,7 +455,7 @@ final class PaintDocument: NSDocument {
     }
 
     override func save(withDelegate delegate: Any?, didSave selector: Selector?, contextInfo: UnsafeMutableRawPointer?) {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         if fileURL != nil && !Self.isProject(fileType) {
             runModalSavePanel(for: .saveAsOperation, delegate: delegate, didSave: selector, contextInfo: contextInfo)
         } else {
@@ -458,13 +464,13 @@ final class PaintDocument: NSDocument {
     }
 
     override func saveAs(_ sender: Any?) {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         super.saveAs(sender)
     }
 
     override func canClose(withDelegate delegate: Any, shouldClose shouldCloseSelector: Selector?,
                            contextInfo: UnsafeMutableRawPointer?) {
-        editor?.canvas.finishMove()
+        editor?.canvas.finishSelection()
         super.canClose(withDelegate: delegate, shouldClose: shouldCloseSelector, contextInfo: contextInfo)
     }
 

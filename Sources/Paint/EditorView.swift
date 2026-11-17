@@ -17,7 +17,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
     private let moveSelection = EditorView.icon("rectangle.dashed.and.paperclip", label: "Move Selection")
     private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
-    private let finishMove = NSButton(title: "Finish", target: nil, action: nil)
+    private let finish = NSButton(title: "Finish", target: nil, action: nil)
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private let color = NSColorWell()
@@ -75,9 +75,9 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         updateHistory(document.undoManager)
         applyCrop.target = document
         applyCrop.action = #selector(PaintDocument.cropSelection(_:))
-        finishMove.target = self
-        finishMove.action = #selector(commitMove(_:))
-        finishMove.toolTip = "Finish the current transform and keep the selection"
+        finish.target = self
+        finish.action = #selector(commitSelection(_:))
+        finish.toolTip = "Finish editing and keep the selection"
         canvas.selectionDidChange = { [weak self] in self?.updateStatus() }
         canvas.selectTransformTool = { [weak self] tool in
             guard let self else { return }
@@ -122,7 +122,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         selectionModes.toolTip = "Selection Mode"
         selectionModes.target = self
         selectionModes.action = #selector(changeSelectionMode(_:))
-        let toolbar = NSStackView(views: [undo, redo, brushControls, selectionModes, applyCrop, finishMove])
+        let toolbar = NSStackView(views: [undo, redo, brushControls, selectionModes, applyCrop, finish])
         toolbar.spacing = 8
         configureWandControls()
         let toolbarRows = NSStackView(views: [toolbar, wandControls])
@@ -234,8 +234,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         selectionModes.isHidden = !canvas.tool.drawsSelection
         wandControls.isHidden = canvas.tool != .magicWand
         applyCrop.isEnabled = canvas.cropRect != nil
-        finishMove.isHidden = !canvas.tool.transformsSelection
-        finishMove.isEnabled = canvas.hasPendingMove
+        finish.isHidden = !canvas.tool.transformsSelection && canvas.tool != .magicWand
+        finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingWandSelection
         updateUndoButtons(document?.undoManager)
         let dimensions = document?.image.map { "\($0.width) × \($0.height) px" } ?? ""
         if let angle = canvas.rotationDegrees, abs(angle) >= 0.05 {
@@ -247,14 +247,14 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
-    @objc private func commitMove(_ sender: NSButton) {
-        canvas.finishMove()
+    @objc private func commitSelection(_ sender: NSButton) {
+        canvas.finishSelection()
         window?.makeFirstResponder(canvas)
     }
 
     private func updateUndoButtons(_ history: UndoManager?) {
-        undo.isEnabled = history?.canUndo == true
-        redo.isEnabled = history?.canRedo == true
+        undo.isEnabled = history?.canUndo == true || canvas.hasWandSelectionChange
+        redo.isEnabled = history?.canRedo == true && !canvas.hasWandSelectionChange
         historyUndo.isEnabled = undo.isEnabled
         historyRedo.isEnabled = redo.isEnabled
     }
@@ -363,7 +363,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     @objc private func changeWandTolerance(_ sender: NSSlider) {
-        canvas.magicWand.tolerance = Int(sender.doubleValue.rounded())
+        canvas.setWandTolerance(Int(sender.doubleValue.rounded()))
         wandToleranceValue.stringValue = "\(canvas.magicWand.tolerance)%"
     }
 

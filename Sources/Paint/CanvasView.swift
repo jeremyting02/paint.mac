@@ -25,6 +25,15 @@ final class CanvasView: NSView {
         let lassoPath: CGMutablePath?
     }
 
+    private struct WandSelection {
+        let source: PaintLayer
+        let x: Int
+        let y: Int
+        let flood: MagicWand.Flood
+        let mode: SelectionOutline.Mode
+        let before: SelectionOutline?
+    }
+
     struct MoveSession {
         let layerIndex: Int
         let pixels: SelectedPixelsTransform?
@@ -145,7 +154,7 @@ final class CanvasView: NSView {
         willSet {
             if newValue != tool {
                 cancelSelectionDrag()
-                finishMove()
+                finishSelection()
             }
         }
         didSet {
@@ -172,6 +181,7 @@ final class CanvasView: NSView {
     private(set) var selectionOutline: SelectionOutline?
     var selectionMode: SelectionOutline.Mode = .replace
     var magicWand = MagicWand()
+    private var wandSelection: WandSelection?
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionDrag: SelectionDrag?
 
@@ -499,7 +509,7 @@ final class CanvasView: NSView {
               let pixels = SelectedPixelsTransform(layer: layer, pastedImage: pastedImage, at: destination),
               let preview = pixels.transformed(by: .identity) else { return }
 
-        finishMove()
+        finishSelection()
         let geometry = MoveGeometry(rect: rect, pivot: rect.center)
         let session = MoveSession(layerIndex: stack.active, pixels: pixels, outline: outline,
                                   initialGeometry: geometry, geometry: geometry, preview: preview, recorded: true)
@@ -510,6 +520,10 @@ final class CanvasView: NSView {
     func cancelEditingGesture() {
         stroke = nil
         cancelSelectionDrag()
+        if let wandSelection {
+            self.wandSelection = nil
+            setSelection(wandSelection.before)
+        }
         if let drag = moveDrag {
             moveDrag = nil
             move = drag.before
@@ -520,6 +534,11 @@ final class CanvasView: NSView {
     }
 
     var hasPendingMove: Bool { move?.recorded == true || move?.changed == true }
+    var hasPendingWandSelection: Bool { wandSelection != nil }
+    var hasWandSelectionChange: Bool {
+        guard let wandSelection else { return false }
+        return wandSelection.before != selectionOutline
+    }
     var hasPendingPixelMove: Bool { move?.preview != nil }
     var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
 
@@ -539,7 +558,8 @@ final class CanvasView: NSView {
         selectionDidChange?()
     }
 
-    func finishMove() {
+    func finishSelection() {
+        finishWandSelection()
         completeMoveDrag()
         guard let session = move, let image = document?.image else { return }
         guard session.recorded else {
@@ -615,7 +635,8 @@ final class CanvasView: NSView {
     override func keyDown(with event: NSEvent) {
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76
-        let deselects = (isEscape || isReturn) && (move != nil || !selection.isEmpty || selectionDrag != nil)
+        let deselects = (isEscape || isReturn) &&
+            (move != nil || !selection.isEmpty || selectionDrag != nil || hasPendingWandSelection)
         if event.isARepeat && (isEscape || deselects) { return }
         if !event.isARepeat, event.charactersIgnoringModifiers?.lowercased() == "m",
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
@@ -857,16 +878,41 @@ final class CanvasView: NSView {
     }
 
     private func selectWithWand(at point: CGPoint, global: Bool) {
-        guard let document, let stack = document.stack else { return }
-        let source = magicWand.sampling == .image ? stack.flattenedLayer() : stack.activeLayer
-        guard let source else { return }
-        var wand = magicWand
-        if global { wand.flood = .global }
+        finishWandSelection()
+        guard let stack = document?.stack,
+              var source = magicWand.sampling == .image ? stack.flattenedLayer() : stack.activeLayer,
+              let pixels = source.straightPixels else { return }
+        source.pdnPixels = pixels
         let x = min(max(0, Int(point.x)), source.image.width - 1)
         let y = min(max(0, source.image.height - 1 - Int(point.y)), source.image.height - 1)
-        guard let outline = wand.select(in: source, x: x, y: y) else { return }
-        let name = selectionMode == .replace ? "Magic Wand" : "Magic Wand (\(selectionMode.rawValue))"
-        document.commitSelection(selectionMode.applying(outline, to: selectionOutline), actionName: name)
+        wandSelection = WandSelection(source: source, x: x, y: y, flood: global ? .global : magicWand.flood,
+                                      mode: selectionMode, before: selectionOutline)
+        updateWandSelection()
+        selectionDidChange?()
+    }
+
+    func setWandTolerance(_ tolerance: Int) {
+        guard magicWand.tolerance != tolerance else { return }
+        magicWand.tolerance = tolerance
+        updateWandSelection()
+    }
+
+    private func updateWandSelection() {
+        guard let edit = wandSelection else { return }
+        var wand = magicWand
+        wand.flood = edit.flood
+        guard let outline = wand.select(in: edit.source, x: edit.x, y: edit.y) else { return }
+        setSelection(edit.mode.applying(outline, to: edit.before))
+    }
+
+    func finishWandSelection() {
+        guard let edit = wandSelection else { return }
+        let result = selectionOutline
+        wandSelection = nil
+        setSelection(edit.before)
+        let name = edit.mode == .replace ? "Magic Wand" : "Magic Wand (\(edit.mode.rawValue))"
+        document?.commitSelection(result, actionName: name)
+        selectionDidChange?()
     }
 
     override func mouseDragged(with event: NSEvent) {
