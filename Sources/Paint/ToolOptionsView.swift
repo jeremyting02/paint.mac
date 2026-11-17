@@ -6,6 +6,7 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     private let rectangleWidth = NSTextField()
     private let rectangleHeight = NSTextField()
     private let rectangleUnit = NSPopUpButton()
+    private let moveSampling = NSPopUpButton()
     private let brushAntialias = NSButton(checkboxWithTitle: "Antialias", target: nil, action: nil)
     private let hardnessLabel = NSTextField(labelWithString: "Hardness %")
     private let hardness = NSTextField()
@@ -48,6 +49,7 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         spacing = 6
         configure(rectangleSizing, "Rectangle Selection Sizing", RectangleSelection.Sizing.allCases.map(\.rawValue))
         configure(rectangleUnit, "Rectangle Selection Units", RectangleSelection.Unit.allCases.map(\.rawValue))
+        configure(moveSampling, "Move Pixels Resampling", MoveResampler.Mode.allCases.map(\.rawValue))
         for (field, label) in [(rectangleWidth, "Selection Width"), (rectangleHeight, "Selection Height")] {
             field.delegate = self
             field.alignment = .right
@@ -97,7 +99,7 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         text.setAccessibilityLabel("Text to draw")
         text.widthAnchor.constraint(equalToConstant: 128).isActive = true
         font.widthAnchor.constraint(lessThanOrEqualToConstant: 140).isActive = true
-        for view in [rectangleSizing, rectangleWidth, rectangleHeight, rectangleUnit, brushPressure,
+        for view in [rectangleSizing, rectangleWidth, rectangleHeight, rectangleUnit, moveSampling, brushPressure,
                      hardnessLabel, hardness, spacingLabel, brushSpacing, brushSmoothing,
                      brushPattern, brushAntialias, brushBlend, brushClipping,
                      sampleSource, sampleSize, after, gradientShape, gradientRepeat, gradientMode, gradientBlend,
@@ -141,6 +143,8 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         rectangleWidth.isHidden = !rectangleDimensionsVisible
         rectangleHeight.isHidden = !rectangleDimensionsVisible
         rectangleUnit.isHidden = tool != .rectangleSelect || canvas.rectangleSelection.sizing != .fixedSize
+        moveSampling.isHidden = tool != .moveSelectedPixels
+        moveSampling.selectItem(withTitle: canvas.moveSampling.rawValue)
         sampleSource.isHidden = tool != .colorPicker
         sampleSize.isHidden = tool != .colorPicker
         after.isHidden = tool != .colorPicker
@@ -160,7 +164,7 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         for view in [text, font, fontSize, textAlignment, bold, italic] as [NSView] { view.isHidden = tool != .text }
         text.isEnabled = canvas.hasPendingDrawing
         isHidden = !tool.usesRasterDrawing && tool != .colorPicker && tool != .gradient &&
-            tool != .rectangleSelect && !tool.usesVectorDrawing
+            tool != .rectangleSelect && tool != .moveSelectedPixels && !tool.usesVectorDrawing
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -263,6 +267,10 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
             canvas.rectangleSelection.changeUnit(to: RectangleSelection.Unit.allCases[rectangleUnit.indexOfSelectedItem],
                                                  resolution: canvas.imageResolution)
             refreshRectangleDimensions()
+        } else if sender === moveSampling {
+            canvas.setMoveSampling(MoveResampler.Mode.allCases[moveSampling.indexOfSelectedItem])
+            update()
+            window?.makeFirstResponder(canvas)
         } else if sender === sampleSource {
             canvas.pickerSampling = FloodSettings.Sampling.allCases[sampleSource.indexOfSelectedItem]
         } else if sender === sampleSize {

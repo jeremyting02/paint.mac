@@ -136,6 +136,12 @@ struct ImageResampler {
         value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1 / 2.4) - 0.055
     }
 
+    static func bicubicWeight(_ distance: Float) -> Float {
+        if distance < 1 { return ((1.5 * distance - 2.5) * distance) * distance + 1 }
+        if distance < 2 { return ((-0.5 * distance + 2.5) * distance - 4) * distance + 2 }
+        return 0
+    }
+
     private static func taps(from source: Int, to target: Int, mode: Mode, ratio explicitRatio: Float?, origin: Float,
                              widenKernel: Bool) -> [[Tap]] {
         let ratio = explicitRatio ?? Float(source) / Float(target)
@@ -182,9 +188,7 @@ struct ImageResampler {
             let t = Float.pi * x
             return (sin(t) / t) * (sin(t / 3) / (t / 3))
         case .bicubic:
-            if x < 1 { return ((1.5 * x - 2.5) * x) * x + 1 }
-            if x < 2 { return ((-0.5 * x + 2.5) * x - 4) * x + 2 }
-            return 0
+            return bicubicWeight(x)
         case .bicubicSmooth:
             if x < 1 { return ((3 * x - 6) * x * x + 4) / 6 }
             let distance = max(0, 2 - x)

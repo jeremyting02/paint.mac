@@ -128,6 +128,11 @@ to rotate. The rotate cursor has a white outline for visibility on dark areas.
 Drag the crosshair in the circle to reposition the rotation pivot.
 Hold **Shift** while rotating to snap to 15° steps.
 
+Choose **Bicubic** (the default) or **Nearest Neighbor (Antialiased)** in the
+Move Pixels toolbar. Pointer drags can move selected pixels by fractions of a
+pixel. Changing the sampler updates a floating preview and adds a History
+entry if the move is already in progress.
+
 Drag a corner or edge handle to resize. Hold **Shift** to preserve proportions,
 **Option** to resize about the center, or both to combine them. Drag a handle
 past its opposite edge to flip. **Command**-drag to keep the original pixels

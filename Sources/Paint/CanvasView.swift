@@ -68,6 +68,7 @@ final class CanvasView: NSView {
         let outline: SelectionOutline
         let initialGeometry: MoveGeometry
         var geometry: MoveGeometry
+        var sampling: MoveResampler.Mode = .bicubic
         var copy = false
         var preview: PaintLayer?
         var actionName = "Move Selected Pixels"
@@ -808,7 +809,8 @@ final class CanvasView: NSView {
         finishSelection()
         let geometry = MoveGeometry(rect: rect, pivot: rect.center)
         let session = MoveSession(layerIndex: stack.active, pixels: pixels, outline: outline,
-                                  initialGeometry: geometry, geometry: geometry, preview: preview, recorded: true)
+                                  initialGeometry: geometry, geometry: geometry, sampling: moveSampling,
+                                  preview: preview, recorded: true)
         if let replacement {
             document.applyEdit(replacingStack: replacement, actionName: actionName,
                                selectionChange: (selectionOutline, nil), moveChange: (nil, session))
@@ -842,6 +844,29 @@ final class CanvasView: NSView {
     }
 
     var hasPendingMove: Bool { move?.recorded == true || move?.changed == true }
+    private(set) var moveSampling: MoveResampler.Mode = .bicubic
+
+    func setMoveSampling(_ sampling: MoveResampler.Mode) {
+        guard moveSampling != sampling else { return }
+        guard let before = move, let pixels = before.pixels else {
+            moveSampling = sampling
+            return
+        }
+        var after = before
+        after.sampling = sampling
+        if before.changed {
+            guard let preview = pixels.transformed(by: before.transform, copy: before.copy, sampling: sampling) else {
+                return
+            }
+            after.preview = preview
+        }
+        moveSampling = sampling
+        if before.recorded {
+            document?.recordMove(from: before, to: after, actionName: "Change Move Resampling")
+        } else {
+            restoreMove(after)
+        }
+    }
     var hasPendingFloodEdit: Bool { floodEdit != nil }
     var hasPendingGradient: Bool { gradientEdit != nil }
     var hasPendingDrawing: Bool { drawingDraft != nil }
@@ -867,6 +892,7 @@ final class CanvasView: NSView {
                 if let selectTool { selectTool(transformTool) }
                 else { tool = transformTool }
             }
+            if session.pixels != nil { moveSampling = session.sampling }
         }
         move = session
         composite = nil
@@ -1069,7 +1095,7 @@ final class CanvasView: NSView {
             pixels = transform
         }
         move = MoveSession(layerIndex: stack.active, pixels: pixels, outline: outline,
-                           initialGeometry: geometry, geometry: geometry)
+                           initialGeometry: geometry, geometry: geometry, sampling: moveSampling)
         return true
     }
 
@@ -1111,7 +1137,8 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         case .move:
-            geometry = translated(geometry, by: CGPoint(x: delta.x.rounded(), y: delta.y.rounded()))
+            let offset = tool == .moveSelectedPixels ? delta : CGPoint(x: delta.x.rounded(), y: delta.y.rounded())
+            geometry = translated(geometry, by: offset)
             actionName = "Move Selected Pixels"
         case .resize(let handle):
             geometry = handle.resized(geometry, delta: delta, proportional: modifiers.contains(.shift),
@@ -1140,7 +1167,8 @@ final class CanvasView: NSView {
         guard session.geometry != geometry || session.copy != keepSource else { return }
         session.geometry = geometry
         if session.changed, let pixels = session.pixels {
-            guard let preview = pixels.transformed(by: session.transform, copy: keepSource) else { return }
+            guard let preview = pixels.transformed(by: session.transform, copy: keepSource,
+                                                   sampling: session.sampling) else { return }
             session.preview = preview
         } else {
             session.preview = nil
