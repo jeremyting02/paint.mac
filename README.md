@@ -232,8 +232,9 @@ watching both histograms update. **Auto** fits the selected channels using the
 colors in the active selection or, with no selection, the layer.
 
 Use the toolbar buttons or **Window** menu to show or hide each utility
-window (F5–F8). Utility windows move and stack with the editor. Drag a utility
-window by its title bar to reposition it, or use **Window → Reset Panel
+window (F5–F8). Utility windows move and stack with the editor and keep their
+corner offsets when it resizes. Drag a utility window by its title bar to
+reposition it, or use **Window → Reset Panel
 Layout** to put the four windows back in their corners.
 
 In **Colors**, click the overlapping squares or press **C** to choose the

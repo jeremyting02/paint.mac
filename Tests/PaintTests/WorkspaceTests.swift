@@ -157,6 +157,42 @@ struct WorkspaceTests {
                                             chromeHeight: 24, preferredHeight: 246) == 246)
     }
 
+    @Test func resizingFromLeftAndBottomKeepsAnchorsWithStaleChildFrames() throws {
+        final class OwnerWindow: NSWindow {
+            var reportedFrame = CGRect(x: -8, y: -300, width: 640, height: 460)
+            override var frame: CGRect { reportedFrame }
+            override var isMainWindow: Bool { true }
+            override var occlusionState: NSWindow.OcclusionState { .visible }
+        }
+        _ = NSApplication.shared
+        let owner = OwnerWindow(contentRect: CGRect(x: 100, y: 120, width: 640, height: 460),
+                                styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        owner.isReleasedWhenClosed = false
+        defer { owner.close() }
+        owner.orderFront(nil)
+        let panels = UtilityPanels(parent: owner, colorsSize: CGSize(width: 200, height: 100),
+                                   contents: [.tools: NSView(), .history: NSView(), .layers: NSView(), .colors: NSView()])
+        panels.isWorkspaceActive = true
+
+        // Report the new owner frame before AppKit translates any of the child windows.
+        owner.reportedFrame = CGRect(x: -38, y: -320, width: 670, height: 480)
+        NotificationCenter.default.post(name: NSWindow.didResizeNotification, object: owner)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+
+        let windows = try #require(owner.childWindows)
+        for kind in UtilityPanels.Kind.allCases {
+            let panel = try #require(windows.first(where: { $0.title == kind.title }))
+            let actual = panel.frame.origin
+            let left = kind == .tools || kind == .colors
+            let top = kind == .tools || kind == .history
+            let x = left ? owner.frame.minX + 8 : owner.frame.maxX - panel.frame.width - 8
+            let y = top ? owner.frame.maxY - panel.frame.height - 100 : owner.frame.minY + 34
+            // Use AppKit's own frame constraints when there's no screen in the test session.
+            panel.setFrameOrigin(CGPoint(x: x, y: y))
+            #expect(actual == panel.frame.origin, "\(kind.title) lost its corner anchor")
+        }
+    }
+
     @Test func utilityPanelsFollowOwnerAndKeepManualPlacementWhenToggled() throws {
         final class OwnerWindow: NSWindow {
             override var isMainWindow: Bool { true }
@@ -187,7 +223,9 @@ struct WorkspaceTests {
             let original = history.frame.origin
             owner.setFrameOrigin(CGPoint(x: owner.frame.minX + 20, y: owner.frame.minY + 15))
             #expect(history.frame.origin == CGPoint(x: original.x + 20, y: original.y + 15))
+            NotificationCenter.default.post(name: NSWindow.willMoveNotification, object: history)
             history.setFrameOrigin(CGPoint(x: history.frame.minX - 24, y: history.frame.minY - 14))
+            NotificationCenter.default.post(name: NSWindow.didMoveNotification, object: history)
         }
         let moved = history.frame.origin
         panels.toggle(.history)
@@ -200,9 +238,16 @@ struct WorkspaceTests {
         #expect(history.parent === owner)
         if canCheckGeometry {
             #expect(history.frame.origin == CGPoint(x: moved.x + 12, y: moved.y))
-            let resized = owner.frame.insetBy(dx: -10, dy: -8)
+            let layers = try #require(owner.childWindows?.first(where: { $0.title == "Layers" }))
+            let layerOrigin = layers.frame.origin
+            let original = owner.frame
+            let resized = CGRect(x: original.minX - 10, y: original.minY - 8,
+                                 width: original.width + 10, height: original.height + 8)
             owner.setFrame(resized, display: false)
-            #expect(history.frame.origin == CGPoint(x: moved.x + 22, y: moved.y + 8))
+            // Process the resize layout after AppKit has updated the attached windows.
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+            #expect(history.frame.origin == CGPoint(x: moved.x + 12, y: moved.y))
+            #expect(layers.frame.origin == CGPoint(x: layerOrigin.x, y: layerOrigin.y - 8))
         }
 
         owner.isUncovered = false

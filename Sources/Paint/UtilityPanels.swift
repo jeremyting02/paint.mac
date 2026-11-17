@@ -22,7 +22,6 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         let fromLeft: Bool
         let fromTop: Bool
         let inset: CGPoint
-        private var lastOffset: CGPoint?
 
         init(fromLeft: Bool, fromTop: Bool, inset: CGPoint) {
             self.fromLeft = fromLeft
@@ -47,20 +46,10 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
             return CGPoint(x: x, y: y)
         }
 
-        @MainActor mutating func apply(to panel: NSPanel, in frame: CGRect) {
+        @MainActor func apply(to panel: NSPanel, in frame: CGRect) {
             let panelFrame = panel.frame
             let origin = origin(for: panelFrame.size, in: frame)
             if panelFrame.origin != origin { panel.setFrameOrigin(origin) }
-            lastOffset = Self.offset(of: panel.frame, in: frame)
-        }
-
-        func capturingMove(of panel: CGRect, in frame: CGRect) -> Placement {
-            guard Self.offset(of: panel, in: frame) != lastOffset else { return self }
-            return Placement(panel: panel, in: frame)
-        }
-
-        private static func offset(of panel: CGRect, in frame: CGRect) -> CGPoint {
-            CGPoint(x: panel.minX - frame.minX, y: panel.minY - frame.minY)
         }
     }
 
@@ -71,7 +60,9 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     private weak var parent: NSWindow?
     private var panels: [Kind: NSPanel] = [:]
     private var placements: [Kind: Placement] = [:]
-    private var parentSize: CGSize = .zero
+    private var panelMoveStartFrames: [Kind: CGRect] = [:]
+    private var isLayingOutPanels = false
+    private var needsResizeLayout = false
     private var shown = Set(Kind.allCases)
     var isWorkspaceActive = false {
         didSet { if oldValue != isWorkspaceActive { updateVisibility() } }
@@ -113,8 +104,9 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         }
 
         resetPositions()
-        NotificationCenter.default.addObserver(self, selector: #selector(parentResized(_:)),
-                                               name: NSWindow.didResizeNotification, object: parent)
+        for name in [NSWindow.didResizeNotification, NSWindow.didEndLiveResizeNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(parentResized(_:)), name: name, object: parent)
+        }
         for name in [NSWindow.didBecomeMainNotification, NSWindow.didResignMainNotification,
                      NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
                      NSWindow.didChangeOcclusionStateNotification,
@@ -153,8 +145,6 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     }
 
     func resetPositions() {
-        guard let parent else { return }
-        parentSize = parent.frame.size
         for kind in Kind.allCases { resetPosition(kind) }
     }
 
@@ -166,42 +156,68 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
 
     private func resetPosition(_ kind: Kind) {
         guard let panel = panels[kind], let frame = parent?.frame else { return }
+        panelMoveStartFrames.removeValue(forKey: kind)
         let left = kind == .tools || kind == .colors
         let top = kind == .tools || kind == .history
-        var placement = Placement(fromLeft: left, fromTop: top, inset: CGPoint(x: 8, y: top ? 100 : 34))
+        placements[kind] = Placement(fromLeft: left, fromTop: top, inset: CGPoint(x: 8, y: top ? 100 : 34))
+        isLayingOutPanels = true
+        defer { isLayingOutPanels = false }
         resizeTopPanel(panel, kind: kind, ownerHeight: frame.height)
-        placement.apply(to: panel, in: frame)
-        placements[kind] = placement
+        placements[kind]?.apply(to: panel, in: frame)
     }
 
     func resizeColors(to size: CGSize) {
-        guard let frame = parent?.frame, let panel = panels[.colors],
-              var placement = currentPlacement(for: .colors, panel: panel, in: frame) else { return }
+        guard let frame = parent?.frame, let panel = panels[.colors] else { return }
+        panelMoveStartFrames.removeValue(forKey: .colors)
+        panelMoveStartFrames.removeValue(forKey: .tools)
+        isLayingOutPanels = true
+        defer { isLayingOutPanels = false }
         panel.setContentSize(size)
-        placement.apply(to: panel, in: frame)
-        placements[.colors] = placement
-        if let tools = panels[.tools], var toolsPlacement = currentPlacement(for: .tools, panel: tools, in: frame) {
+        placements[.colors]?.apply(to: panel, in: frame)
+        if let tools = panels[.tools] {
             resizeTopPanel(tools, kind: .tools, ownerHeight: frame.height)
-            toolsPlacement.apply(to: tools, in: frame)
-            placements[.tools] = toolsPlacement
+            placements[.tools]?.apply(to: tools, in: frame)
         }
     }
 
-    private func currentPlacement(for kind: Kind, panel: NSPanel, in frame: CGRect) -> Placement? {
-        guard let placement = placements[kind] else { return nil }
-        return panel.parent == nil ? placement : placement.capturingMove(of: panel.frame, in: frame)
+    func windowWillMove(_ notification: Notification) {
+        guard !isLayingOutPanels, let parent, !parent.inLiveResize,
+              let panel = notification.object as? NSPanel, panel.parent === parent,
+              let kind = panels.first(where: { $0.value === panel })?.key else { return }
+        panelMoveStartFrames[kind] = parent.frame
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard !isLayingOutPanels, let parent, !parent.inLiveResize,
+              let panel = notification.object as? NSPanel, panel.parent === parent,
+              let kind = panels.first(where: { $0.value === panel })?.key,
+              let frame = panelMoveStartFrames[kind] else { return }
+        guard frame == parent.frame else {
+            panelMoveStartFrames.removeValue(forKey: kind)
+            return
+        }
+        placements[kind] = Placement(panel: panel.frame, in: frame)
     }
 
     @objc private func parentResized(_ notification: Notification) {
-        guard let frame = parent?.frame, frame.size != parentSize else { return }
-        // AppKit carries attached panels with the window origin. Keep their anchors relative to its old size.
-        let previousFrame = CGRect(origin: frame.origin, size: parentSize)
-        parentSize = frame.size
+        panelMoveStartFrames.removeAll()
+        guard !needsResizeLayout else { return }
+        needsResizeLayout = true
+        // A left or bottom resize also moves the owner's origin. Let AppKit finish moving its
+        // child windows before placing them relative to the new edges.
+        RunLoop.main.perform(inModes: [.common, .eventTracking]) { [weak self] in
+            MainActor.assumeIsolated { self?.layoutAfterResize() }
+        }
+    }
+
+    private func layoutAfterResize() {
+        needsResizeLayout = false
+        guard let frame = parent?.frame else { return }
+        isLayingOutPanels = true
+        defer { isLayingOutPanels = false }
         for (kind, panel) in panels {
-            guard var placement = currentPlacement(for: kind, panel: panel, in: previousFrame) else { continue }
             resizeTopPanel(panel, kind: kind, ownerHeight: frame.height)
-            placement.apply(to: panel, in: frame)
-            placements[kind] = placement
+            placements[kind]?.apply(to: panel, in: frame)
         }
     }
 
@@ -246,12 +262,11 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
             && !parent.isMiniaturized && parent.occlusionState.contains(.visible)
         for (kind, panel) in panels {
             if canShow && shown.contains(kind) {
-                guard panel.parent == nil, var placement = placements[kind] else { continue }
+                guard panel.parent == nil, let placement = placements[kind] else { continue }
                 placement.apply(to: panel, in: frame)
-                placements[kind] = placement
                 parent.addChildWindow(panel, ordered: .above)
             } else if panel.parent === parent {
-                placements[kind] = currentPlacement(for: kind, panel: panel, in: frame)
+                panelMoveStartFrames.removeValue(forKey: kind)
                 panel.orderOut(nil)
             }
         }
