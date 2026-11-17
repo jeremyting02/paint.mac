@@ -244,7 +244,7 @@ import Testing
         defer { result.close() }
         #expect(result.image?.width == 3)
         #expect(result.image?.height == 2)
-        #expect(result.editor?.canvas.move?.preview?.image.width == 3)
+        #expect(result.editor?.canvas.move?.renderedLayer()?.image.width == 3)
         #expect(result.historyEntries == ["New Image", "Paste into New Image"])
     }
 }

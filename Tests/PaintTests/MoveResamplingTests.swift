@@ -45,6 +45,29 @@ struct MoveResamplingTests {
         #expect(samples.map { Int($0[3]) }.reduce(0, +) < 4 * Int(color[3]))
     }
 
+    @Test func bicubicReflectionMatchesScaledPixelsWithClippingAndPaddedSource() throws {
+        let stride = 28, canvasHeight = 8
+        let source = Data((0..<(stride * canvasHeight)).map { UInt8(truncatingIfNeeded: $0 * 97) })
+        let selection = CGRect(x: 2, y: 1, width: 3, height: 6)
+        let start = stride + 8
+        let scale = CGAffineTransform(a: 1.5, b: 0, c: 0, d: 1.25, tx: -0.75, ty: -1)
+        let full = try #require(MoveResampler.sample(
+            source, stride: stride, start: start, selection: selection, transform: scale,
+            region: CGRect(x: 2, y: 0, width: 5, height: 8), canvasHeight: canvasHeight, mode: .bicubic
+        ))
+        let flip = CGAffineTransform(a: 1.5, b: 0, c: 0, d: -1.25, tx: -0.75, ty: 9)
+        let clipped = try #require(MoveResampler.sample(
+            source, stride: stride, start: start, selection: selection, transform: flip,
+            region: CGRect(x: 3, y: 0, width: 4, height: 7), canvasHeight: canvasHeight, mode: .bicubic
+        ))
+        var expected = Data()
+        for row in (1...7).reversed() {
+            let offset = row * 20 + 4
+            expected.append(full[offset..<(offset + 16)])
+        }
+        #expect(clipped == expected)
+    }
+
     @MainActor @Test func changingSamplerUpdatesAndUndoesTheLivePreview() throws {
         _ = NSApplication.shared
         let source = try makeLayer(width: 8, height: 8, points: [(2, 2, [0, 0, 255, 128]), (3, 2, [255, 0, 0, 64])])
@@ -58,11 +81,10 @@ struct MoveResamplingTests {
         canvas.setSelection(outline)
         let pixels = try #require(SelectedPixelsTransform(layer: source, selection: CGRect(x: 2, y: 2, width: 2, height: 1)))
         let expanded = CGRect(x: 2, y: 5, width: 4, height: 1)
-        var session = CanvasView.MoveSession(layerIndex: 0, pixels: pixels, outline: outline,
+        let session = CanvasView.MoveSession(layerIndex: 0, pixels: pixels, outline: outline,
                                             initialGeometry: MoveGeometry(rect: initial, pivot: CGPoint(x: 3, y: 5.5)),
                                             geometry: MoveGeometry(rect: expanded, pivot: CGPoint(x: 4, y: 5.5)),
                                             recorded: true)
-        session.preview = pixels.transformed(by: session.transform)
         document.recordMove(from: nil, to: session, actionName: "Resize Selected Pixels")
         let cubic = try #require(canvas.copyableLayer?.straightPixels)
         canvas.setMoveSampling(.antialiasedNearest)
@@ -77,6 +99,102 @@ struct MoveResamplingTests {
         #expect(canvas.copyableLayer?.straightPixels == nearest)
         canvas.finishSelection()
         #expect(document.stack?.activeLayer.straightPixels == nearest)
+    }
+
+    @Test(arguments: MoveResampler.Mode.allCases)
+    func moveTilesMatchFullCompositesAcrossBlendModes(_ sampling: MoveResampler.Mode) throws {
+        let width = 290, height = 223
+        let size = width * height * 4
+        func layer(_ seed: Int, blendMode: LayerBlendMode = .normal, opacity: UInt8 = 255) throws -> PaintLayer {
+            let pixels = Data((0..<size).map { UInt8(truncatingIfNeeded: $0 * seed + $0 / 17) })
+            let image = try #require(BGRA8.image(from: pixels, width: width, height: height))
+            return PaintLayer(name: "Synthetic", image: image, opacity: opacity, blendMode: blendMode, pdnPixels: pixels)
+        }
+        let stack = LayerStack(layers: [
+            try layer(23), try layer(113, blendMode: .overlay, opacity: 211),
+            try layer(73, blendMode: .multiply, opacity: 192)
+        ], active: 1)
+        let selection = CGRect(x: 92, y: 73, width: 149, height: 127)
+        let outline = CGRect(x: selection.minX, y: CGFloat(height) - selection.maxY,
+                             width: selection.width, height: selection.height)
+        let ellipse = try #require(SelectionOutline(path: CGPath(ellipseIn: outline, transform: nil)))
+        let mask = try #require(ellipse.mask(in: selection, imageHeight: height))
+        let pixels = try #require(SelectedPixelsTransform(layer: stack.activeLayer, selection: selection, mask: mask))
+        let preview = try #require(MoveTilePreview(stack: stack, pixels: pixels))
+        let canvas = CGRect(x: 0, y: 0, width: width, height: height)
+        let scenarios: [(CGAffineTransform, Bool)] = [
+            (CGAffineTransform(translationX: 15, y: -38), false),
+            (CGAffineTransform(translationX: 32.25, y: 40.5), true),
+            (CGAffineTransform(translationX: 46, y: -31).rotated(by: 0.23).scaledBy(x: 1.21, y: 0.91), false),
+            (CGAffineTransform(translationX: -180, y: 140), false),
+        ]
+        for (transform, copy) in scenarios {
+            let moved = try #require(pixels.transformed(by: transform, copy: copy, sampling: sampling))
+            var next = stack
+            next.layers[next.active] = moved
+            let full = try #require(next.blendComposite()?.pixels)
+            var reconstructed = try #require(stack.blendComposite()?.pixels)
+            for tile in preview.tiles(in: canvas, by: transform, copy: copy, sampling: sampling) {
+                let patch = try #require(BGRA8.pixels(from: tile.image))
+                let left = Int(tile.core.minX - tile.padded.minX)
+                let top = Int(tile.core.minY - tile.padded.minY)
+                let rowBytes = Int(tile.core.width) * 4
+                for y in 0..<Int(tile.core.height) {
+                    let source = ((top + y) * Int(tile.padded.width) + left) * 4
+                    let destination = ((Int(tile.core.minY) + y) * width + Int(tile.core.minX)) * 4
+                    reconstructed.replaceSubrange(destination..<(destination + rowBytes),
+                                                  with: patch[source..<(source + rowBytes)])
+                }
+            }
+            #expect(reconstructed == full)
+        }
+    }
+
+    @MainActor @Test func moveCommitsFinalPointerAndKeepsEditableHistoryWithoutDrawing() throws {
+        _ = NSApplication.shared
+        let source = try makeLayer(width: 96, height: 80, points: [
+            (25, 35, [23, 71, 191, 166]), (30, 41, [193, 67, 13, 221])
+        ])
+        let document = PaintDocument()
+        try document.read(from: PDNFile.write(LayerStack(layers: [source], active: 0)), ofType: "Paint.NET Project")
+        document.showWindows()
+        defer { document.close() }
+        let editor = try #require(document.editor)
+        editor.layoutSubtreeIfNeeded()
+        let canvas = editor.canvas
+        canvas.setZoom(100)
+        canvas.updateViewport()
+        canvas.tool = .moveSelectedPixels
+        canvas.setSelection(SelectionOutline(rect: CGRect(x: 16, y: 32, width: 40, height: 24)))
+        let rect = canvas.canvasImageRect
+        let scale = rect.width / CGFloat(source.image.width)
+        let window = try #require(canvas.window)
+        func event(_ type: NSEvent.EventType, dx: CGFloat, dy: CGFloat) throws -> NSEvent {
+            let location = canvas.convert(CGPoint(x: rect.minX + (43 + dx) * scale,
+                                                  y: rect.minY + (43 + dy) * scale), to: nil)
+            return try #require(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                                 timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                 eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        canvas.mouseDown(with: try event(.leftMouseDown, dx: 0, dy: 0))
+        canvas.mouseDragged(with: try event(.leftMouseDragged, dx: 4, dy: 2))
+        canvas.mouseUp(with: try event(.leftMouseUp, dx: 9.25, dy: -3.5))
+        let transform = CGAffineTransform(translationX: 9.25, y: -3.5)
+        let pixels = try #require(SelectedPixelsTransform(layer: source,
+                                                           selection: CGRect(x: 16, y: 24, width: 40, height: 24)))
+        let expected = try #require(pixels.transformed(by: transform)?.straightPixels)
+        #expect(canvas.move?.transform == transform)
+        #expect(document.stack?.activeLayer.straightPixels == source.straightPixels)
+        #expect(canvas.copyableLayer?.straightPixels == expected)
+        document.undoStroke(nil)
+        #expect(canvas.move == nil)
+        document.redoStroke(nil)
+        #expect(canvas.move?.transform == transform)
+        canvas.finishSelection()
+        #expect(document.stack?.activeLayer.straightPixels == expected)
+        document.undoStroke(nil)
+        #expect(canvas.copyableLayer?.straightPixels == expected)
+        #expect(document.stack?.activeLayer.straightPixels == source.straightPixels)
     }
 
     private func makeLayer(width: Int, height: Int, points: [(x: Int, y: Int, bgra: [UInt8])]) throws -> PaintLayer {

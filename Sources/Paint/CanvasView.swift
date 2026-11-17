@@ -70,7 +70,6 @@ final class CanvasView: NSView {
         var geometry: MoveGeometry
         var sampling: MoveResampler.Mode = .bicubic
         var copy = false
-        var preview: PaintLayer?
         var actionName = "Move Selected Pixels"
         var recorded = false
 
@@ -93,6 +92,13 @@ final class CanvasView: NSView {
                           y: (geometry.flipY ? -1 : 1) * geometry.rect.height / source.height)
                 .rotated(by: -initialGeometry.angle)
                 .translatedBy(x: -source.midX, y: -source.midY)
+        }
+
+        var hasPixelPreview: Bool { pixels != nil && changed }
+
+        func renderedLayer() -> PaintLayer? {
+            guard hasPixelPreview else { return nil }
+            return pixels?.transformed(by: transform, copy: copy, sampling: sampling)
         }
 
         var transformedOutline: SelectionOutline? { outline.transformed(by: transform) }
@@ -273,6 +279,7 @@ final class CanvasView: NSView {
     var layerPreview: LayerStack? {
         didSet {
             composite = nil
+            moveTilePreview = nil
             needsDisplay = true
         }
     }
@@ -303,6 +310,7 @@ final class CanvasView: NSView {
 
     private(set) var move: MoveSession?
     private var moveDrag: MoveDrag?
+    private var moveTilePreview: MoveTilePreview?
     private var cursorTracking: NSTrackingArea?
     private var brushCursor: CGRect? {
         didSet {
@@ -776,12 +784,15 @@ final class CanvasView: NSView {
 
     private var pixelPreview: PaintLayer? {
         renderGradientPreviewIfNeeded()
-        return move?.preview ?? fillPreview ?? gradientEdit?.preview ?? drawingDraft?.preview
+        return fillPreview ?? gradientEdit?.preview ?? drawingDraft?.preview
             ?? rasterDrawing?.preview
     }
-    var copyableLayer: PaintLayer? { pixelPreview ?? document?.stack?.activeLayer }
+    var copyableLayer: PaintLayer? {
+        if let move, move.hasPixelPreview { return move.renderedLayer() }
+        return pixelPreview ?? document?.stack?.activeLayer
+    }
     var canCopyPixels: Bool {
-        copyableLayer != nil && (copyableOutline != nil || (selectionOutline == nil && move?.isPaste != true))
+        document?.stack != nil && (copyableOutline != nil || (selectionOutline == nil && move?.isPaste != true))
     }
 
     func pastePixels(_ pastedImage: CGImage, replacingStack replacement: LayerStack? = nil,
@@ -803,14 +814,13 @@ final class CanvasView: NSView {
                           width: CGFloat(pastedImage.width), height: CGFloat(pastedImage.height))
         let destination = topLeftRect(rect, imageHeight: layer.image.height)
         guard let outline = SelectionOutline(rect: rect),
-              let pixels = SelectedPixelsTransform(layer: layer, pastedImage: pastedImage, at: destination),
-              let preview = pixels.transformed(by: .identity) else { return }
+              let pixels = SelectedPixelsTransform(layer: layer, pastedImage: pastedImage, at: destination) else { return }
 
         finishSelection()
         let geometry = MoveGeometry(rect: rect, pivot: rect.center)
         let session = MoveSession(layerIndex: stack.active, pixels: pixels, outline: outline,
                                   initialGeometry: geometry, geometry: geometry, sampling: moveSampling,
-                                  preview: preview, recorded: true)
+                                  recorded: true)
         if let replacement {
             document.applyEdit(replacingStack: replacement, actionName: actionName,
                                selectionChange: (selectionOutline, nil), moveChange: (nil, session))
@@ -839,6 +849,7 @@ final class CanvasView: NSView {
             move = drag.before
         }
         composite = nil
+        moveTilePreview = nil
         needsDisplay = true
         selectionDidChange?()
     }
@@ -848,18 +859,12 @@ final class CanvasView: NSView {
 
     func setMoveSampling(_ sampling: MoveResampler.Mode) {
         guard moveSampling != sampling else { return }
-        guard let before = move, let pixels = before.pixels else {
+        guard let before = move, before.pixels != nil else {
             moveSampling = sampling
             return
         }
         var after = before
         after.sampling = sampling
-        if before.changed {
-            guard let preview = pixels.transformed(by: before.transform, copy: before.copy, sampling: sampling) else {
-                return
-            }
-            after.preview = preview
-        }
         moveSampling = sampling
         if before.recorded {
             document?.recordMove(from: before, to: after, actionName: "Change Move Resampling")
@@ -881,11 +886,12 @@ final class CanvasView: NSView {
         case .fill: return fillPreview != nil
         }
     }
-    var hasPendingPixelEdit: Bool { pixelPreview != nil }
+    var hasPendingPixelEdit: Bool { move?.hasPixelPreview == true || pixelPreview != nil }
     var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
 
     func restoreMove(_ session: MoveSession?) {
-        let hadPixelPreview = move?.preview != nil
+        let previous = move
+        if previous?.pixels !== session?.pixels { moveTilePreview = nil }
         move = nil
         if let session {
             let transformTool: Tool = session.pixels == nil ? .moveSelection : .moveSelectedPixels
@@ -896,8 +902,10 @@ final class CanvasView: NSView {
             if session.pixels != nil { moveSampling = session.sampling }
         }
         move = session
-        if hadPixelPreview || session?.preview != nil { composite = nil }
-        needsDisplay = true
+        if previous?.pixels == nil || previous?.pixels !== session?.pixels || previous?.geometry != session?.geometry ||
+            previous?.sampling != session?.sampling || previous?.copy != session?.copy {
+            needsDisplay = true
+        }
         window?.invalidateCursorRects(for: self)
         selectionDidChange?()
     }
@@ -917,7 +925,9 @@ final class CanvasView: NSView {
         handles.flipX = false
         handles.flipY = false
         let destination = clipped.flatMap { SelectionOutline(path: $0.path, handleGeometry: handles) }
-        document?.commitSelectedPixelsTransform(session.preview, to: destination, actionName: "Finish Selection")
+        let layer = session.renderedLayer()
+        guard !session.hasPixelPreview || layer != nil else { return }
+        document?.commitSelectedPixelsTransform(layer, to: destination, actionName: "Finish Selection")
     }
 
     func finishLiveEdit() {
@@ -1163,25 +1173,51 @@ final class CanvasView: NSView {
     }
 
     private func updateMove(with geometry: MoveGeometry, actionName: String, copy: Bool) {
-        guard var session = move else { return }
-        let hadPixelPreview = session.preview != nil
-        let keepSource = session.copy || copy
-        guard session.geometry != geometry || session.copy != keepSource else { return }
+        guard let previous = move else { return }
+        let keepSource = previous.copy || copy
+        guard previous.geometry != geometry || previous.copy != keepSource else { return }
+        var session = previous
         session.geometry = geometry
-        if session.changed, let pixels = session.pixels {
-            guard let preview = pixels.transformed(by: session.transform, copy: keepSource,
-                                                   sampling: session.sampling) else { return }
-            session.preview = preview
-        } else {
-            session.preview = nil
-        }
         session.copy = keepSource
         session.actionName = tool == .moveSelection ? "Transform Selection" : actionName
         move = session
-        // Outline transforms only change the overlay. Pixel previews change the composite.
-        if hadPixelPreview || session.preview != nil { composite = nil }
-        needsDisplay = true
+        if let pixels = session.pixels, let image = document?.image {
+            invalidateMovePreview(from: previous, to: session, pixels: pixels, image: image)
+        } else {
+            needsDisplay = true
+        }
         selectionDidChange?()
+    }
+
+    private func invalidateMovePreview(from before: MoveSession, to after: MoveSession,
+                                       pixels: SelectedPixelsTransform, image: CGImage) {
+        let width = image.width
+        func invalidatePixels(_ region: CGRect) {
+            guard !region.isEmpty else { return }
+            setNeedsDisplay(marquee(for: topLeftRect(region, imageHeight: image.height), imageWidth: width)
+                .insetBy(dx: -2, dy: -2))
+        }
+        let oldTransform = before.transform
+        let newTransform = after.transform
+        invalidatePixels(pixels.destinationRegion(by: oldTransform))
+        invalidatePixels(pixels.destinationRegion(by: newTransform))
+        let oldHole = pixels.clearedRegion(by: oldTransform, copy: before.copy)
+        let newHole = pixels.clearedRegion(by: newTransform, copy: after.copy)
+        if oldHole != newHole {
+            invalidatePixels(oldHole)
+            invalidatePixels(newHole)
+        }
+        for state in [before, after] {
+            let frame = marquee(for: state.geometry.rect, imageWidth: width)
+            let handleFrame = frame.insetBy(dx: -max(0, (28 - frame.width) / 2),
+                                            dy: -max(0, (28 - frame.height) / 2))
+            let rotation = CGAffineTransform(translationX: frame.midX, y: frame.midY)
+                .rotated(by: state.geometry.angle).translatedBy(x: -frame.midX, y: -frame.midY)
+            let outline = marquee(for: state.outline.bounds.applying(state.transform), imageWidth: width)
+            setNeedsDisplay(outline.union(handleFrame.applying(rotation)).insetBy(dx: -8, dy: -8))
+            let pivot = marquee(for: CGRect(origin: state.geometry.pivot, size: .zero), imageWidth: width).origin
+            setNeedsDisplay(CGRect(x: pivot.x - 7, y: pivot.y - 7, width: 14, height: 14))
+        }
     }
 
     private func endMoveDrag(with event: NSEvent, rightButton: Bool) {
@@ -1547,7 +1583,8 @@ final class CanvasView: NSView {
         let visible = rect.intersection(dirtyRect)
         guard let context = NSGraphicsContext.current?.cgContext,
               var stack = layerPreview ?? document?.stack else { return }
-        if let preview = pixelPreview { stack.layers[stack.active] = preview }
+        let floating = move.flatMap { $0.hasPixelPreview ? $0 : nil }
+        if floating == nil, let preview = pixelPreview { stack.layers[stack.active] = preview }
         let image = stack.activeLayer.image
         let showsHandles = showsTransformHandles(on: stack.activeLayer)
         let geometry = moveGeometry(for: image)
@@ -1574,7 +1611,7 @@ final class CanvasView: NSView {
         guard !visible.isEmpty else { return }
 
         context.saveGState()
-        context.clip(to: rect)
+        context.clip(to: visible)
         context.setFillColor(gray: 0.9, alpha: 1)
         context.fill(rect)
         context.setFillColor(gray: 0.73, alpha: 1)
@@ -1590,11 +1627,10 @@ final class CanvasView: NSView {
         if displayedZoomPercent >= 100 {
             context.interpolationQuality = .none
         }
-        if stack.needsBlendComposite {
-            if composite == nil { composite = stack.blendComposite()?.image }
-            if let composite { context.draw(composite, in: rect) }
+        if let floating, stack.activeLayer.opacity > 0 {
+            drawMovePreview(floating, stack: stack, visible: visible, in: context)
         } else {
-            stack.draw(in: context, rect: rect)
+            drawStack(stack, in: context)
         }
         context.restoreGState()
         if showsPixelGrid { drawWorkspaceGrid(in: context) }
@@ -1617,6 +1653,64 @@ final class CanvasView: NSView {
             context.setLineDash(phase: 0, lengths: [4, 3])
             context.addPath(path)
             context.strokePath()
+            context.restoreGState()
+        }
+    }
+
+    private func drawStack(_ stack: LayerStack, in context: CGContext) {
+        if stack.needsBlendComposite {
+            if composite == nil { composite = stack.blendComposite()?.image }
+            if let composite { context.draw(composite, in: imageRect) }
+        } else {
+            stack.draw(in: context, rect: imageRect)
+        }
+    }
+
+    private func drawMovePreview(_ session: MoveSession, stack: LayerStack, visible: CGRect, in context: CGContext) {
+        if moveTilePreview == nil, let pixels = session.pixels {
+            moveTilePreview = MoveTilePreview(stack: stack, pixels: pixels)
+        }
+        guard let moveTilePreview else {
+            var rendered = stack
+            if let layer = session.renderedLayer() { rendered.layers[rendered.active] = layer }
+            if rendered.needsBlendComposite {
+                if let image = rendered.blendComposite()?.image { context.draw(image, in: imageRect) }
+            } else {
+                rendered.draw(in: context, rect: imageRect)
+            }
+            return
+        }
+        let image = stack.activeLayer.image
+        let scale = imageRect.width / CGFloat(image.width)
+        let dirtyImage = CGRect(x: (visible.minX - imageRect.minX) / scale,
+                                y: (imageRect.maxY - visible.maxY) / scale,
+                                width: visible.width / scale, height: visible.height / scale)
+        let tiles = moveTilePreview.tiles(in: dirtyImage, by: session.transform, copy: session.copy,
+                                         sampling: session.sampling)
+        if tiles.isEmpty {
+            drawStack(stack, in: context)
+            return
+        }
+        func viewRect(_ region: CGRect) -> CGRect {
+            marquee(for: topLeftRect(region, imageHeight: image.height), imageWidth: image.width)
+        }
+        let cores = tiles.map { tile in
+            let device = context.convertToDeviceSpace(viewRect(tile.core))
+            let x = device.minX.rounded(), y = device.minY.rounded()
+            return context.convertToUserSpace(CGRect(x: x, y: y, width: device.maxX.rounded() - x,
+                                                     height: device.maxY.rounded() - y))
+        }
+        // Replace tiles, including transparent pixels, rather than painting them over the original stack.
+        context.saveGState()
+        context.addRect(imageRect.insetBy(dx: -2, dy: -2))
+        context.addRects(cores)
+        context.clip(using: .evenOdd)
+        drawStack(stack, in: context)
+        context.restoreGState()
+        for (tile, core) in zip(tiles, cores) {
+            context.saveGState()
+            context.clip(to: core)
+            context.draw(tile.image, in: viewRect(tile.padded))
             context.restoreGState()
         }
     }
