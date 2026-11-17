@@ -48,10 +48,11 @@ the outline using the same handles. In the **Edit** menu, **Copy Selection**
 
 Use **Command-X** to cut selected pixels from the active layer and **Command-C**
 to copy them. With no selection, Copy takes the entire active layer.
-**Command-V** pastes a clipboard image into **Move Selected Pixels**, where it
-can be positioned, resized, or rotated before committing. **Paste** has its
-own history entry. Use **Command-Z** to step back through its transforms and
-then remove the floating paste.
+**Command-V** pastes a clipboard image at the top-left of the selection or, if
+there is no selection, at the top-left of the visible canvas. **Move Selected
+Pixels** lets you position, resize, or rotate it before committing. **Paste**
+has its own history entry. Use **Command-Z** to step back through its transforms
+and then remove the floating paste.
 
 **Fit** shows the whole image, and **100%** shows one image pixel per display
 pixel. Hold **Command** and scroll

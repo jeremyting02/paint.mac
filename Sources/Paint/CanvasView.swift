@@ -428,9 +428,14 @@ final class CanvasView: NSView {
     func pastePixels(_ pastedImage: CGImage) {
         guard let document, let stack = document.stack, let layer = copyableLayer,
               layer.isVisible, layerPreview == nil else { return }
-        let visible = imageRect.intersection(visibleRect)
-        let corner = visible.isEmpty ? CGPoint(x: 0, y: layer.image.height)
-            : pixelEdge(at: CGPoint(x: visible.minX, y: visible.maxY), in: layer.image)
+        let corner: CGPoint
+        if selectionOutline != nil || move?.isPaste == true, let bounds = copyableOutline?.bounds.integral {
+            corner = CGPoint(x: bounds.minX, y: bounds.maxY)
+        } else {
+            let visible = imageRect.intersection(visibleRect)
+            corner = visible.isEmpty ? CGPoint(x: 0, y: layer.image.height)
+                : pixelEdge(at: CGPoint(x: visible.minX, y: visible.maxY), in: layer.image)
+        }
         let rect = CGRect(x: corner.x, y: corner.y - CGFloat(pastedImage.height),
                           width: CGFloat(pastedImage.width), height: CGFloat(pastedImage.height))
         let destination = topLeftRect(rect, imageHeight: layer.image.height)
