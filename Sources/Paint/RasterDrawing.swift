@@ -47,6 +47,34 @@ struct DrawingColor: Equatable {
 }
 
 final class RasterDrawing {
+    private final class StrokeTile {
+        let index: Int
+        let rect: CGRect
+        let left: Int
+        let top: Int
+        let right: Int
+        let width: Int
+        let mask: Data?
+        var pixels: Data
+        var coverage: [UInt8]
+
+        init(index: Int, rect: CGRect, pixels: Data, mask: Data?) {
+            self.index = index
+            self.rect = rect
+            left = Int(rect.minX)
+            top = Int(rect.minY)
+            right = Int(rect.maxX) - 1
+            width = Int(rect.width)
+            self.pixels = pixels
+            self.mask = mask
+            coverage = [UInt8](repeating: 0, count: pixels.count / 4)
+        }
+
+        func offset(column: Int, row: Int) -> Int {
+            (row - top) * width + column - left
+        }
+    }
+
     enum Operation {
         case pencil(DrawingColor)
         case paint(primary: DrawingColor, secondary: DrawingColor)
@@ -71,13 +99,18 @@ final class RasterDrawing {
     private let radius: CGFloat
     private let options: BrushOptions
     private let tip: BrushTip?
-    private let mask: Data?
-    private var pixels: Data
-    private var coverage: [UInt8]
+    private let selection: SelectionOutline?
+    private let grid: RasterTileGrid
+    private var tiles: [Int: StrokeTile] = [:]
+    private var lastTile: StrokeTile?
     private var path: BrushPath
     private var lastPencilPoint: CGPoint?
     private var cachedPreview: PaintLayer?
-    private var changed = false
+    private var dirtyLeft = Int.max, dirtyTop = Int.max
+    private var dirtyRight = -1, dirtyBottom = -1
+    private var lastChangedTile = -1
+    private var changedTiles: Set<Int> = []
+    private(set) var changed = false
     var title: String { operation.title }
 
     init?(layer: PaintLayer, operation: Operation, diameter: CGFloat, selection: SelectionOutline?,
@@ -86,7 +119,6 @@ final class RasterDrawing {
         if case .clone(let source, _, _) = operation, source.count != pixels.count { return nil }
         self.layer = layer
         original = pixels
-        self.pixels = pixels
         self.operation = operation
         radius = diameter / 2
         self.options = options
@@ -97,15 +129,69 @@ final class RasterDrawing {
         }
         path = BrushPath(diameter: diameter, options: options)
         let width = layer.image.width, height = layer.image.height
-        coverage = [UInt8](repeating: 0, count: width * height)
-        mask = selection?.mask(in: CGRect(x: 0, y: 0, width: width, height: height),
-                               imageHeight: height, antialiased: options.antialiasedSelection)
-        if selection != nil && mask == nil { return nil }
+        grid = RasterTileGrid(width: width, height: height)
+        self.selection = selection
     }
 
     var preview: PaintLayer? {
-        if cachedPreview == nil, changed { cachedPreview = layer.withPixels(pixels) }
+        if cachedPreview == nil, let pixels = pixels(in: grid.bounds) { cachedPreview = layer.withPixels(pixels) }
         return cachedPreview
+    }
+
+    /// Return a replacement for a compositing region only when it includes edited pixels.
+    func pixels(in region: CGRect) -> Data? {
+        guard changed else { return nil }
+        let coveringTiles = grid.indices(in: region).compactMap { changedTiles.contains($0) ? tiles[$0] : nil }
+        guard !coveringTiles.isEmpty else { return nil }
+        let width = layer.image.width
+        var pixels = region == grid.bounds ? original : PixelRegion.read(original, width: width, region: region)
+        pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+            for tile in coveringTiles {
+                let overlap = region.intersection(tile.rect)
+                let source = CGPoint(x: overlap.minX - tile.rect.minX, y: overlap.minY - tile.rect.minY)
+                let destination = CGPoint(x: overlap.minX - region.minX, y: overlap.minY - region.minY)
+                PixelRegion.copy(tile.pixels, sourceWidth: tile.width, sourceOrigin: source,
+                                 to: target, targetWidth: Int(region.width), targetOrigin: destination, size: overlap.size)
+            }
+        }
+        return pixels
+    }
+
+    private func tile(column: Int, row: Int) -> StrokeTile {
+        let index = grid.index(column: column, row: row)
+        if let lastTile, lastTile.index == index { return lastTile }
+        if let tile = tiles[index] {
+            lastTile = tile
+            return tile
+        }
+        let rect = grid.rect(at: index)
+        let pixels = PixelRegion.read(original, width: layer.image.width, region: rect)
+        let mask = selection.flatMap {
+            $0.mask(in: rect, imageHeight: layer.image.height, antialiased: options.antialiasedSelection)
+                ?? Data(count: pixels.count / 4)
+        }
+        let tile = StrokeTile(index: index, rect: rect, pixels: pixels, mask: mask)
+        tiles[index] = tile
+        lastTile = tile
+        return tile
+    }
+
+    /// Return the changes since the last display invalidation in top-left pixel coordinates.
+    func takeDirtyBounds() -> CGRect {
+        guard dirtyRight >= 0 else { return .null }
+        let rect = CGRect(x: dirtyLeft, y: dirtyTop,
+                          width: dirtyRight - dirtyLeft + 1, height: dirtyBottom - dirtyTop + 1)
+        dirtyLeft = Int.max
+        dirtyTop = Int.max
+        dirtyRight = -1
+        dirtyBottom = -1
+        return rect
+    }
+
+    func undoPatch(layerIndex: Int) -> RasterHistoryPatch {
+        RasterHistoryPatch(layerIndex: layerIndex, activeIndex: layerIndex,
+                           width: layer.image.width, height: layer.image.height,
+                           regions: changedTiles.sorted().map { grid.rect(at: $0) }, pixels: original)
     }
 
     func append(_ point: CGPoint, pressure: CGFloat = 1) {
@@ -137,16 +223,18 @@ final class RasterDrawing {
         let dx = abs(endX - x), dy = -abs(endY - y)
         let stepX = x < endX ? 1 : -1, stepY = y < endY ? 1 : -1
         var error = dx + dy
-        pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
-            while true {
-                if (0..<width).contains(x), (0..<height).contains(y) {
-                    apply(to: target, column: x, row: height - 1 - y, coverage: 255)
+        while true {
+            if (0..<width).contains(x), (0..<height).contains(y) {
+                let row = height - 1 - y
+                let tile = tile(column: x, row: row)
+                tile.pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                    apply(to: target, tile: tile, column: x, row: row, coverage: 255)
                 }
-                if x == endX && y == endY { break }
-                let doubled = 2 * error
-                if doubled >= dy { error += dy; x += stepX }
-                if doubled <= dx { error += dx; y += stepY }
             }
+            if x == endX && y == endY { break }
+            let doubled = 2 * error
+            if doubled >= dy { error += dy; x += stepX }
+            if doubled <= dx { error += dx; y += stepY }
         }
     }
 
@@ -176,41 +264,49 @@ final class RasterDrawing {
         let left = max(0, Int(floor(x - reach))), right = min(width - 1, Int(ceil(x + reach)))
         let bottom = max(0, Int(floor(y - reach))), top = min(height - 1, Int(ceil(y + reach)))
         guard left <= right, bottom <= top else { return }
-        pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
-            for yPixel in bottom...top {
-                let row = height - 1 - yPixel
-                for column in left...right where coverage[row * width + column] < 255 {
-                    let dx = CGFloat(column) + 0.5 - x, dy = CGFloat(yPixel) + 0.5 - y
-                    let squared = dx * dx + dy * dy
-                    guard squared <= reach * reach else { continue }
-                    let amount: UInt8
-                    if let tip {
-                        amount = tip.coverage(distance: sqrt(squared), radius: size)
-                    } else if options.antialiased {
-                        let falloff = min(1, (reach - sqrt(squared)) / (reach - max(0, core - 0.5)))
-                        let strength = min(1, 4 * size * size)
-                        amount = UInt8(clamping: Int((falloff * strength * 255).rounded()))
-                    } else {
-                        amount = 255
+        for yPixel in bottom...top {
+            let row = height - 1 - yPixel
+            var start = left
+            while start <= right {
+                let tile = tile(column: start, row: row)
+                let end = min(right, tile.right)
+                tile.pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                    for column in start...end where tile.coverage[tile.offset(column: column, row: row)] < 255 {
+                        let dx = CGFloat(column) + 0.5 - x, dy = CGFloat(yPixel) + 0.5 - y
+                        let squared = dx * dx + dy * dy
+                        guard squared <= reach * reach else { continue }
+                        let amount: UInt8
+                        if let tip {
+                            amount = tip.coverage(distance: sqrt(squared), radius: size)
+                        } else if options.antialiased {
+                            let falloff = min(1, (reach - sqrt(squared)) / (reach - max(0, core - 0.5)))
+                            let strength = min(1, 4 * size * size)
+                            amount = UInt8(clamping: Int((falloff * strength * 255).rounded()))
+                        } else {
+                            amount = 255
+                        }
+                        apply(to: target, tile: tile, column: column, row: row, coverage: amount)
                     }
-                    apply(to: target, column: column, row: row, coverage: amount)
                 }
+                start = end + 1
             }
         }
     }
 
-    private func apply(to pixels: UnsafeMutableRawBufferPointer, column: Int, row: Int, coverage amount: UInt8) {
+    private func apply(to pixels: UnsafeMutableRawBufferPointer, tile: StrokeTile,
+                       column: Int, row: Int, coverage amount: UInt8) {
         let width = layer.image.width, height = layer.image.height
-        let index = row * width + column
-        let amount = (Int(amount) * Int(mask?[index] ?? 255) + 127) / 255
-        guard amount > Int(coverage[index]) else { return }
-        coverage[index] = UInt8(amount)
+        let index = tile.offset(column: column, row: row)
+        let amount = (Int(amount) * Int(tile.mask?[index] ?? 255) + 127) / 255
+        guard amount > Int(tile.coverage[index]) else { return }
+        tile.coverage[index] = UInt8(amount)
         let byte = index * 4
         let before = pixels.loadUnaligned(fromByteOffset: byte, as: UInt32.self)
         let target = UnsafeMutableRawBufferPointer(rebasing: pixels[byte..<(byte + 4)])
         // Each pixel is blended with the layer as it was at mouse-down. Overlapping stamps expand coverage
         // without applying the color or eraser repeatedly in a single stroke.
-        for channel in 0..<4 { target[channel] = original[byte + channel] }
+        let originalOffset = (row * width + column) * 4
+        for channel in 0..<4 { target[channel] = original[originalOffset + channel] }
         switch operation {
         case .pencil(let color):
             blend(color.blue, color.green, color.red, color.alpha, coverage: amount, into: target)
@@ -240,6 +336,14 @@ final class RasterDrawing {
         if target.loadUnaligned(as: UInt32.self) != before {
             cachedPreview = nil
             changed = true
+            dirtyLeft = min(dirtyLeft, column)
+            dirtyRight = max(dirtyRight, column)
+            dirtyTop = min(dirtyTop, row)
+            dirtyBottom = max(dirtyBottom, row)
+            if tile.index != lastChangedTile {
+                changedTiles.insert(tile.index)
+                lastChangedTile = tile.index
+            }
         }
     }
 

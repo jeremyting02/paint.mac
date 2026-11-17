@@ -8,6 +8,7 @@ final class WorkspaceDocuments: NSObject {
         weak var document: PaintDocument?
         let id = UUID()
         var thumbnail: NSImage?
+        var thumbnailRevision = 0
 
         init(document: PaintDocument) {
             self.document = document
@@ -22,6 +23,7 @@ final class WorkspaceDocuments: NSObject {
     private(set) var entries: [Entry] = []
     private let strips = NSHashTable<DocumentStrip>.weakObjects()
     private var pendingThumbnails: Set<UUID> = []
+    private let thumbnailQueue = DispatchQueue(label: "paint.mac.thumbnails", qos: .utility)
     private var controller: NSWindowController?
     private var pendingActivation: UUID?
     private var isConfirmingClose = false
@@ -134,31 +136,53 @@ final class WorkspaceDocuments: NSObject {
     }
 
     func invalidateThumbnail(for document: PaintDocument) {
-        guard let entry = entries.first(where: { $0.document === document }),
-              pendingThumbnails.insert(entry.id).inserted else { return }
-        // Coalesce multiple changes from editing and invalidation in the same run-loop turn.
-        DispatchQueue.main.async { [weak self, weak entry] in
-            guard let self, let entry, pendingThumbnails.remove(entry.id) != nil,
-                  let stack = entry.document?.stack else { return }
-            entry.thumbnail = Self.thumbnail(of: stack)
-            updateStrips()
+        guard let entry = entries.first(where: { $0.document === document }) else { return }
+        entry.thumbnailRevision += 1
+        scheduleThumbnail(for: entry)
+    }
+
+    private func scheduleThumbnail(for entry: Entry) {
+        guard pendingThumbnails.insert(entry.id).inserted else { return }
+        // Let a burst of edits settle and keep one snapshot in flight per document.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(125)) { [weak self, weak entry] in
+            guard let self, let entry, pendingThumbnails.contains(entry.id) else { return }
+            guard let document = entry.document, let stack = document.stack else {
+                pendingThumbnails.remove(entry.id)
+                return
+            }
+            let revision = entry.thumbnailRevision
+            let composite = document.editor?.canvas.cachedCommittedComposite
+            thumbnailQueue.async { [weak self, weak entry] in
+                let thumbnail = Self.thumbnail(of: stack, composite: composite)
+                DispatchQueue.main.async { [weak self, weak entry] in
+                    guard let self, let entry, pendingThumbnails.remove(entry.id) != nil else { return }
+                    if entry.thumbnailRevision == revision {
+                        entry.thumbnail = thumbnail.map { NSImage(cgImage: $0, size: .zero) }
+                        updateStrips()
+                    } else {
+                        scheduleThumbnail(for: entry)
+                    }
+                }
+            }
         }
     }
 
-    private static func thumbnail(of stack: LayerStack) -> NSImage? {
+    private nonisolated static func thumbnail(of stack: LayerStack, composite: CGImage?) -> CGImage? {
         let source = stack.activeLayer.image
         let aspect = CGFloat(source.width) / CGFloat(source.height)
         let size = NSSize(width: max(1, min(96, 48 * aspect).rounded()), height: max(1, min(48, 96 / aspect).rounded()))
         let frame = CGRect(origin: .zero, size: size)
         guard let bitmap = LayerStack.makeBitmap(width: Int(size.width), height: Int(size.height)) else { return nil }
         bitmap.interpolationQuality = .high
-        if stack.needsBlendComposite {
-            guard let composite = stack.blendComposite()?.image else { return nil }
+        if let composite {
             bitmap.draw(composite, in: frame)
+        } else if stack.needsBlendComposite {
+            guard let image = stack.blendComposite()?.image else { return nil }
+            bitmap.draw(image, in: frame)
         } else {
             stack.draw(in: bitmap, rect: frame)
         }
-        return bitmap.makeImage().map { NSImage(cgImage: $0, size: size) }
+        return bitmap.makeImage()
     }
 
     private func updateStrips() {

@@ -106,33 +106,15 @@ final class MoveTilePreview {
         if sources.count == 1, let only = sources.first, only.pixels == nil, only.opacity == 255 {
             return active
         }
-        let width = Int(region.width)
-        let canvasWidth = Int(bounds.width)
-        let firstPixel = Int(region.minY) * canvasWidth + Int(region.minX)
-        var output = Data(count: active.count)
-        var row = [SIMD4<Float>](repeating: .zero, count: width)
-        output.withUnsafeMutableBytes { (output: UnsafeMutableRawBufferPointer) in
-            row.withUnsafeMutableBufferPointer { row in
-                for y in 0..<Int(region.height) {
-                    let local = y * width
-                    let canvas = firstPixel + y * canvasWidth
-                    for x in row.indices { row[x] = .zero }
-                    for (index, source) in sources.enumerated() {
-                        let start = source.pixels == nil ? local : canvas
-                        (source.pixels ?? active).withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
-                            // Preserve the bottom visible layer's RGB at zero alpha, as in blendComposite().
-                            if index == 0 {
-                                output.baseAddress!.advanced(by: local * 4).copyMemory(
-                                    from: bytes.baseAddress!.advanced(by: start * 4), byteCount: width * 4
-                                )
-                            }
-                            source.mode.composite(bytes, startingAt: start, onto: row, opacity: source.opacity)
-                        }
-                    }
-                    LayerBlendMode.storeComposite(UnsafeBufferPointer(row), in: output, startingAt: local)
-                }
+        let width = Int(region.width), stride = Int(bounds.width)
+        let windows = sources.map { source in
+            if let pixels = source.pixels {
+                return CompositeSource(pixels: pixels, stride: stride, offset: 0,
+                                       mode: source.mode, opacity: source.opacity).window(at: region.origin)
             }
+            return CompositeSource(pixels: active, stride: width, offset: 0,
+                                   mode: source.mode, opacity: source.opacity)
         }
-        return output
+        return RegionComposite.pixels(width: width, height: Int(region.height), sources: windows)
     }
 }

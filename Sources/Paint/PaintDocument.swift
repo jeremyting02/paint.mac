@@ -342,6 +342,13 @@ final class PaintDocument: NSDocument {
         applyEdit(replacingStack: next, actionName: actionName)
     }
 
+    func commitRasterDrawing(_ drawing: RasterDrawing, layer: PaintLayer) {
+        guard var next = stack else { return }
+        let patch = drawing.undoPatch(layerIndex: next.active)
+        next.layers[next.active] = layer
+        applyEdit(replacingStack: next, actionName: drawing.title, rasterUndo: patch)
+    }
+
     func recordMove(from before: CanvasView.MoveSession?, to after: CanvasView.MoveSession, actionName: String) {
         applyEdit(actionName: actionName, moveChange: (before, after))
     }
@@ -359,16 +366,23 @@ final class PaintDocument: NSDocument {
 
     func applyEdit(replacingStack replacement: LayerStack? = nil, actionName: String,
                            selectionChange: (before: SelectionOutline?, after: SelectionOutline?)? = nil,
-                           moveChange: (before: CanvasView.MoveSession?, after: CanvasView.MoveSession?)? = nil) {
+                           moveChange: (before: CanvasView.MoveSession?, after: CanvasView.MoveSession?)? = nil,
+                           rasterUndo: RasterHistoryPatch? = nil) {
         guard let previous = stack else { return }
         // A single UI event can finish a floating selection and then make another edit.
         let startsGroup = undoManager?.groupingLevel == 0
         if startsGroup { undoManager?.beginUndoGrouping() }
-        let previousStack = replacement == nil ? nil : previous
+        let previousStack = replacement == nil || rasterUndo != nil ? nil : previous
         undoManager?.registerUndo(withTarget: self) { document in
-            document.applyEdit(replacingStack: previousStack, actionName: actionName,
-                               selectionChange: selectionChange.map { ($0.after, $0.before) },
-                               moveChange: moveChange.map { ($0.after, $0.before) })
+            if let rasterUndo {
+                guard let stack = document.stack, let restored = rasterUndo.applying(to: stack) else { return }
+                document.applyEdit(replacingStack: restored.stack, actionName: actionName,
+                                   rasterUndo: restored.inverse)
+            } else {
+                document.applyEdit(replacingStack: previousStack, actionName: actionName,
+                                   selectionChange: selectionChange.map { ($0.after, $0.before) },
+                                   moveChange: moveChange.map { ($0.after, $0.before) })
+            }
         }
         undoManager?.setActionName(actionName)
         undoManager?.setActionIsDiscardable(replacement == nil)

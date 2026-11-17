@@ -283,7 +283,12 @@ final class CanvasView: NSView {
             needsDisplay = true
         }
     }
-    private var composite: CGImage?
+    private var composite: CanvasComposite?
+    var cachedCommittedComposite: CGImage? {
+        guard layerPreview == nil, rasterDrawing == nil, gradientEdit == nil,
+              fillPreview == nil, drawingDraft == nil else { return nil }
+        return composite?.renderedImage
+    }
 
     private(set) var selectionOutline: SelectionOutline?
     var selectionMode: SelectionOutline.Mode = .replace
@@ -783,9 +788,12 @@ final class CanvasView: NSView {
     }
 
     private var pixelPreview: PaintLayer? {
+        nonRasterPixelPreview ?? rasterDrawing?.preview
+    }
+
+    private var nonRasterPixelPreview: PaintLayer? {
         renderGradientPreviewIfNeeded()
         return fillPreview ?? gradientEdit?.preview ?? drawingDraft?.preview
-            ?? rasterDrawing?.preview
     }
     var copyableLayer: PaintLayer? {
         if let move, move.hasPixelPreview { return move.renderedLayer() }
@@ -886,7 +894,9 @@ final class CanvasView: NSView {
         case .fill: return fillPreview != nil
         }
     }
-    var hasPendingPixelEdit: Bool { move?.hasPixelPreview == true || pixelPreview != nil }
+    var hasPendingPixelEdit: Bool {
+        move?.hasPixelPreview == true || rasterDrawing?.changed == true || nonRasterPixelPreview != nil
+    }
     var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
 
     func restoreMove(_ session: MoveSession?) {
@@ -1584,7 +1594,8 @@ final class CanvasView: NSView {
         guard let context = NSGraphicsContext.current?.cgContext,
               var stack = layerPreview ?? document?.stack else { return }
         let floating = move.flatMap { $0.hasPixelPreview ? $0 : nil }
-        if floating == nil, let preview = pixelPreview { stack.layers[stack.active] = preview }
+        let brush = floating == nil && rasterDrawing?.changed == true ? rasterDrawing : nil
+        if floating == nil, let preview = nonRasterPixelPreview { stack.layers[stack.active] = preview }
         let image = stack.activeLayer.image
         let showsHandles = showsTransformHandles(on: stack.activeLayer)
         let geometry = moveGeometry(for: image)
@@ -1630,7 +1641,7 @@ final class CanvasView: NSView {
         if let floating, stack.activeLayer.opacity > 0 {
             drawMovePreview(floating, stack: stack, visible: visible, in: context)
         } else {
-            drawStack(stack, in: context)
+            drawStack(stack, brush: brush, in: context)
         }
         context.restoreGState()
         if showsPixelGrid { drawWorkspaceGrid(in: context) }
@@ -1657,13 +1668,43 @@ final class CanvasView: NSView {
         }
     }
 
-    private func drawStack(_ stack: LayerStack, in context: CGContext) {
-        if stack.needsBlendComposite {
-            if composite == nil { composite = stack.blendComposite()?.image }
-            if let composite { context.draw(composite, in: imageRect) }
-        } else {
+    private func drawStack(_ stack: LayerStack, brush: RasterDrawing? = nil, in context: CGContext) {
+        guard stack.needsBlendComposite || brush != nil else {
             stack.draw(in: context, rect: imageRect)
+            return
         }
+        if composite == nil { composite = CanvasComposite(stack: stack) }
+        if let image = composite?.render(stack: stack, activePixels: brush.map { $0.pixels(in:) }) {
+            context.draw(image, in: imageRect)
+        } else {
+            var fallback = stack
+            if let preview = brush?.preview { fallback.layers[fallback.active] = preview }
+            if let image = fallback.flattenedLayer()?.image { context.draw(image, in: imageRect) }
+        }
+    }
+
+    private func imageRegion(for rect: CGRect, width: Int) -> CGRect {
+        let scale = imageRect.width / CGFloat(width)
+        return CGRect(x: (rect.minX - imageRect.minX) / scale, y: (imageRect.maxY - rect.maxY) / scale,
+                      width: rect.width / scale, height: rect.height / scale)
+    }
+
+    private func viewRegion(for rect: CGRect, image: CGImage) -> CGRect {
+        marquee(for: topLeftRect(rect, imageHeight: image.height), imageWidth: image.width)
+    }
+
+    private func tileClip(_ rect: CGRect, in context: CGContext, image: CGImage) -> CGRect {
+        let device = context.convertToDeviceSpace(viewRegion(for: rect, image: image))
+        let x = device.minX.rounded(), y = device.minY.rounded()
+        return context.convertToUserSpace(CGRect(x: x, y: y, width: device.maxX.rounded() - x,
+                                                 height: device.maxY.rounded() - y))
+    }
+
+    private func drawTile(_ tile: CGImage, padded: CGRect, clip: CGRect, in context: CGContext, image: CGImage) {
+        context.saveGState()
+        context.clip(to: clip)
+        context.draw(tile, in: viewRegion(for: padded, image: image))
+        context.restoreGState()
     }
 
     private func drawMovePreview(_ session: MoveSession, stack: LayerStack, visible: CGRect, in context: CGContext) {
@@ -1681,25 +1722,14 @@ final class CanvasView: NSView {
             return
         }
         let image = stack.activeLayer.image
-        let scale = imageRect.width / CGFloat(image.width)
-        let dirtyImage = CGRect(x: (visible.minX - imageRect.minX) / scale,
-                                y: (imageRect.maxY - visible.maxY) / scale,
-                                width: visible.width / scale, height: visible.height / scale)
+        let dirtyImage = imageRegion(for: visible, width: image.width)
         let tiles = moveTilePreview.tiles(in: dirtyImage, by: session.transform, copy: session.copy,
                                          sampling: session.sampling)
         if tiles.isEmpty {
             drawStack(stack, in: context)
             return
         }
-        func viewRect(_ region: CGRect) -> CGRect {
-            marquee(for: topLeftRect(region, imageHeight: image.height), imageWidth: image.width)
-        }
-        let cores = tiles.map { tile in
-            let device = context.convertToDeviceSpace(viewRect(tile.core))
-            let x = device.minX.rounded(), y = device.minY.rounded()
-            return context.convertToUserSpace(CGRect(x: x, y: y, width: device.maxX.rounded() - x,
-                                                     height: device.maxY.rounded() - y))
-        }
+        let cores = tiles.map { tileClip($0.core, in: context, image: image) }
         // Replace tiles, including transparent pixels, rather than painting them over the original stack.
         context.saveGState()
         context.addRect(imageRect.insetBy(dx: -2, dy: -2))
@@ -1708,10 +1738,7 @@ final class CanvasView: NSView {
         drawStack(stack, in: context)
         context.restoreGState()
         for (tile, core) in zip(tiles, cores) {
-            context.saveGState()
-            context.clip(to: core)
-            context.draw(tile.image, in: viewRect(tile.padded))
-            context.restoreGState()
+            drawTile(tile.image, padded: tile.padded, clip: core, in: context, image: image)
         }
     }
 
@@ -1927,9 +1954,19 @@ private extension CanvasView {
         lastTabletPressure = nil
         rasterDrawing = RasterDrawing(layer: layer, operation: operation, diameter: brushSize,
                                       selection: selectionOutline, options: brushOptions)
-        rasterDrawing?.append(point, pressure: pressure(for: event))
-        composite = nil
-        needsDisplay = true
+        if let rasterDrawing {
+            rasterDrawing.append(point, pressure: pressure(for: event))
+            invalidateRasterDrawing(rasterDrawing)
+        }
+        if tool == .cloneStamp { needsDisplay = true }
+    }
+
+    private func invalidateRasterDrawing(_ drawing: RasterDrawing) {
+        let region = drawing.takeDirtyBounds()
+        guard !region.isEmpty, let stack = document?.stack else { return }
+        if composite == nil { composite = CanvasComposite(stack: stack) }
+        composite?.invalidate(region)
+        setNeedsDisplay(viewRegion(for: region, image: stack.activeLayer.image).insetBy(dx: -2, dy: -2))
     }
 
     private func pressure(for event: NSEvent) -> CGFloat {
@@ -1955,9 +1992,11 @@ private extension CanvasView {
         if let rasterDrawing {
             guard matchesDrawingButton(event) else { return true }
             rasterDrawing.append(point, pressure: pressure(for: event))
-            if tool == .cloneStamp, let cloneOffset { cloneCursor = point + cloneOffset }
-            composite = nil
-            needsDisplay = true
+            invalidateRasterDrawing(rasterDrawing)
+            if tool == .cloneStamp, let cloneOffset {
+                cloneCursor = point + cloneOffset
+                needsDisplay = true
+            }
             return true
         }
         guard let drag = drawingDrag else { return false }
@@ -2035,11 +2074,16 @@ private extension CanvasView {
         guard updateToolGesture(with: event) else { return false }
         if let rasterDrawing {
             rasterDrawing.finish()
+            invalidateRasterDrawing(rasterDrawing)
             let preview = rasterDrawing.preview
             self.rasterDrawing = nil
             cloneCursor = nil
-            composite = nil
-            if let preview { document?.commitPaintLayer(preview, actionName: rasterDrawing.title) }
+            if let preview {
+                let updatedComposite = composite
+                if let pixels = preview.pdnPixels { updatedComposite?.commitActivePixels(pixels) }
+                document?.commitRasterDrawing(rasterDrawing, layer: preview)
+                composite = updatedComposite
+            }
         }
         drawingDrag = nil
         needsDisplay = true
