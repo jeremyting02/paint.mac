@@ -10,7 +10,7 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         var keyEquivalent: String { String(UnicodeScalar(Int(NSF5FunctionKey) + rawValue)!) }
         var size: CGSize {
             switch self {
-            case .tools: return CGSize(width: 188, height: 76)
+            case .tools: return CGSize(width: 212, height: 76)
             case .history: return CGSize(width: 160, height: 172)
             case .layers: return CGSize(width: 224, height: 151)
             case .colors: return CGSize(width: 144, height: 88)

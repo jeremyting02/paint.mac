@@ -2,13 +2,14 @@ import AppKit
 
 final class CanvasView: NSView {
     enum Tool {
-        case brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, moveSelectedPixels, moveSelection
+        case brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection
 
         var selectionName: String? {
             switch self {
             case .rectangleSelect: return "Rectangle Select"
             case .ellipseSelect: return "Ellipse Select"
             case .lassoSelect: return "Lasso Select"
+            case .magicWand: return "Magic Wand"
             default: return nil
             }
         }
@@ -167,6 +168,7 @@ final class CanvasView: NSView {
 
     private(set) var selectionOutline: SelectionOutline?
     var selectionMode: SelectionOutline.Mode = .replace
+    var magicWand = MagicWand()
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionDrag: SelectionDrag?
 
@@ -809,6 +811,10 @@ final class CanvasView: NSView {
         }
 
         window?.makeFirstResponder(self)
+        if tool == .magicWand {
+            selectWithWand(at: imagePoint(location), global: event.modifierFlags.contains(.shift))
+            return
+        }
         if tool.drawsSelection {
             let anchor = pixelEdge(at: location, in: image)
             let path = tool == .lassoSelect ? CGMutablePath() : nil
@@ -842,6 +848,19 @@ final class CanvasView: NSView {
                                      width: brushSize, height: brushSize))
         stroke = (bitmap, point, isErasing ? "Eraser" : "Paintbrush", imageSelection)
         needsDisplay = true
+    }
+
+    private func selectWithWand(at point: CGPoint, global: Bool) {
+        guard let document, let stack = document.stack else { return }
+        let source = magicWand.sampling == .image ? stack.flattenedLayer() : stack.activeLayer
+        guard let source else { return }
+        var wand = magicWand
+        if global { wand.flood = .global }
+        let x = min(max(0, Int(point.x)), source.image.width - 1)
+        let y = min(max(0, source.image.height - 1 - Int(point.y)), source.image.height - 1)
+        guard let outline = wand.select(in: source, x: x, y: y) else { return }
+        let name = selectionMode == .replace ? "Magic Wand" : "Magic Wand (\(selectionMode.rawValue))"
+        document.commitSelection(selectionMode.applying(outline, to: selectionOutline), actionName: name)
     }
 
     override func mouseDragged(with event: NSEvent) {

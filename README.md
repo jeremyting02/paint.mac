@@ -23,7 +23,14 @@ Hold **Shift** with Ellipse Select to draw a circle, using the start and end of
 the drag as opposite points on its edge. With **Lasso Select**, drag a freehand
 outline. The tool closes it with a straight line back to the start.
 
-Use the toolbar's **Selection Mode** menu with any of these tools. **Replace**
+Choose **Magic Wand** and click a pixel to select similar colors. Set
+**Tolerance** before clicking. At 0%, only exact matches are selected, with
+fully transparent pixels treated as equal. Higher values allow more variation.
+Choose **Layer** to sample the active layer or **Image** to sample the visible
+composite. **Contiguous** selects connected pixels. **Global**, or **Shift-click**,
+also selects matching pixels in disconnected areas.
+
+Use the toolbar's **Selection Mode** menu with any selection tool. **Replace**
 starts a new selection, **Add** combines both areas, **Subtract** removes the
 new area, **Intersect** keeps only the overlap, and **XOR** keeps only the areas
 outside the overlap. Each completed change can be undone in one step.

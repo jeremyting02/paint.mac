@@ -13,6 +13,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
     private let ellipseSelect = EditorView.icon("circle.dashed", label: "Ellipse Select")
     private let lassoSelect = EditorView.icon("lasso", label: "Lasso Select")
+    private let magicWand = EditorView.icon("wand.and.stars", label: "Magic Wand")
     private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
     private let moveSelection = EditorView.icon("rectangle.dashed.and.paperclip", label: "Move Selection")
     private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
@@ -23,6 +24,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let toolButtons = NSStackView()
     private let brushControls = NSStackView()
     private let selectionModes = NSPopUpButton()
+    private let wandControls = NSStackView()
+    private let wandToleranceValue = NSTextField(labelWithString: "")
     private let colorControls = NSStackView()
     private let historyScroll = NSScrollView()
     private let historyTable = NSTableView()
@@ -39,7 +42,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
-        for button in [brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, moveSelectedPixels, moveSelection] {
+        for button in [brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection] {
             button.setButtonType(.pushOnPushOff)
             button.target = self
             button.action = #selector(selectTool(_:))
@@ -121,6 +124,11 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         selectionModes.action = #selector(changeSelectionMode(_:))
         let toolbar = NSStackView(views: [undo, redo, brushControls, selectionModes, applyCrop, finishMove])
         toolbar.spacing = 8
+        configureWandControls()
+        let toolbarRows = NSStackView(views: [toolbar, wandControls])
+        toolbarRows.orientation = .vertical
+        toolbarRows.alignment = .leading
+        toolbarRows.spacing = 5
         toolButtons.distribution = .fillEqually
         toolButtons.spacing = 1
         let swatches = NSStackView(views: swatchColors.enumerated().map { index, swatch in
@@ -153,16 +161,16 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         footer.spacing = 8
         updateStatus()
 
-        for view in [toolbar, panelButtons, scrollView, footer] {
+        for view in [toolbarRows, panelButtons, scrollView, footer] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            toolbar.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            toolbarRows.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            toolbarRows.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             panelButtons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             panelButtons.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 8),
+            scrollView.topAnchor.constraint(equalTo: toolbarRows.bottomAnchor, constant: 8),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -5),
@@ -224,6 +232,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private func updateStatus() {
         brushControls.isHidden = canvas.tool.drawsSelection
         selectionModes.isHidden = !canvas.tool.drawsSelection
+        wandControls.isHidden = canvas.tool != .magicWand
         applyCrop.isEnabled = canvas.cropRect != nil
         finishMove.isHidden = !canvas.tool.transformsSelection
         finishMove.isEnabled = canvas.hasPendingMove
@@ -282,7 +291,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     @objc private func selectTool(_ sender: NSButton) {
         let tools: [(NSButton, CanvasView.Tool)] = [
             (brush, .brush), (eraser, .eraser), (rectangleSelect, .rectangleSelect),
-            (ellipseSelect, .ellipseSelect), (lassoSelect, .lassoSelect),
+            (ellipseSelect, .ellipseSelect), (lassoSelect, .lassoSelect), (magicWand, .magicWand),
             (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)
         ]
         for (button, tool) in tools {
@@ -315,6 +324,59 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     @objc private func changeSelectionMode(_ sender: NSPopUpButton) {
         if let title = sender.titleOfSelectedItem, let mode = SelectionOutline.Mode(rawValue: title) {
             canvas.selectionMode = mode
+        }
+        canvas.window?.makeFirstResponder(canvas)
+    }
+
+    private func configureWandControls() {
+        let label = NSTextField(labelWithString: "Tolerance")
+        let tolerance = NSSlider(value: Double(canvas.magicWand.tolerance), minValue: 0, maxValue: 100,
+                                 target: self, action: #selector(changeWandTolerance(_:)))
+        tolerance.isContinuous = true
+        tolerance.setAccessibilityLabel("Tolerance")
+        wandToleranceValue.alignment = .right
+        wandToleranceValue.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        wandToleranceValue.stringValue = "\(canvas.magicWand.tolerance)%"
+
+        let sampling = NSPopUpButton()
+        sampling.addItems(withTitles: MagicWand.Sampling.allCases.map(\.rawValue))
+        sampling.selectItem(withTitle: canvas.magicWand.sampling.rawValue)
+        sampling.setAccessibilityLabel("Sampling")
+        sampling.toolTip = "Sample the active layer or the composite image"
+        sampling.target = self
+        sampling.action = #selector(changeWandSampling(_:))
+
+        let flood = NSPopUpButton()
+        flood.addItems(withTitles: MagicWand.Flood.allCases.map(\.rawValue))
+        flood.selectItem(withTitle: canvas.magicWand.flood.rawValue)
+        flood.setAccessibilityLabel("Flood Mode")
+        flood.toolTip = "Select touching pixels or matching pixels anywhere"
+        flood.target = self
+        flood.action = #selector(changeWandFlood(_:))
+
+        wandControls.spacing = 8
+        for view in [label, tolerance, wandToleranceValue, sampling, flood] {
+            wandControls.addArrangedSubview(view)
+        }
+        tolerance.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        wandToleranceValue.widthAnchor.constraint(equalToConstant: 38).isActive = true
+    }
+
+    @objc private func changeWandTolerance(_ sender: NSSlider) {
+        canvas.magicWand.tolerance = Int(sender.doubleValue.rounded())
+        wandToleranceValue.stringValue = "\(canvas.magicWand.tolerance)%"
+    }
+
+    @objc private func changeWandSampling(_ sender: NSPopUpButton) {
+        if let title = sender.titleOfSelectedItem, let mode = MagicWand.Sampling(rawValue: title) {
+            canvas.magicWand.sampling = mode
+        }
+        canvas.window?.makeFirstResponder(canvas)
+    }
+
+    @objc private func changeWandFlood(_ sender: NSPopUpButton) {
+        if let title = sender.titleOfSelectedItem, let mode = MagicWand.Flood(rawValue: title) {
+            canvas.magicWand.flood = mode
         }
         canvas.window?.makeFirstResponder(canvas)
     }
