@@ -240,6 +240,8 @@ reset them to black and white.
 Run `swift test` with a Swift toolchain that includes Swift Testing. Run
 `sh Tests/pdn-roundtrip.sh` for the independent Paint.NET 5.2 file check.
 The [5.2 parity checklist](docs/PARITY_5_2.md) records coverage and differences.
+The [reference fixture instructions](Tests/reference-pixels/README.md) show
+how to generate and compare Paint.NET PNGs using the installed Wine build.
 
 If the standalone Command Line Tools report that `TestingMacros` is missing,
 load the macro plug-in bundled with the toolchain.

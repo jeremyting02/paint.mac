@@ -7,6 +7,34 @@ transparent samples. No third-party image is used.
 The Paint.NET 5.2 PNGs record adjustments and effects applied to this input.
 Each result was saved as straight-alpha sRGB PNG.
 
+## Capture through Wine
+
+The macOS runner supports `black-and-white` and `invert-colors` with any
+input PNG. Open the English Paint.NET 5.2 editor in the Wine prefix before
+running it. The helper uses Win32 inside Wine and needs the graphical
+session. Let it finish before interacting with the editor.
+
+```sh
+mkdir -p .build/reference-check
+sh Tests/paintnet-capture.sh black-and-white Tests/reference-pixels/input.png \
+  .build/reference-check/black-and-white.png
+swift Tests/compare-paintnet-png.swift Tests/reference-pixels/black-and-white.png \
+  .build/reference-check/black-and-white.png
+```
+
+The runner uses a unique copy of the input, accepts the current PNG Save
+Options, and closes its own tab after saving. Use Auto-detect or 32-bit color
+depth for reference captures. The output path must be new. If a run fails,
+it reports the staging directory and may leave its tab or dialog open for
+inspection. Both captures were verified with Paint.NET build `5.200.9793.3533`.
+
+The default install is `~/Applications/Paint.NET.app` with the prefix at
+`~/Library/Application Support/Paint.NET/wineprefix`. Override the locations
+with `PAINTNET_APP`, `PAINTNET_WINE`, or `WINEPREFIX`. The prefix needs the
+Wine Mono C# compiler and its default `Z:` mapping to the Mac filesystem.
+
+## Capture manually
+
 `mac-edited.pdn` was produced by opening the synthetic layered
 `Tests/Layers52.pdn` fixture in paint.mac, resizing it from 2 × 3 to 8 × 6,
 duplicating the active layer, and serializing the three-layer document.
