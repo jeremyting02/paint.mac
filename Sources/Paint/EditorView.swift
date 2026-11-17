@@ -11,6 +11,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let brush = EditorView.icon("paintbrush", label: "Paintbrush")
     private let eraser = EditorView.icon("eraser", label: "Eraser")
     private let paintBucket = EditorView.icon(EditorView.bucketImage, label: "Paint Bucket")
+    private let gradient = EditorView.icon("circle.lefthalf.filled", label: "Gradient")
     private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
     private let ellipseSelect = EditorView.icon("circle.dashed", label: "Ellipse Select")
     private let lassoSelect = EditorView.icon("lasso", label: "Lasso Select")
@@ -22,6 +23,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private let color = NSColorWell()
+    private let secondaryColor = NSColorWell()
     private let toolButtons = NSStackView()
     private let brushControls = NSStackView()
     private let selectionModes = NSPopUpButton()
@@ -37,7 +39,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private var panels: UtilityPanels?
     private let swatchColors: [(String, NSColor)] = [("Black", .black), ("Red", .systemRed), ("Blue", .systemBlue)]
     private var tools: [(button: NSButton, tool: CanvasView.Tool)] {
-        [(brush, .brush), (eraser, .eraser), (paintBucket, .paintBucket), (rectangleSelect, .rectangleSelect),
+        [(brush, .brush), (eraser, .eraser), (paintBucket, .paintBucket), (gradient, .gradient),
+         (rectangleSelect, .rectangleSelect),
          (ellipseSelect, .ellipseSelect), (lassoSelect, .lassoSelect), (magicWand, .magicWand),
          (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)]
     }
@@ -113,12 +116,18 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         size.target = self
         size.action = #selector(changeSize(_:))
 
-        color.colorWellStyle = .minimal
         color.color = .black
-        color.setAccessibilityLabel("Paint color")
-        color.toolTip = "Paint color"
-        color.target = self
-        color.action = #selector(changeColor(_:))
+        secondaryColor.color = .white
+        for (well, label) in [(color, "Primary"), (secondaryColor, "Secondary")] {
+            well.colorWellStyle = .minimal
+            if #available(macOS 14.0, *) { well.supportsAlpha = true }
+            well.setAccessibilityLabel("\(label) color")
+            well.toolTip = "\(label) color"
+            well.target = self
+            well.action = #selector(changeColor(_:))
+            well.widthAnchor.constraint(equalToConstant: 56).isActive = true
+            well.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        }
 
         brushControls.spacing = 8
         brushControls.addArrangedSubview(NSTextField(labelWithString: "Size"))
@@ -149,7 +158,16 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         swatches.spacing = 3
         colorControls.orientation = .vertical
         colorControls.spacing = 6
-        colorControls.addArrangedSubview(color)
+        let colorWells = NSStackView()
+        colorWells.spacing = 10
+        for (well, label) in [(color, "Primary"), (secondaryColor, "Secondary")] {
+            let column = NSStackView(views: [NSTextField(labelWithString: label), well])
+            column.orientation = .vertical
+            column.alignment = .centerX
+            column.spacing = 2
+            colorWells.addArrangedSubview(column)
+        }
+        colorControls.addArrangedSubview(colorWells)
         colorControls.addArrangedSubview(swatches)
         let panelButtons = NSStackView(views: UtilityPanels.Kind.allCases.map { kind in
             let button = Self.icon(kind.symbol, label: "Toggle \(kind.title)")
@@ -180,8 +198,6 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -5),
-            color.widthAnchor.constraint(equalToConstant: 56),
-            color.heightAnchor.constraint(equalToConstant: 26),
             footer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5)
         ])
@@ -236,12 +252,12 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func updateStatus() {
-        brushControls.isHidden = canvas.tool.drawsSelection || canvas.tool == .paintBucket
+        brushControls.isHidden = canvas.tool.drawsSelection || canvas.tool == .paintBucket || canvas.tool == .gradient
         selectionModes.isHidden = !canvas.tool.drawsSelection
         floodControls.isHidden = !canvas.tool.usesFlood
         applyCrop.isEnabled = canvas.cropRect != nil
-        finish.isHidden = !canvas.tool.transformsSelection && !canvas.tool.usesFlood
-        finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingFloodEdit
+        finish.isHidden = !canvas.tool.transformsSelection && !canvas.tool.usesFlood && canvas.tool != .gradient
+        finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingFloodEdit || canvas.hasPendingGradient
         updateUndoButtons(document?.undoManager)
         let dimensions = document?.image.map { "\($0.width) × \($0.height) px" } ?? ""
         if let angle = canvas.rotationDegrees, abs(angle) >= 0.05 {
@@ -259,8 +275,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func updateUndoButtons(_ history: UndoManager?) {
-        undo.isEnabled = history?.canUndo == true || canvas.hasFloodChange
-        redo.isEnabled = history?.canRedo == true && !canvas.hasFloodChange
+        undo.isEnabled = history?.canUndo == true || canvas.hasLiveEditChange
+        redo.isEnabled = history?.canRedo == true && !canvas.hasLiveEditChange
         historyUndo.isEnabled = undo.isEnabled
         historyRedo.isEnabled = redo.isEnabled
     }
@@ -383,7 +399,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     @objc private func changeColor(_ sender: NSColorWell) {
-        canvas.brushColor = sender.color
+        if sender === secondaryColor { canvas.secondaryColor = sender.color }
+        else { canvas.brushColor = sender.color }
     }
 
     @objc private func pickSwatch(_ sender: NSButton) {

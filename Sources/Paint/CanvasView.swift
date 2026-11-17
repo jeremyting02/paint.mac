@@ -2,7 +2,7 @@ import AppKit
 
 final class CanvasView: NSView {
     enum Tool {
-        case brush, eraser, paintBucket, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection
+        case brush, eraser, paintBucket, gradient, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection
 
         var selectionName: String? {
             switch self {
@@ -37,6 +37,21 @@ final class CanvasView: NSView {
         var y: Int
         let flood: FloodSettings.Flood
         let operation: Operation
+    }
+
+    private struct GradientEdit {
+        let layer: PaintLayer
+        let selection: SelectionOutline?
+        var line: LinearGradient
+        var reversed: Bool
+        var preview: PaintLayer?
+    }
+
+    private struct GradientDrag {
+        let startsLine: Bool
+        let movesStart: Bool
+        let rightButton: Bool
+        let offset: CGPoint
     }
 
     struct MoveSession {
@@ -174,7 +189,13 @@ final class CanvasView: NSView {
     private(set) var displayedZoomPercent: CGFloat = 0
     var zoomDidChange: (() -> Void)?
     var brushColor = NSColor.black {
-        didSet { if tool == .paintBucket { updateFloodEdit() } }
+        didSet {
+            if tool == .paintBucket { updateFloodEdit() }
+            else if tool == .gradient { updateGradientPreview() }
+        }
+    }
+    var secondaryColor = NSColor.white {
+        didSet { if tool == .gradient { updateGradientPreview() } }
     }
     var brushSize: CGFloat = 12
     var selectionDidChange: (() -> Void)?
@@ -193,6 +214,8 @@ final class CanvasView: NSView {
     private var floodEdit: FloodEdit?
     private var fillPreview: PaintLayer?
     private var floodDrag: (anchor: CGPoint, x: Int, y: Int)?
+    private var gradientEdit: GradientEdit?
+    private var gradientDrag: GradientDrag?
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionDrag: SelectionDrag?
 
@@ -288,6 +311,7 @@ final class CanvasView: NSView {
         completeMoveDrag()
         cancelSelectionDrag()
         floodDrag = nil
+        gradientDrag = nil
         guard panLocation != nil else { return }
         panLocation = nil
         window?.invalidateCursorRects(for: self)
@@ -367,7 +391,8 @@ final class CanvasView: NSView {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, floodDrag == nil, panLocation == nil,
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, floodDrag == nil,
+              gradientDrag == nil, panLocation == nil,
               let scrollView = enclosingScrollView else { return }
 
         let steps: Int
@@ -404,7 +429,8 @@ final class CanvasView: NSView {
             super.otherMouseDown(with: event)
             return
         }
-        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, floodDrag == nil else { return }
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, floodDrag == nil,
+              gradientDrag == nil else { return }
         panLocation = event.locationInWindow
         NSCursor.closedHand.set()
         window?.invalidateCursorRects(for: self)
@@ -508,7 +534,8 @@ final class CanvasView: NSView {
         return selectionOutline
     }
 
-    var copyableLayer: PaintLayer? { move?.preview ?? fillPreview ?? document?.stack?.activeLayer }
+    private var pixelPreview: PaintLayer? { move?.preview ?? fillPreview ?? gradientEdit?.preview }
+    var copyableLayer: PaintLayer? { pixelPreview ?? document?.stack?.activeLayer }
     var canCopyPixels: Bool {
         copyableLayer != nil && (copyableOutline != nil || (selectionOutline == nil && move?.isPaste != true))
     }
@@ -548,6 +575,8 @@ final class CanvasView: NSView {
             if case .select(_, let before) = floodEdit.operation { setSelection(before) }
         }
         fillPreview = nil
+        gradientEdit = nil
+        gradientDrag = nil
         if let drag = moveDrag {
             moveDrag = nil
             move = drag.before
@@ -559,6 +588,8 @@ final class CanvasView: NSView {
 
     var hasPendingMove: Bool { move?.recorded == true || move?.changed == true }
     var hasPendingFloodEdit: Bool { floodEdit != nil }
+    var hasPendingGradient: Bool { gradientEdit != nil }
+    var hasLiveEditChange: Bool { hasFloodChange || gradientEdit?.preview != nil }
     var hasFloodChange: Bool {
         guard let floodEdit else { return false }
         switch floodEdit.operation {
@@ -566,7 +597,7 @@ final class CanvasView: NSView {
         case .fill: return fillPreview != nil
         }
     }
-    var hasPendingPixelEdit: Bool { move?.preview != nil || fillPreview != nil }
+    var hasPendingPixelEdit: Bool { pixelPreview != nil }
     var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
 
     func restoreMove(_ session: MoveSession?) {
@@ -586,7 +617,7 @@ final class CanvasView: NSView {
     }
 
     func finishSelection() {
-        finishFloodEdit()
+        finishLiveEdit()
         completeMoveDrag()
         guard let session = move, let image = document?.image else { return }
         guard session.recorded else {
@@ -601,6 +632,11 @@ final class CanvasView: NSView {
         handles.flipY = false
         let destination = clipped.flatMap { SelectionOutline(path: $0.path, handleGeometry: handles) }
         document?.commitSelectedPixelsTransform(session.preview, to: destination, actionName: "Finish Selection")
+    }
+
+    func finishLiveEdit() {
+        finishFloodEdit()
+        finishGradient()
     }
 
     var imageSelection: CGRect? {
@@ -663,16 +699,19 @@ final class CanvasView: NSView {
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         let deselects = (isEscape || isReturn) &&
-            (move != nil || !selection.isEmpty || selectionDrag != nil || hasPendingFloodEdit)
+            (move != nil || !selection.isEmpty || selectionDrag != nil || hasPendingFloodEdit || hasPendingGradient)
         if event.isARepeat && (isEscape || deselects) { return }
         if !event.isARepeat, event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-           let selectTool, let shortcut = event.charactersIgnoringModifiers?.lowercased(), shortcut == "m" || shortcut == "f" {
-            if shortcut == "f" {
-                selectTool(.paintBucket)
-            } else {
+           let selectTool, let shortcut = event.charactersIgnoringModifiers?.lowercased(), ["m", "f", "g"].contains(shortcut) {
+            switch shortcut {
+            case "f": selectTool(.paintBucket)
+            case "g": selectTool(.gradient)
+            default:
                 let outline = event.modifierFlags.contains(.shift) || tool == .moveSelectedPixels
                 selectTool(outline ? .moveSelection : .moveSelectedPixels)
             }
+        } else if (isEscape || isReturn) && hasPendingGradient {
+            finishGradient()
         } else if (isEscape || isReturn) && tool == .paintBucket && hasPendingFloodEdit {
             finishFloodEdit()
         } else if deselects {
@@ -836,16 +875,19 @@ final class CanvasView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         if tool.transformsSelection { beginMoveDrag(with: event, rightButton: true) }
+        else if tool == .gradient { beginGradient(with: event, rightButton: true) }
         else { super.rightMouseDown(with: event) }
     }
 
     override func rightMouseDragged(with event: NSEvent) {
         if tool.transformsSelection { updateMoveDrag(with: event, rightButton: true) }
+        else if tool == .gradient { dragGradient(with: event, rightButton: true) }
         else { super.rightMouseDragged(with: event) }
     }
 
     override func rightMouseUp(with event: NSEvent) {
         if tool.transformsSelection { endMoveDrag(with: event, rightButton: true) }
+        else if tool == .gradient { endGradientDrag(with: event, rightButton: true) }
         else { super.rightMouseUp(with: event) }
     }
 
@@ -857,8 +899,98 @@ final class CanvasView: NSView {
         super.flagsChanged(with: event)
     }
 
+    private func beginGradient(with event: NSEvent, rightButton: Bool) {
+        guard panLocation == nil, gradientDrag == nil, let layer = document?.stack?.activeLayer else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        if var edit = gradientEdit {
+            let handles = gradientHandleCenters(edit.line, imageWidth: layer.image.width)
+            let startDelta = location - handles.start, endDelta = location - handles.end
+            let startDistance = hypot(startDelta.x, startDelta.y)
+            let endDistance = hypot(endDelta.x, endDelta.y)
+            if min(startDistance, endDistance) <= 9 {
+                window?.makeFirstResponder(self)
+                if rightButton {
+                    edit.reversed.toggle()
+                    gradientEdit = edit
+                    updateGradientPreview()
+                } else {
+                    let movesStart = startDistance < endDistance
+                    let endpoint = movesStart ? edit.line.start : edit.line.end
+                    gradientDrag = GradientDrag(startsLine: false, movesStart: movesStart, rightButton: false,
+                                                offset: endpoint - imagePoint(location))
+                }
+                return
+            }
+        }
+        guard imageRect.contains(location) else { return }
+        finishGradient()
+        guard var layer = document?.stack?.activeLayer, layer.isVisible, let pixels = layer.straightPixels else {
+            NSSound.beep()
+            return
+        }
+        layer.pdnPixels = pixels
+        window?.makeFirstResponder(self)
+        let point = imagePoint(location)
+        gradientEdit = GradientEdit(layer: layer, selection: selectionOutline,
+                                    line: LinearGradient(start: point, end: point), reversed: rightButton)
+        gradientDrag = GradientDrag(startsLine: true, movesStart: false, rightButton: rightButton, offset: .zero)
+        needsDisplay = true
+        selectionDidChange?()
+    }
+
+    private func dragGradient(with event: NSEvent, rightButton: Bool) {
+        guard let drag = gradientDrag, drag.rightButton == rightButton, var edit = gradientEdit else { return }
+        var point = imagePoint(convert(event.locationInWindow, from: nil)) + drag.offset
+        if event.modifierFlags.contains(.shift) {
+            let anchor = drag.movesStart ? edit.line.end : edit.line.start
+            let delta = point - anchor
+            let step = CGFloat.pi / 12
+            let angle = (atan2(delta.y, delta.x) / step).rounded() * step
+            point = anchor + CGPoint(x: hypot(delta.x, delta.y), y: 0).rotated(by: angle)
+        }
+        let current = drag.movesStart ? edit.line.start : edit.line.end
+        guard current != point else { return }
+        if drag.movesStart { edit.line.start = point }
+        else { edit.line.end = point }
+        gradientEdit = edit
+        updateGradientPreview()
+    }
+
+    private func endGradientDrag(with event: NSEvent, rightButton: Bool) {
+        guard let drag = gradientDrag, drag.rightButton == rightButton else { return }
+        dragGradient(with: event, rightButton: rightButton)
+        gradientDrag = nil
+        if drag.startsLine, let edit = gradientEdit, edit.line.start == edit.line.end { finishGradient() }
+    }
+
+    private func updateGradientPreview() {
+        guard let edit = gradientEdit else { return }
+        let primary = (brushColor.usingColorSpace(.sRGB) ?? .black).cgColor
+        let secondary = (secondaryColor.usingColorSpace(.sRGB) ?? .white).cgColor
+        gradientEdit?.preview = edit.line.applying(to: edit.layer, primary: edit.reversed ? secondary : primary,
+                                                   secondary: edit.reversed ? primary : secondary,
+                                                   selection: edit.selection)
+        composite = nil
+        needsDisplay = true
+        selectionDidChange?()
+    }
+
+    private func finishGradient() {
+        guard let edit = gradientEdit else { return }
+        gradientEdit = nil
+        gradientDrag = nil
+        composite = nil
+        needsDisplay = true
+        if let preview = edit.preview { document?.commitPaintLayer(preview, actionName: "Gradient") }
+        selectionDidChange?()
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard panLocation == nil else { return }
+        if tool == .gradient {
+            beginGradient(with: event, rightButton: false)
+            return
+        }
         if tool.transformsSelection {
             beginMoveDrag(with: event, rightButton: false)
             return
@@ -994,12 +1126,16 @@ final class CanvasView: NSView {
             let result = fillPreview
             fillPreview = nil
             composite = nil
-            if let result { document?.commitBucketFill(result) }
+            if let result { document?.commitPaintLayer(result, actionName: "Paint Bucket") }
         }
         selectionDidChange?()
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if tool == .gradient {
+            dragGradient(with: event, rightButton: false)
+            return
+        }
         guard !imageRect.isEmpty else { return }
         let location = convert(event.locationInWindow, from: nil)
         if let drag = floodDrag, var edit = floodEdit {
@@ -1042,6 +1178,10 @@ final class CanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if tool == .gradient {
+            endGradientDrag(with: event, rightButton: false)
+            return
+        }
         if moveDrag != nil {
             endMoveDrag(with: event, rightButton: false)
             return
@@ -1076,12 +1216,13 @@ final class CanvasView: NSView {
         let visible = rect.intersection(dirtyRect)
         guard let context = NSGraphicsContext.current?.cgContext,
               var stack = layerPreview ?? document?.stack else { return }
-        if let preview = move?.preview ?? fillPreview { stack.layers[stack.active] = preview }
+        if let preview = pixelPreview { stack.layers[stack.active] = preview }
         let image = stack.activeLayer.image
         let showsHandles = showsTransformHandles(on: stack.activeLayer)
         let geometry = moveGeometry(for: image)
         let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
+            if let edit = gradientEdit { drawGradientHandles(edit.line, imageWidth: image.width, in: context) }
             if let handle = floodHandle { drawFloodHandle(at: handle.seed, frame: handle.frame, in: context) }
             if showsHandles && !marquee.isEmpty {
                 let pivot = self.marquee(for: CGRect(origin: geometry.pivot, size: .zero), imageWidth: image.width).origin
@@ -1153,6 +1294,25 @@ final class CanvasView: NSView {
         let x = seed.x + (seed.x + offset + halfSize <= viewport.maxX ? offset : -offset)
         let y = seed.y + (seed.y + offset + halfSize <= viewport.maxY ? offset : -offset)
         return (seed, CGRect(x: x - halfSize, y: y - halfSize, width: 2 * halfSize, height: 2 * halfSize))
+    }
+
+    private func gradientHandleCenters(_ line: LinearGradient, imageWidth: Int) -> (start: CGPoint, end: CGPoint) {
+        (marquee(for: CGRect(origin: line.start, size: .zero), imageWidth: imageWidth).origin,
+         marquee(for: CGRect(origin: line.end, size: .zero), imageWidth: imageWidth).origin)
+    }
+
+    private func drawGradientHandles(_ line: LinearGradient, imageWidth: Int, in context: CGContext) {
+        let centers = gradientHandleCenters(line, imageWidth: imageWidth)
+        context.saveGState()
+        context.setFillColor(NSColor.white.cgColor)
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1)
+        for center in [centers.start, centers.end] {
+            let handle = CGRect(x: center.x - 5, y: center.y - 5, width: 10, height: 10)
+            context.fillEllipse(in: handle)
+            context.strokeEllipse(in: handle)
+        }
+        context.restoreGState()
     }
 
     private func drawFloodHandle(at seed: CGPoint, frame: CGRect, in context: CGContext) {

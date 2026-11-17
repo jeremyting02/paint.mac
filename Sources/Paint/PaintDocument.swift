@@ -72,7 +72,7 @@ final class PaintDocument: NSDocument {
 
     @objc func cropSelection(_ sender: Any?) {
         guard let canvas = editor?.canvas, let rect = canvas.cropRect, let outline = canvas.selectionOutline else { return }
-        canvas.finishFloodEdit()
+        canvas.finishLiveEdit()
         guard var next = stack else { return }
         let mask = outline.pixelRectangle ? nil : outline.mask(in: rect, imageHeight: next.activeLayer.image.height)
         guard outline.pixelRectangle || mask != nil else { return }
@@ -117,7 +117,7 @@ final class PaintDocument: NSDocument {
         clipboard.clearContents()
         guard clipboard.setData(data, forType: .png) else { return }
         if let cutLayer {
-            canvas.finishFloodEdit()
+            canvas.finishLiveEdit()
             canvas.completeMoveDrag()
             commitSelectedPixelsTransform(cutLayer, to: nil, actionName: "Cut")
         }
@@ -275,10 +275,10 @@ final class PaintDocument: NSDocument {
         applyEdit(actionName: actionName, selectionChange: (canvas.selectionOutline, outline))
     }
 
-    func commitBucketFill(_ layer: PaintLayer) {
+    func commitPaintLayer(_ layer: PaintLayer, actionName: String) {
         guard var next = stack else { return }
         next.layers[next.active] = layer
-        applyEdit(replacingStack: next, actionName: "Paint Bucket")
+        applyEdit(replacingStack: next, actionName: actionName)
     }
 
     func recordMove(from before: CanvasView.MoveSession?, to after: CanvasView.MoveSession, actionName: String) {
@@ -335,14 +335,14 @@ final class PaintDocument: NSDocument {
     }
 
     @objc func undoStroke(_ sender: Any?) {
-        editor?.canvas.finishFloodEdit()
+        editor?.canvas.finishLiveEdit()
         editor?.canvas.cancelEditingGesture()
         undoManager?.undo()
         editor?.updateHistory(undoManager)
     }
 
     @objc func redoStroke(_ sender: Any?) {
-        guard editor?.canvas.hasFloodChange != true else { return }
+        guard editor?.canvas.hasLiveEditChange != true else { return }
         editor?.canvas.cancelEditingGesture()
         undoManager?.redo()
         editor?.updateHistory(undoManager)
@@ -402,8 +402,8 @@ final class PaintDocument: NSDocument {
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
-        case #selector(undoStroke(_:)): return undoManager?.canUndo == true || editor?.canvas.hasFloodChange == true
-        case #selector(redoStroke(_:)): return undoManager?.canRedo == true && editor?.canvas.hasFloodChange != true
+        case #selector(undoStroke(_:)): return undoManager?.canUndo == true || editor?.canvas.hasLiveEditChange == true
+        case #selector(redoStroke(_:)): return undoManager?.canRedo == true && editor?.canvas.hasLiveEditChange != true
         case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
         case #selector(copySelection(_:)): return editor?.canvas.copyableOutline != nil
         case #selector(cut(_:)): return editor?.canvas.copyableOutline != nil
@@ -413,7 +413,8 @@ final class PaintDocument: NSDocument {
         case #selector(pasteSelection(_:)): return clipboardOutline != nil
         case #selector(deselect(_:)):
             guard let canvas = editor?.canvas else { return false }
-            return canvas.imageSelection != nil || canvas.hasPendingMove || canvas.hasPendingFloodEdit
+            return canvas.imageSelection != nil || canvas.hasPendingMove || canvas.hasPendingFloodEdit ||
+                canvas.hasPendingGradient
         case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false
         case #selector(toggleUtilityPanel(_:)):
             if let menuItem = item as? NSMenuItem, let kind = UtilityPanels.Kind(rawValue: menuItem.tag) {

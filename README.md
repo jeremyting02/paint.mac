@@ -43,6 +43,13 @@ inside it. Adjust the color or tolerance or drag the sample handle while the
 fill is active. Click **Finish** or press **Return** to commit the fill as one
 undo step.
 
+Choose **Gradient** or press **G**, then drag to draw a linear gradient from
+the **Primary** color to the **Secondary** color. Edit both colors in **Colors**.
+Drag either endpoint to adjust the preview, hold **Shift** to snap the angle,
+or right-click an endpoint to reverse the colors. The gradient paints only
+inside the active selection. Click **Finish** or press **Return** to commit it
+as one undo step.
+
 Use the toolbar's **Selection Mode** menu with any selection tool. **Replace**
 starts a new selection, **Add** combines both areas, **Subtract** removes the
 new area, **Intersect** keeps only the overlap, and **XOR** keeps only the areas
