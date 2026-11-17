@@ -10,15 +10,15 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         var keyEquivalent: String { String(UnicodeScalar(Int(NSF5FunctionKey) + rawValue)!) }
         var size: CGSize {
             switch self {
-            case .tools: return CGSize(width: 260, height: 76)
+            case .tools: return CGSize(width: 76, height: 246)
             case .history: return CGSize(width: 160, height: 172)
             case .layers: return CGSize(width: 224, height: 151)
-            case .colors: return CGSize(width: 166, height: 104)
+            case .colors: return CGSize(width: 224, height: 104)
             }
         }
     }
 
-    private struct Placement {
+    struct Placement {
         let fromLeft: Bool
         let fromTop: Bool
         let inset: CGPoint
@@ -41,14 +41,22 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
                       inset: CGPoint(x: fromLeft ? left : right, y: fromTop ? top : bottom))
         }
 
+        func origin(for size: CGSize, in frame: CGRect) -> CGPoint {
+            let x = fromLeft ? frame.minX + inset.x : frame.maxX - size.width - inset.x
+            let y = fromTop ? frame.maxY - size.height - inset.y : frame.minY + inset.y
+            return CGPoint(x: x, y: y)
+        }
+
         @MainActor mutating func apply(to panel: NSPanel, in frame: CGRect) {
             let panelFrame = panel.frame
-            let x = fromLeft ? frame.minX + inset.x : frame.maxX - panelFrame.width - inset.x
-            let y = fromTop ? frame.maxY - panelFrame.height - inset.y : frame.minY + inset.y
-            let origin = CGPoint(x: x, y: y)
+            let origin = origin(for: panelFrame.size, in: frame)
             if panelFrame.origin != origin { panel.setFrameOrigin(origin) }
             lastOrigin = panel.frame.origin
         }
+    }
+
+    private final class TopAlignedPanelContent: NSView {
+        override var isFlipped: Bool { true }
     }
 
     private weak var parent: NSWindow?
@@ -56,6 +64,7 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     private var placements: [Kind: Placement] = [:]
     private var parentFrame: CGRect = .zero
     private var shown = Set(Kind.allCases)
+    var visibilityDidChange: (() -> Void)?
 
     init(parent: NSWindow, contents: [Kind: NSView]) {
         self.parent = parent
@@ -74,15 +83,16 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
             panel.delegate = self
 
             let body = NSView()
-            content.translatesAutoresizingMaskIntoConstraints = false
-            body.addSubview(content)
+            let child = kind == .tools ? scrollableTools(content) : content
+            child.translatesAutoresizingMaskIntoConstraints = false
+            body.addSubview(child)
             NSLayoutConstraint.activate([
-                content.topAnchor.constraint(equalTo: body.topAnchor, constant: 8),
-                content.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 8),
-                content.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -8),
-                kind == .history
-                    ? content.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -8)
-                    : content.bottomAnchor.constraint(lessThanOrEqualTo: body.bottomAnchor, constant: -8)
+                child.topAnchor.constraint(equalTo: body.topAnchor, constant: 8),
+                child.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 8),
+                child.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -8),
+                kind == .history || kind == .tools
+                    ? child.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -8)
+                    : child.bottomAnchor.constraint(lessThanOrEqualTo: body.bottomAnchor, constant: -8)
             ])
             panel.contentView = body
             panels[kind] = panel
@@ -102,6 +112,25 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
+    private func scrollableTools(_ content: NSView) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = false
+        let container = TopAlignedPanelContent(frame: CGRect(origin: .zero, size: content.fittingSize))
+        content.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: container.topAnchor),
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        scroll.documentView = container
+        return scroll
+    }
+
     func isShown(_ kind: Kind) -> Bool { shown.contains(kind) }
 
     func toggle(_ kind: Kind) {
@@ -115,7 +144,8 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
         for (kind, panel) in panels {
             let left = kind == .tools || kind == .colors
             let top = kind == .tools || kind == .history
-            var placement = Placement(fromLeft: left, fromTop: top, inset: CGPoint(x: 8, y: top ? 66 : 34))
+            var placement = Placement(fromLeft: left, fromTop: top, inset: CGPoint(x: 8, y: top ? 100 : 34))
+            resizeTopPanel(panel, kind: kind, ownerHeight: parentFrame.height)
             placement.apply(to: panel, in: parentFrame)
             placements[kind] = placement
         }
@@ -129,10 +159,28 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
             if panel.frame.origin != placement.lastOrigin {
                 placement = Placement(panel: panel.frame, in: parentFrame)
             }
+            resizeTopPanel(panel, kind: kind, ownerHeight: frame.height)
             placement.apply(to: panel, in: frame)
             placements[kind] = placement
         }
         parentFrame = frame
+    }
+
+    static func topContentHeight(ownerHeight: CGFloat, lowerPanelHeight: CGFloat,
+                                 chromeHeight: CGFloat, preferredHeight: CGFloat) -> CGFloat {
+        min(preferredHeight, max(88, ownerHeight - 100 - 34 - 8 - lowerPanelHeight - chromeHeight))
+    }
+
+    private func resizeTopPanel(_ panel: NSPanel, kind: Kind, ownerHeight: CGFloat) {
+        guard kind == .tools || kind == .history,
+              let lower = panels[kind == .tools ? .colors : .layers],
+              let content = panel.contentView else { return }
+        let height = Self.topContentHeight(ownerHeight: ownerHeight, lowerPanelHeight: lower.frame.height,
+                                          chromeHeight: panel.frame.height - content.frame.height,
+                                          preferredHeight: kind.size.height)
+        if abs(content.frame.height - height) >= 1 {
+            panel.setContentSize(CGSize(width: kind.size.width, height: height))
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -163,5 +211,6 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
                 panel.orderOut(nil)
             }
         }
+        visibilityDidChange?()
     }
 }

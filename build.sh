@@ -8,4 +8,5 @@ app=.build/paint.mac.app
 mkdir -p "$app/Contents/MacOS"
 cp Info.plist "$app/Contents/Info.plist"
 cp "$bin/Paint" "$app/Contents/MacOS/Paint"
+codesign --force --sign - "$app"
 echo "$app"

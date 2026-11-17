@@ -12,13 +12,40 @@ open .build/paint.mac.app
 ```
 
 Use **File → New** for a 1024 × 768 transparent canvas or **File → Open** for a
-Paint.NET project or PNG. **Save** and **Save As** write `.pdn` projects. Saving
-an opened PNG creates a separate project. **File → Export PNG** writes a flat
-copy of the visible layers. The checkerboard marks transparent areas.
+Paint.NET project or bitmap image. **Save** and **Save As** write `.pdn` projects.
+Saving an opened bitmap creates a separate project. **File → Export** writes a
+flat copy of the visible layers. Its format menu offers the installed macOS
+encoders, including PNG and JPEG. Bitmap support includes TIFF, BMP, GIF, HEIC,
+AVIF, WebP, JPEG XL, DDS, and TGA where macOS provides a decoder. Multiframe
+GIF and TIFF files open as a single image. The checkerboard marks transparent areas.
+
+Use **Image → Resize** to resample every layer by pixel dimensions or by
+percentage. **Canvas Size** crops or expands the layers from the chosen anchor
+and can fill new space on the bottom layer. Both dialogs show the print size and
+let you change the horizontal and vertical resolution. **Image** also offers flips and
+right-angle rotations across the stack. The **Layer** menu can flip the
+active layer or rotate it by 180°. Use **Layer → Rotate / Zoom** to preview
+rotation, perspective tilt, panning, or scaling on the active layer. Choose a
+sampling and tiling mode to control edges, then click **Apply**. When a
+selection is active, only pixels inside it change. These edits can be undone.
 
 Choose **Paintbrush** or **Eraser** in the floating **Tools** window. Pick a
 paint color in **Colors** and use **Size** above the canvas to set the diameter
 in image pixels. Drag on the canvas to paint or erase.
+
+Use **Pencil** for single-pixel strokes. **Color Picker** samples the active
+layer or the visible image and can average a square around the pointer. Left
+and right clicks set the primary and secondary colors. For **Clone Stamp**,
+Control-click or Option-click to set the source, then drag elsewhere to paint
+with the copied pixels. **Recolor** replaces colors near the secondary color
+with the primary color. Right-drag swaps the colors.
+
+With **Line/Curve**, drag the endpoints to place a line and drag either
+interior control point to bend it. **Shapes** offers preset outlines, solid
+fills, and two-color outline-and-fill drawing. For **Text**, click the image
+to place the text, then type in the contextual toolbar field. Change the font,
+alignment, and style before choosing **Finish** to apply the drawing to the
+active layer as one undo step.
 
 Choose **Rectangle Select** or **Ellipse Select** and drag to select an area.
 Hold **Shift** with Ellipse Select to draw a circle, using the start and end of
@@ -39,14 +66,16 @@ composite. **Contiguous** selects connected pixels. **Global**, or **Shift-click
 also selects matching pixels in disconnected areas.
 
 Choose **Paint Bucket** or press **F**, then click to fill matching pixels on the active layer
-with the current paint color. It uses the same tolerance, sampling, and flood
+with the primary color, or right-click to fill with the secondary color.
+It uses the same tolerance, sampling, and flood
 controls as Magic Wand. With a selection active, the fill starts and stays
 inside it. Adjust the color or tolerance or drag the sample handle while the
 fill is active. Click **Finish** or press **Return** to commit the fill as one
 undo step.
 
-Choose **Gradient** or press **G**, then drag to draw a linear gradient from
-the **Primary** color to the **Secondary** color. Edit both colors in **Colors**.
+Choose **Gradient** or press **G**, then drag to draw a gradient from the
+**Primary** color to the **Secondary** color. Choose one of seven geometries,
+enable a repeating pattern, or use transparency mode to fade the active layer.
 Drag either endpoint to adjust the preview, hold **Shift** to snap the angle,
 or right-click an endpoint to reverse the colors. The gradient paints only
 inside the active selection. Click **Finish** or press **Return** to commit it
@@ -57,12 +86,16 @@ starts a new selection, **Add** combines both areas, **Subtract** removes the
 new area, **Intersect** keeps only the overlap, and **XOR** keeps only the areas
 outside the overlap. Each completed change can be undone in one step.
 
+The **Edit** menu can select the entire canvas, invert a selection, fill it
+with the primary color, or erase it to transparency. Erasing also deselects.
+Undo restores both the erased pixels and the selection.
+
 The selection stays active when you switch tools and limits paintbrush and
 eraser strokes to that area. Press **Return** or **Escape** to deselect. The status bar shows
 the selection size and its top-left pixel. To crop, choose **Image → Crop to Selection**
 (Shift-Command-X) or click the crop button above the canvas.
 
-Choose **Move Selected Pixels** in **Tools** or press **M**. The tool acts on the
+Choose **Move Pixels** in **Tools** or press **M**. The tool acts on the
 selection or, if there is none, the entire active layer. Drag where the pointer
 shows a hand to move. Drag just outside the outline or use a right-button drag
 to rotate. Drag the crosshair in the circle to reposition the rotation pivot.
@@ -83,36 +116,55 @@ past the canvas are clipped on commit.
 Choose **Move Selection** or press **Shift-M** to move, resize, or rotate only
 the outline using the same handles. In the **Edit** menu, **Copy Selection**
 (Option-Shift-Command-C) copies the outline as polygon JSON. **Paste Selection**
-(Option-Shift-Command-V) replaces the current outline with the clipboard shape.
+can replace the current outline or combine it using any selection mode.
+Option-Shift-Command-V uses Replace.
 
 Use **Command-X** to cut selected pixels from the active layer and **Command-C**
 to copy them. With no selection, Copy takes the entire active layer.
 **Command-V** pastes a clipboard image at the top-left of the selection or, if
-there is no selection, at the top-left of the visible canvas. **Move Selected
-Pixels** lets you position, resize, or rotate it before committing. **Paste**
+there is no selection, at the top-left of the visible canvas. **Move Pixels**
+lets you position, resize, or rotate it before committing. **Paste**
 has its own history entry. Use **Command-Z** to step back through its transforms
 and then remove the floating paste.
 
+**Edit → Copy Flattened** copies the visible composite within the selection.
+**Paste into New Layer** inserts a layer above the active layer and starts a
+floating paste there. **Paste into New Image** starts a new document that fits
+the clipboard image. When a paste is larger than the current canvas, you can
+expand the canvas before placing it.
+
+The top toolbar shows common commands, open image thumbnails, and utility panel
+toggles. Click a thumbnail to bring that document window forward or drag one to
+reorder the list. An asterisk marks unsaved changes. The row below shows options
+for the selected tool.
+
 **Fit** shows the whole image, and **100%** shows one image pixel per display
-pixel. Hold **Command** and scroll
-to zoom toward or away from the pointer. Hold the middle mouse button and drag
-to pan the canvas with any tool active. Scrolling without Command moves the view.
+pixel. Use the zoom buttons or slider, type a percentage in the status bar, or
+hold **Command** and scroll to zoom around the pointer. Hold the middle mouse
+button and drag to pan with any tool active. **View → Rulers** shows pixel
+coordinates at the top and left, and **View → Pixel Grid** shows individual
+pixel edges at 200% zoom and above.
+
+Press **Z** to use the Zoom tool or **H** to use Pan. Hold **Space** while
+dragging or pressing the arrow keys to pan temporarily with another tool active.
 
 Use **Command-Z** and **Command-Y** to undo or redo an edit. Selection changes
 also appear in **History**.
 Each document keeps its undo history until you close it. Scroll the floating
 **History** window and select an entry to jump to it. In **Layers**, use **+** to insert a transparent
 layer above the selected row, click a row to edit it, and use its checkbox to
-hide or show it. The arrows move the selected layer and the trash button deletes
-it. The **Layer** menu offers the same commands. A document can have up to eight
-layers. Crop applies to the whole stack.
+hide or show it. Drag a row to reorder the stack. The arrows move the selected
+layer and the trash button deletes it. The **Layer** menu offers the same
+commands. Small canvases can have up to 128 layers. The layer limit decreases
+as the canvas grows, keeping the total raw pixel data within 256 MiB. Crop
+applies to the whole stack.
 
 **Duplicate Layer** (Shift-Command-D) copies the selected layer above itself.
 **Merge Layer Down** (Command-M) blends the selected layer into the one below
 and keeps the lower layer's properties. Both commands are in the **Layer** menu
 and the floating **Layers** window.
 
-Use **Layer → Import From File** to add PNGs or PDN layers at the top of the
+Use **Layer → Import From File** to add bitmaps or PDN layers at the top of the
 stack. Imported pixels start at the upper left, and the canvas expands with
 transparency when needed. **Image → Flatten** (Shift-Command-F) combines the
 visible layers into a single Background layer. Either command takes one undo step.
@@ -126,8 +178,30 @@ blend modes, and pixel data. Reopened projects select the top layer. Projects
 that use embedded color profiles or an unsupported pixel layout show an error
 when opened.
 
-Run `sh Tests/pdn-roundtrip.sh` to check the Paint.NET 5.2 fixture.
+Use **Adjustments** for tonal and color edits and **Effects** for the built-in
+filters. They operate on the active visible layer and honor the selection.
+Configurable filters preview changes as you adjust their values. **Apply**
+adds a single history entry and **Cancel** discards the preview. **Effects →
+Repeat Last Effect** reuses the most recently applied effect settings.
 
 Use the toolbar buttons or **Window** menu to show or hide each utility
 window (F5–F8). Drag a window by its title bar or use **Window → Reset Panel
 Layout** to put the four windows back in their corners.
+
+In **Colors**, select the Primary or Secondary slot to edit its hexadecimal RGB
+or RGBA value or apply a swatch. The adjacent controls swap the two colors or
+reset them to black and white.
+
+## Tests and compatibility
+
+Run `swift test` with a Swift toolchain that includes Swift Testing. Run
+`sh Tests/pdn-roundtrip.sh` for the independent Paint.NET 5.2 file check.
+The [5.2 parity checklist](docs/PARITY_5_2.md) records coverage and differences.
+
+If the standalone Command Line Tools report that `TestingMacros` is missing,
+load the macro plug-in bundled with the toolchain.
+
+```sh
+swift test -Xswiftc -load-plugin-library \
+  -Xswiftc "$(xcode-select -p)/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+```

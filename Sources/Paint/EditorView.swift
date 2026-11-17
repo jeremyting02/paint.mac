@@ -3,11 +3,25 @@ import AppKit
 final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     let canvas: CanvasView
     private weak var document: PaintDocument?
+    private weak var enclosingOptionsArea: WorkspaceOptionsArea?
     private let scrollView = NSScrollView()
+    private let documentStrip = DocumentStrip()
+    private let toolOptions = ToolOptionsView()
     private let status = NSTextField(labelWithString: "")
+    private let coordinates = NSTextField(labelWithString: "")
+    private let dimensions = NSTextField(labelWithString: "")
     private let zoom = NSSegmentedControl(labels: ["Fit", "100%"], trackingMode: .selectOne,
                                           target: nil, action: nil)
-    private let zoomLevel = NSTextField(labelWithString: "")
+    private let zoomLevel = NSTextField()
+    private let zoomSlider = NSSlider()
+    private let zoomOut = EditorView.icon("minus.magnifyingglass", label: "Zoom Out")
+    private let zoomIn = EditorView.icon("plus.magnifyingglass", label: "Zoom In")
+    private let rulersButton = EditorView.icon("ruler", label: "Rulers")
+    private let gridButton = EditorView.icon("grid", label: "Pixel Grid")
+    private var horizontalRuler: WorkspaceRuler?
+    private var verticalRuler: WorkspaceRuler?
+    var showsRulers: Bool { scrollView.rulersVisible }
+    var showsGrid: Bool { canvas.showsPixelGrid }
     private let brush = EditorView.icon("paintbrush", label: "Paintbrush")
     private let eraser = EditorView.icon("eraser", label: "Eraser")
     private let paintBucket = EditorView.icon(EditorView.bucketImage, label: "Paint Bucket")
@@ -16,14 +30,26 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let ellipseSelect = EditorView.icon("circle.dashed", label: "Ellipse Select")
     private let lassoSelect = EditorView.icon("lasso", label: "Lasso Select")
     private let magicWand = EditorView.icon("wand.and.stars", label: "Magic Wand")
-    private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
+    private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Pixels")
     private let moveSelection = EditorView.icon("rectangle.dashed.and.paperclip", label: "Move Selection")
+    private let zoomTool = EditorView.icon("magnifyingglass", label: "Zoom Tool")
+    private let pan = EditorView.icon("hand.raised", label: "Pan")
+    private let pencil = EditorView.icon("pencil", label: "Pencil")
+    private let picker = EditorView.icon("eyedropper", label: "Color Picker")
+    private let stamp = EditorView.icon("paintbrush.pointed", label: "Clone Stamp")
+    private let recolor = EditorView.icon("paintbrush.pointed.fill", label: "Recolor")
+    private let text = EditorView.icon("textformat", label: "Text")
+    private let line = EditorView.icon("line.diagonal", label: "Line / Curve")
+    private let shapes = EditorView.icon("square.on.circle", label: "Shapes")
+    private let toolName = NSTextField(labelWithString: "Paintbrush")
     private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
     private let finish = NSButton(title: "Finish", target: nil, action: nil)
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private let color = NSColorWell()
     private let secondaryColor = NSColorWell()
+    private let colorSlot = NSPopUpButton()
+    private let hexColor = NSTextField()
     private let toolButtons = NSStackView()
     private let brushControls = NSStackView()
     private let selectionModes = NSPopUpButton()
@@ -37,12 +63,17 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private var updatingHistory = false
     private let layersView: LayersView
     private var panels: UtilityPanels?
-    private let swatchColors: [(String, NSColor)] = [("Black", .black), ("Red", .systemRed), ("Blue", .systemBlue)]
+    private var panelButtons: [UtilityPanels.Kind: NSButton] = [:]
+    private let swatchColors: [(String, NSColor)] = [
+        ("Black", .black), ("White", .white), ("Gray", .gray), ("Brown", .brown), ("Red", .red), ("Orange", .orange),
+        ("Yellow", .yellow), ("Green", .green), ("Cyan", .cyan), ("Blue", .blue), ("Purple", .purple), ("Magenta", .magenta)
+    ]
     private var tools: [(button: NSButton, tool: CanvasView.Tool)] {
-        [(brush, .brush), (eraser, .eraser), (paintBucket, .paintBucket), (gradient, .gradient),
-         (rectangleSelect, .rectangleSelect),
-         (ellipseSelect, .ellipseSelect), (lassoSelect, .lassoSelect), (magicWand, .magicWand),
-         (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)]
+        [(rectangleSelect, .rectangleSelect), (moveSelectedPixels, .moveSelectedPixels),
+         (lassoSelect, .lassoSelect), (moveSelection, .moveSelection), (ellipseSelect, .ellipseSelect), (zoomTool, .zoom),
+         (magicWand, .magicWand), (pan, .pan), (paintBucket, .paintBucket), (gradient, .gradient),
+         (brush, .brush), (eraser, .eraser), (pencil, .pencil), (picker, .colorPicker),
+         (stamp, .cloneStamp), (recolor, .recolor), (text, .text), (line, .lineCurve), (shapes, .shapes)]
     }
 
     init(document: PaintDocument) {
@@ -51,13 +82,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
-        for (button, _) in tools {
-            button.setButtonType(.pushOnPushOff)
-            button.target = self
-            button.action = #selector(selectTool(_:))
-            toolButtons.addArrangedSubview(button)
-        }
-        selectTool(brush)
+        configureToolPalette()
         for button in [undo, historyUndo] {
             button.target = document
             button.action = #selector(PaintDocument.undoStroke(_:))
@@ -92,6 +117,12 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             guard let self, let button = tools.first(where: { $0.tool == tool })?.button else { return }
             selectTool(button)
         }
+        canvas.colorDidPick = { [weak self] picked, isSecondary in
+            guard let self else { return }
+            (isSecondary ? secondaryColor : color).color = picked
+            updateHexColor()
+        }
+        toolOptions.configure(canvas: canvas)
 
         scrollView.documentView = canvas
         scrollView.hasHorizontalScroller = true
@@ -105,6 +136,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         zoom.setToolTip("Fit to window", forSegment: 0)
         zoom.setToolTip("Actual pixels", forSegment: 1)
         canvas.zoomDidChange = { [weak self] in self?.updateZoom() }
+        configureZoomControls()
+        configureRulers()
 
         let size = NSPopUpButton()
         for diameter in [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128] {
@@ -137,70 +170,87 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         selectionModes.toolTip = "Selection Mode"
         selectionModes.target = self
         selectionModes.action = #selector(changeSelectionMode(_:))
-        let toolbar = NSStackView(views: [undo, redo, brushControls, selectionModes, applyCrop, finish])
-        toolbar.spacing = 8
         configureFloodControls()
-        let toolbarRows = NSStackView(views: [toolbar, floodControls])
-        toolbarRows.orientation = .vertical
-        toolbarRows.alignment = .leading
-        toolbarRows.spacing = 5
-        toolButtons.distribution = .fillEqually
-        toolButtons.spacing = 1
-        let swatches = NSStackView(views: swatchColors.enumerated().map { index, swatch in
-            let button = Self.icon("square.fill", label: swatch.0)
-            button.isBordered = false
-            button.contentTintColor = swatch.1
-            button.tag = index
-            button.target = self
-            button.action = #selector(pickSwatch(_:))
-            return button
-        })
-        swatches.spacing = 3
-        colorControls.orientation = .vertical
-        colorControls.spacing = 6
-        let colorWells = NSStackView()
-        colorWells.spacing = 10
-        for (well, label) in [(color, "Primary"), (secondaryColor, "Secondary")] {
-            let column = NSStackView(views: [NSTextField(labelWithString: label), well])
-            column.orientation = .vertical
-            column.alignment = .centerX
-            column.spacing = 2
-            colorWells.addArrangedSubview(column)
-        }
-        colorControls.addArrangedSubview(colorWells)
-        colorControls.addArrangedSubview(swatches)
-        let panelButtons = NSStackView(views: UtilityPanels.Kind.allCases.map { kind in
+        let contextual = NSStackView(views: [toolName, brushControls, selectionModes, floodControls, toolOptions, finish])
+        contextual.spacing = 7
+        let optionsScroll = NSScrollView()
+        optionsScroll.identifier = NSUserInterfaceItemIdentifier("Tool Options")
+        optionsScroll.drawsBackground = false
+        optionsScroll.hasHorizontalScroller = true
+        optionsScroll.autohidesScrollers = true
+        optionsScroll.scrollerStyle = .overlay
+        let optionsArea = WorkspaceOptionsArea(contents: contextual)
+        enclosingOptionsArea = optionsArea
+        optionsScroll.documentView = optionsArea
+        configureColors()
+        let panelsBar = NSStackView(views: UtilityPanels.Kind.allCases.map { kind in
             let button = Self.icon(kind.symbol, label: "Toggle \(kind.title)")
             button.tag = kind.rawValue
             button.target = self
             button.action = #selector(togglePanelButton(_:))
+            panelButtons[kind] = button
             return button
         })
-        panelButtons.spacing = 3
-        status.textColor = .secondaryLabelColor
-        status.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        panelsBar.spacing = 3
+        configureCommandToolbarButtons()
+        let commands = NSStackView(views: [command("doc.badge.plus", "New", #selector(NSDocumentController.newDocument(_:))),
+                                             command("folder", "Open", #selector(NSDocumentController.openDocument(_:))),
+                                             command("internaldrive", "Save", #selector(NSDocument.save(_:)), target: document),
+                                             undo, redo, applyCrop, rulersButton, gridButton])
+        commands.identifier = NSUserInterfaceItemIdentifier("Editor Commands")
+        commands.spacing = 3
+        for label in [status, coordinates, dimensions] {
+            label.textColor = .secondaryLabelColor
+            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            label.lineBreakMode = .byTruncatingTail
+        }
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         zoomLevel.textColor = .secondaryLabelColor
         zoomLevel.font = status.font
-        let footer = NSStackView(views: [status, zoomLevel, zoom])
-        footer.spacing = 8
-        updateStatus()
+        let footer = NSStackView(views: [coordinates, dimensions, zoom, zoomOut, zoomSlider, zoomIn, zoomLevel])
+        footer.identifier = NSUserInterfaceItemIdentifier("View Controls")
+        footer.spacing = 4
+        coordinates.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        dimensions.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        coordinates.setAccessibilityLabel("Cursor position")
+        dimensions.setAccessibilityLabel("Image dimensions")
+        let divider = NSBox()
+        divider.boxType = .separator
 
-        for view in [toolbarRows, panelButtons, scrollView, footer] {
+        for view in [commands, documentStrip, panelsBar, optionsScroll, divider, scrollView, status, footer] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            toolbarRows.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            toolbarRows.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            panelButtons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            panelButtons.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            scrollView.topAnchor.constraint(equalTo: toolbarRows.bottomAnchor, constant: 8),
+            documentStrip.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            documentStrip.leadingAnchor.constraint(equalTo: commands.trailingAnchor, constant: 8),
+            documentStrip.trailingAnchor.constraint(equalTo: panelsBar.leadingAnchor, constant: -8),
+            documentStrip.widthAnchor.constraint(greaterThanOrEqualToConstant: 1),
+            documentStrip.heightAnchor.constraint(equalToConstant: 30),
+            commands.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            commands.centerYAnchor.constraint(equalTo: documentStrip.centerYAnchor),
+            panelsBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            panelsBar.centerYAnchor.constraint(equalTo: documentStrip.centerYAnchor),
+            optionsScroll.topAnchor.constraint(equalTo: documentStrip.bottomAnchor, constant: 1),
+            optionsScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            optionsScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            optionsScroll.heightAnchor.constraint(equalToConstant: 32),
+            divider.topAnchor.constraint(equalTo: optionsScroll.bottomAnchor, constant: 2),
+            divider.leadingAnchor.constraint(equalTo: leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: trailingAnchor),
+            divider.heightAnchor.constraint(equalToConstant: 1),
+            scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -5),
-            footer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5)
+            scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -3),
+            status.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            status.trailingAnchor.constraint(lessThanOrEqualTo: footer.leadingAnchor, constant: -6),
+            status.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            footer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3)
         ])
+        selectTool(brush)
+        updateStatus()
     }
 
     required init?(coder: NSCoder) { nil }
@@ -224,6 +274,9 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         panels = UtilityPanels(parent: window, contents: [
             .tools: toolButtons, .colors: colorControls, .history: historyPanel, .layers: layersView
         ])
+        panels?.visibilityDidChange = { [weak self] in self?.updatePanelButtons() }
+        updatePanelButtons()
+        if let document { WorkspaceDocuments.shared.register(document: document, window: window, strip: documentStrip) }
         refreshImage()
         updateHistory(document?.undoManager)
     }
@@ -234,9 +287,84 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
 
     func resetPanels() { panels?.resetPositions() }
 
+    private func updatePanelButtons() {
+        for (kind, button) in panelButtons { button.state = isPanelShown(kind) ? .on : .off }
+    }
+
     @objc private func togglePanelButton(_ sender: NSButton) {
         if let kind = UtilityPanels.Kind(rawValue: sender.tag) { togglePanel(kind) }
     }
+
+    private func configureToolPalette() {
+        toolButtons.orientation = .vertical
+        toolButtons.alignment = .leading
+        toolButtons.spacing = 1
+        for (index, item) in tools.enumerated() {
+            let button = item.button
+            button.setButtonType(.pushOnPushOff)
+            button.target = self
+            button.action = #selector(selectTool(_:))
+            button.isBordered = false
+            button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            if index.isMultiple(of: 2) {
+                let row = NSStackView()
+                row.spacing = 1
+                toolButtons.addArrangedSubview(row)
+            }
+            (toolButtons.arrangedSubviews.last as? NSStackView)?.addArrangedSubview(button)
+        }
+    }
+
+    private func command(_ symbol: String, _ title: String, _ action: Selector, target: AnyObject? = nil) -> NSButton {
+        let button = Self.icon(symbol, label: title)
+        button.target = target
+        button.action = action
+        return button
+    }
+
+    private func configureCommandToolbarButtons() {
+        rulersButton.target = self
+        rulersButton.action = #selector(toggleRulersButton(_:))
+        gridButton.target = self
+        gridButton.action = #selector(toggleGridButton(_:))
+        for button in [rulersButton, gridButton] + Array(panelButtons.values) {
+            button.setButtonType(.pushOnPushOff)
+        }
+    }
+
+    private func configureRulers() {
+        let horizontal = WorkspaceRuler(scrollView: scrollView, canvas: canvas, orientation: .horizontalRuler)
+        let vertical = WorkspaceRuler(scrollView: scrollView, canvas: canvas, orientation: .verticalRuler)
+        scrollView.horizontalRulerView = horizontal
+        scrollView.verticalRulerView = vertical
+        scrollView.hasHorizontalRuler = true
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = false
+        horizontalRuler = horizontal
+        verticalRuler = vertical
+        canvas.pointerDidMove = { [weak self] point in
+            guard let self else { return }
+            let label = point.map { "\(Int($0.x)), \(Int($0.y))" } ?? ""
+            if coordinates.stringValue != label { coordinates.stringValue = label }
+            horizontalRuler?.pointer = point?.x
+            verticalRuler?.pointer = point?.y
+        }
+    }
+
+    func toggleRulers() {
+        scrollView.rulersVisible.toggle()
+        rulersButton.state = showsRulers ? .on : .off
+        canvas.updateViewport()
+    }
+
+    func toggleGrid() {
+        canvas.showsPixelGrid.toggle()
+        gridButton.state = showsGrid ? .on : .off
+    }
+
+    @objc private func toggleRulersButton(_ sender: NSButton) { toggleRulers() }
+    @objc private func toggleGridButton(_ sender: NSButton) { toggleGrid() }
 
     override func layout() {
         super.layout()
@@ -249,23 +377,30 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         canvas.updateViewport()
         layersView.refresh()
         updateStatus()
+        if let document { WorkspaceDocuments.shared.invalidateThumbnail(for: document) }
     }
 
     private func updateStatus() {
-        brushControls.isHidden = canvas.tool.drawsSelection || canvas.tool == .paintBucket || canvas.tool == .gradient
+        brushControls.isHidden = ![CanvasView.Tool.brush, .eraser, .cloneStamp, .recolor, .lineCurve, .shapes].contains(canvas.tool)
         selectionModes.isHidden = !canvas.tool.drawsSelection
         floodControls.isHidden = !canvas.tool.usesFlood
         applyCrop.isEnabled = canvas.cropRect != nil
-        finish.isHidden = !canvas.tool.transformsSelection && !canvas.tool.usesFlood && canvas.tool != .gradient
-        finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingFloodEdit || canvas.hasPendingGradient
+        let supportsFinish = [CanvasView.Tool.gradient, .text, .lineCurve, .shapes].contains(canvas.tool)
+        finish.isHidden = !canvas.tool.transformsSelection && !canvas.tool.usesFlood && !supportsFinish
+        finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingFloodEdit || canvas.hasPendingGradient || canvas.hasPendingDrawing
+        toolOptions.update()
+        enclosingOptionsArea?.refreshSize()
         updateUndoButtons(document?.undoManager)
-        let dimensions = document?.image.map { "\($0.width) × \($0.height) px" } ?? ""
+        let image = document?.image
+        dimensions.stringValue = image.map { "\($0.width) × \($0.height) px" } ?? ""
+        horizontalRuler?.pixelCount = image?.width ?? 0
+        verticalRuler?.pixelCount = image?.height ?? 0
         if let angle = canvas.rotationDegrees, abs(angle) >= 0.05 {
-            status.stringValue = "\(Double(angle).formatted(.number.precision(.fractionLength(0...1))))°  ·  \(dimensions)"
+            status.stringValue = "\(Double(angle).formatted(.number.precision(.fractionLength(0...1))))°"
         } else if let rect = canvas.imageSelection {
-            status.stringValue = "\(Int(rect.width)) × \(Int(rect.height)) at \(Int(rect.minX)), \(Int(rect.minY))  ·  \(dimensions)"
+            status.stringValue = "\(Int(rect.width)) × \(Int(rect.height)) at \(Int(rect.minX)), \(Int(rect.minY))"
         } else {
-            status.stringValue = dimensions
+            status.stringValue = ""
         }
     }
 
@@ -315,7 +450,10 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             let selected = button === sender
             button.state = selected ? .on : .off
             button.contentTintColor = selected ? .controlAccentColor : .labelColor
-            if selected { canvas.tool = tool }
+            if selected {
+                toolName.stringValue = button.toolTip ?? ""
+                canvas.tool = tool
+            }
         }
         canvas.window?.makeFirstResponder(canvas)
     }
@@ -325,11 +463,58 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         if zoom.selectedSegment != segment { zoom.selectedSegment = segment }
         let scale = Double(canvas.displayedZoomPercent) / 100
         let label = scale.formatted(.percent.precision(.fractionLength(0...1)))
-        if zoomLevel.stringValue != label { zoomLevel.stringValue = label }
+        if zoomLevel.currentEditor() == nil, zoomLevel.stringValue != label {
+            zoomLevel.stringValue = label
+        }
+        zoomSlider.integerValue = CanvasView.zoomSteps.indices.min {
+            abs(CanvasView.zoomSteps[$0] - canvas.displayedZoomPercent) < abs(CanvasView.zoomSteps[$1] - canvas.displayedZoomPercent)
+        } ?? 0
+        zoomIn.isEnabled = WorkspaceZoom.next(from: canvas.displayedZoomPercent, by: 1) != nil
+        zoomOut.isEnabled = WorkspaceZoom.next(from: canvas.displayedZoomPercent, by: -1) != nil
+        horizontalRuler?.needsDisplay = true
+        verticalRuler?.needsDisplay = true
+    }
+
+    private func configureZoomControls() {
+        zoomSlider.minValue = 0
+        zoomSlider.maxValue = Double(CanvasView.zoomSteps.count - 1)
+        zoomSlider.target = self
+        zoomSlider.action = #selector(changeZoomSlider(_:))
+        zoomSlider.isContinuous = true
+        zoomSlider.controlSize = .small
+        zoomSlider.setAccessibilityLabel("Zoom level")
+        zoomSlider.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        zoomLevel.controlSize = .small
+        zoomLevel.alignment = .right
+        zoomLevel.target = self
+        zoomLevel.action = #selector(changeZoomLevel(_:))
+        zoomLevel.setAccessibilityLabel("Zoom percentage")
+        zoomLevel.widthAnchor.constraint(equalToConstant: 58).isActive = true
+        for (button, direction) in [(zoomOut, -1), (zoomIn, 1)] {
+            button.tag = direction
+            button.target = self
+            button.action = #selector(stepZoom(_:))
+        }
     }
 
     @objc private func changeZoom(_ sender: NSSegmentedControl) {
         canvas.setZoom(sender.selectedSegment == 0 ? nil : 100)
+    }
+
+    @objc private func changeZoomSlider(_ sender: NSSlider) {
+        canvas.setZoom(CanvasView.zoomSteps[Int(sender.doubleValue.rounded())])
+    }
+
+    @objc private func changeZoomLevel(_ sender: NSTextField) {
+        let requestedPercent = WorkspaceZoom.parse(sender.stringValue, locale: .current)
+        window?.makeFirstResponder(canvas)
+        if let requestedPercent { canvas.setZoom(requestedPercent) }
+        updateZoom()
+    }
+
+    @objc private func stepZoom(_ sender: NSButton) {
+        guard let next = WorkspaceZoom.next(from: canvas.displayedZoomPercent, by: sender.tag) else { return }
+        canvas.setZoom(next)
     }
 
     @objc private func changeSize(_ sender: NSPopUpButton) {
@@ -399,13 +584,88 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     @objc private func changeColor(_ sender: NSColorWell) {
-        if sender === secondaryColor { canvas.secondaryColor = sender.color }
-        else { canvas.brushColor = sender.color }
+        colorSlot.selectItem(at: sender === secondaryColor ? 1 : 0)
+        applyColors()
     }
 
     @objc private func pickSwatch(_ sender: NSButton) {
-        color.color = swatchColors[sender.tag].1
-        changeColor(color)
+        activeColorWell.color = swatchColors[sender.tag].1
+        applyColors()
+    }
+
+    private var activeColorWell: NSColorWell { colorSlot.indexOfSelectedItem == 1 ? secondaryColor : color }
+
+    private func configureColors() {
+        colorControls.orientation = .vertical
+        colorControls.alignment = .leading
+        colorControls.spacing = 3
+        let colorWells = NSStackView(views: [color, secondaryColor])
+        colorWells.spacing = 4
+        let swap = command("arrow.left.arrow.right", "Swap Primary and Secondary Colors", #selector(swapColors(_:)), target: self)
+        let reset = command("circle.lefthalf.filled", "Reset to Black and White", #selector(resetColors(_:)), target: self)
+        let wellsRow = NSStackView(views: [colorWells, swap, reset])
+        wellsRow.spacing = 3
+        colorControls.addArrangedSubview(wellsRow)
+
+        colorSlot.addItems(withTitles: ["Primary", "Secondary"])
+        colorSlot.controlSize = .small
+        colorSlot.setAccessibilityLabel("Active color")
+        colorSlot.target = self
+        colorSlot.action = #selector(selectColorSlot(_:))
+        hexColor.controlSize = .small
+        hexColor.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        hexColor.placeholderString = "RRGGBBAA"
+        hexColor.toolTip = "Hex RGB or RGBA"
+        hexColor.setAccessibilityLabel("Hex color")
+        hexColor.target = self
+        hexColor.action = #selector(updateColorFromHex(_:))
+        hexColor.widthAnchor.constraint(equalToConstant: 82).isActive = true
+        let colorValues = NSStackView(views: [colorSlot, hexColor])
+        colorValues.spacing = 4
+        colorControls.addArrangedSubview(colorValues)
+
+        let swatches = NSStackView()
+        swatches.spacing = 2
+        for (index, swatch) in swatchColors.enumerated() {
+            let button = Self.icon("square.fill", label: swatch.0)
+            button.isBordered = false
+            button.contentTintColor = swatch.1
+            button.tag = index
+            button.target = self
+            button.action = #selector(pickSwatch(_:))
+            button.widthAnchor.constraint(equalToConstant: 14).isActive = true
+            swatches.addArrangedSubview(button)
+        }
+        colorControls.addArrangedSubview(swatches)
+        updateHexColor()
+    }
+
+    private func applyColors() {
+        if canvas.brushColor != color.color { canvas.brushColor = color.color }
+        if canvas.secondaryColor != secondaryColor.color { canvas.secondaryColor = secondaryColor.color }
+        updateHexColor()
+    }
+
+    private func updateHexColor() { hexColor.stringValue = WorkspaceColorHex.format(activeColorWell.color) }
+
+    @objc private func selectColorSlot(_ sender: NSPopUpButton) { updateHexColor() }
+
+    @objc private func updateColorFromHex(_ sender: NSTextField) {
+        if let parsed = WorkspaceColorHex.parse(sender.stringValue) { activeColorWell.color = parsed }
+        applyColors()
+    }
+
+    @objc private func swapColors(_ sender: NSButton) {
+        let primary = color.color
+        color.color = secondaryColor.color
+        secondaryColor.color = primary
+        applyColors()
+    }
+
+    @objc private func resetColors(_ sender: NSButton) {
+        color.color = .black
+        secondaryColor.color = .white
+        applyColors()
     }
 
     static func icon(_ symbol: String, label: String) -> NSButton {
@@ -441,4 +701,65 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         image.isTemplate = true
         return image
     }()
+}
+
+private final class WorkspaceOptionsArea: NSView {
+    private let contents: NSStackView
+
+    init(contents: NSStackView) {
+        self.contents = contents
+        super.init(frame: .zero)
+        contents.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(contents)
+        NSLayoutConstraint.activate([
+            contents.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contents.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        refreshSize()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func refreshSize() {
+        let width = contents.arrangedSubviews.filter { !$0.isHidden }.reduce(CGFloat(0)) { partial, view in
+            partial + view.fittingSize.width + contents.spacing
+        }
+        let size = CGSize(width: ceil(width), height: 32)
+        if frame.size != size { setFrameSize(size) }
+    }
+}
+
+enum WorkspaceZoom {
+    static func next(from percent: CGFloat, by direction: Int) -> CGFloat? {
+        if direction > 0 { return CanvasView.zoomSteps.first { $0 > percent + 0.0001 } }
+        return CanvasView.zoomSteps.last { $0 < percent - 0.0001 }
+    }
+
+    static func parse(_ string: String, locale: Locale) -> CGFloat? {
+        let input = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = input.hasSuffix("%") ? String(input.dropLast()).trimmingCharacters(in: .whitespaces) : input
+        let normalized = value.replacingOccurrences(of: locale.decimalSeparator ?? ".", with: ".")
+        guard normalized.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }),
+              let number = Double(normalized), number.isFinite,
+              let minimum = CanvasView.zoomSteps.first, let maximum = CanvasView.zoomSteps.last,
+              number >= minimum, number <= maximum else { return nil }
+        return CGFloat(number)
+    }
+}
+
+enum WorkspaceColorHex {
+    static func parse(_ string: String) -> NSColor? {
+        let input = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hex = input.hasPrefix("#") ? input.dropFirst() : input[...]
+        guard [6, 8].contains(hex.count), hex.allSatisfy(\.isHexDigit), let value = UInt32(hex, radix: 16) else { return nil }
+        let rgba = hex.count == 6 ? (value << 8) | 0xFF : value
+        func channel(_ offset: Int) -> CGFloat { CGFloat((rgba >> offset) & 0xFF) / 255 }
+        return NSColor(srgbRed: channel(24), green: channel(16), blue: channel(8), alpha: channel(0))
+    }
+
+    static func format(_ color: NSColor) -> String {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return "" }
+        let components = [rgb.redComponent, rgb.greenComponent, rgb.blueComponent, rgb.alphaComponent]
+        return components.map { String(format: "%02X", Int((min(1, max(0, $0)) * 255).rounded())) }.joined()
+    }
 }

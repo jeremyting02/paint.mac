@@ -1,0 +1,203 @@
+import Foundation
+
+extension RasterFilter {
+    static let blurEffects: [Self] = [
+        Self("Fragment Blur", category: "Blurs", [
+            .init("Fragment Count", 2...50, 4), .init("Distance", 0...100, 8), .init("Rotation", 0...360, 0)
+        ], render: { bytes, width, height, values, cancelled in
+            let distance = values[1]
+            guard distance > 0 else { return bytes }
+            let phase = values[2] * .pi / 180
+            let count = Int(values[0])
+            let offsets = (0..<count).map { fragment in
+                let angle = phase + Double(fragment) * 2 * .pi / Double(count)
+                return (x: Int((distance * cos(angle)).rounded()), y: Int((distance * sin(angle)).rounded()))
+            }
+            return renderBlur(bytes, width: width, height: height, cancelled: cancelled) { raster, x, y in
+                var sum = raster.at(x, y)
+                for offset in offsets { sum += raster.at(x + offset.x, y + offset.y) }
+                return sum / Double(count + 1)
+            }
+        }),
+        Self("Radial Blur", category: "Blurs", [
+            .init("Angle", 0...360, 15, step: 0.1), .init("Center X", 0...100, 50), .init("Center Y", 0...100, 50),
+            .init("Quality", 1...5, 2)
+        ], render: { bytes, width, height, values, cancelled in
+            guard values[0] > 0 else { return bytes }
+            let originX = Double(width - 1) * values[1] / 100
+            let originY = Double(height - 1) * values[2] / 100
+            let steps = 2 * Int(values[3]) * Int(values[3]) + 1
+            let spread = values[0] * .pi / 180
+            let rotations = (0..<steps).map { step in
+                let angle = spread * (Double(step) / Double(steps - 1) - 0.5)
+                return (sine: sin(angle), cosine: cos(angle))
+            }
+            return renderBlur(bytes, width: width, height: height, cancelled: cancelled) { raster, x, y in
+                let dx = Double(x) - originX, dy = Double(y) - originY
+                var sum = Pixel.zero
+                for rotation in rotations {
+                    let px = originX + rotation.cosine * dx - rotation.sine * dy
+                    let py = originY + rotation.sine * dx + rotation.cosine * dy
+                    sum += raster.interpolated(px, py)
+                }
+                return sum / Double(steps)
+            }
+        }),
+        Self("Surface Blur", category: "Blurs", [
+            .init("Radius", 0...100, 6), .init("Threshold", 0...255, 25)
+        ], render: { bytes, width, height, values, cancelled in
+            let radius = Int(values[0]), threshold = values[1] / 255
+            guard radius > 0, threshold > 0 else { return bytes }
+            let offsets = neighborhood(radius: radius, density: 4).map { offset in
+                let distanceSquared = Double(offset.x * offset.x + offset.y * offset.y)
+                return (x: offset.x, y: offset.y, weight: exp(-2 * distanceSquared / Double(radius * radius)))
+            }
+            return renderBlur(bytes, width: width, height: height, cancelled: cancelled) { raster, x, y in
+                let center = raster.at(x, y)
+                var sum = Pixel.zero, totalWeight = 0.0
+                for offset in offsets {
+                    let sample = raster.at(x + offset.x, y + offset.y)
+                    let delta = sample - center
+                    let difference = max(abs(delta.x), abs(delta.y), abs(delta.z), abs(delta.w))
+                    if difference >= threshold { continue }
+                    let weight = offset.weight * (1 - difference / threshold)
+                    sum += sample * weight
+                    totalWeight += weight
+                }
+                return sum / totalWeight
+            }
+        }),
+        Self("Median Blur", category: "Blurs", [
+            .init("Radius", 0...100, 2), .init("Percentile", 0...100, 50), .init("Quality", 1...5, 3)
+        ], render: { bytes, width, height, values, cancelled in
+            let radius = Int(values[0])
+            guard radius > 0 else { return bytes }
+            let offsets = neighborhood(radius: radius, density: Int(values[2]) + 1)
+            return renderQuantile(bytes, width: width, height: height, offsetSets: [offsets],
+                                  percentile: values[1], cancelled: cancelled)
+        }),
+        Self("Sketch Blur", category: "Blurs", [
+            .init("Radius", 0...100, 8), .init("Percentile", 0...100, 50), .init("Smoothness", 1...8, 3)
+        ], render: { bytes, width, height, values, cancelled in
+            let radius = Int(values[0])
+            guard radius > 0 else { return bytes }
+            // Vary the sampling pattern by image region so flat areas stay stable while edges look irregular.
+            let count = 9 + Int(values[2]) * 6
+            let sets = (0..<8).map { phase in sketchOffsets(radius: radius, count: count, phase: phase) }
+            return renderQuantile(bytes, width: width, height: height, offsetSets: sets,
+                                  percentile: values[1], cancelled: cancelled)
+        })
+    ]
+
+    private struct BlurRaster {
+        let bytes: UnsafeRawBufferPointer
+        let width: Int
+        let height: Int
+
+        func word(_ x: Int, _ y: Int) -> UInt32 {
+            let column = min(width - 1, max(0, x)), row = min(height - 1, max(0, y))
+            return UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: (row * width + column) * 4, as: UInt32.self))
+        }
+
+        func at(_ x: Int, _ y: Int) -> Pixel {
+            let value = word(x, y)
+            let alpha = Double(value >> 24) / 255
+            let scale = alpha / 255
+            return Pixel(Double(value & 255) * scale, Double((value >> 8) & 255) * scale,
+                         Double((value >> 16) & 255) * scale, alpha)
+        }
+
+        func interpolated(_ x: Double, _ y: Double) -> Pixel {
+            let ix = Int(floor(x)), iy = Int(floor(y))
+            let dx = x - Double(ix), dy = y - Double(iy)
+            let top = at(ix, iy) * (1 - dx) + at(ix + 1, iy) * dx
+            let bottom = at(ix, iy + 1) * (1 - dx) + at(ix + 1, iy + 1) * dx
+            return top * (1 - dy) + bottom * dy
+        }
+    }
+
+    private static func renderBlur(_ bytes: Data, width: Int, height: Int, cancelled: () -> Bool,
+                                   sample: (BlurRaster, Int, Int) -> Pixel) -> Data? {
+        var result = bytes
+        let completed = result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+            bytes.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                let raster = BlurRaster(bytes: source, width: width, height: height)
+                for y in 0..<height {
+                    for x in 0..<width {
+                        if x & 127 == 0, cancelled() { return false }
+                        let value = sample(raster, x, y)
+                        let offset = (y * width + x) * 4
+                        target[offset + 3] = blurByte(value.w)
+                        for channel in 0..<3 {
+                            target[offset + channel] = value.w > 0 ? blurByte(value[channel] / value.w) : 0
+                        }
+                    }
+                }
+                return true
+            }
+        }
+        return completed ? result : nil
+    }
+
+    private static func blurByte(_ component: Double) -> UInt8 {
+        UInt8((min(1, max(0, component)) * 255).rounded())
+    }
+
+    private static func neighborhood(radius: Int, density: Int) -> [(x: Int, y: Int)] {
+        let spacing = max(1, (radius + density - 1) / density)
+        let span = radius / spacing
+        var offsets: [(x: Int, y: Int)] = []
+        for row in -span...span {
+            for column in -span...span {
+                let x = column * spacing, y = row * spacing
+                if x * x + y * y <= radius * radius { offsets.append((x, y)) }
+            }
+        }
+        return offsets
+    }
+
+    private static func sketchOffsets(radius: Int, count: Int, phase: Int) -> [(x: Int, y: Int)] {
+        var offsets = [(x: 0, y: 0)]
+        let goldenAngle = Double.pi * (3 - sqrt(5.0))
+        for index in 0..<count {
+            let angle = Double(index) * goldenAngle + Double(phase) * .pi / 4
+            let distance = Double(radius) * sqrt((Double(index) + 0.5) / Double(count))
+            offsets.append((Int((distance * cos(angle)).rounded()), Int((distance * sin(angle)).rounded())))
+        }
+        return offsets
+    }
+
+    private static func renderQuantile(_ bytes: Data, width: Int, height: Int,
+                                       offsetSets: [[(x: Int, y: Int)]], percentile: Double,
+                                       cancelled: () -> Bool) -> Data? {
+        var result = bytes
+        var ordered = [UInt64]()
+        ordered.reserveCapacity(offsetSets[0].count)
+        let completed = result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+            bytes.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                let raster = BlurRaster(bytes: source, width: width, height: height)
+                for y in 0..<height {
+                    for x in 0..<width {
+                        if x & 127 == 0, cancelled() { return false }
+                        let region = ((x / 4) &* 19) ^ ((y / 4) &* 23)
+                        let offsets = offsetSets[region % offsetSets.count]
+                        ordered.removeAll(keepingCapacity: true)
+                        for offset in offsets {
+                            let color = raster.word(x + offset.x, y + offset.y)
+                            let blue = color & 255, green = (color >> 8) & 255, red = (color >> 16) & 255
+                            let alpha = color >> 24
+                            let luminance = (54 * red + 183 * green + 19 * blue) * alpha
+                            ordered.append(UInt64(luminance) << 32 | UInt64(color))
+                        }
+                        ordered.sort()
+                        let quantile = Int((percentile / 100 * Double(ordered.count - 1)).rounded())
+                        let selected = UInt32(truncatingIfNeeded: ordered[quantile]).littleEndian
+                        target.storeBytes(of: selected, toByteOffset: (y * width + x) * 4, as: UInt32.self)
+                    }
+                }
+                return true
+            }
+        }
+        return completed ? result : nil
+    }
+}

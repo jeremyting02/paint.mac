@@ -1,6 +1,5 @@
 import Foundation
-import ImageIO
-import UniformTypeIdentifiers
+import CoreGraphics
 
 struct PaintLayer {
     var name: String
@@ -196,19 +195,53 @@ struct SelectedPixelsTransform {
 }
 
 struct LayerStack {
-    static let limit = 8
+    private static let layerLimit = 128
+    private static let documentPixelLimit = 64 * 1024 * 1024
+
     static func supportsCanvas(width: Int, height: Int) -> Bool {
         (1...4096).contains(width) && (1...4096).contains(height) && width * height <= 8_388_608
+    }
+
+    static func layerCapacity(width: Int, height: Int) -> Int {
+        guard supportsCanvas(width: width, height: height) else { return 0 }
+        return min(layerLimit, documentPixelLimit / (width * height))
     }
     var layers: [PaintLayer] // Bottom to top.
     var active: Int
     var metadata: [PDNMetadata] = []
 
     var activeLayer: PaintLayer { layers[active] }
-    var canDuplicate: Bool { layers.count < Self.limit }
+    var remainingLayerCapacity: Int {
+        Self.layerCapacity(width: activeLayer.image.width, height: activeLayer.image.height) - layers.count
+    }
+    var canDuplicate: Bool { remainingLayerCapacity > 0 }
     var canMergeDown: Bool { active > 0 }
     var needsBlendComposite: Bool {
         layers.lazy.filter { $0.isVisible && $0.opacity > 0 }.dropFirst().contains { $0.blendMode != .normal }
+    }
+
+    static func blank(width: Int, height: Int) -> Self? {
+        guard supportsCanvas(width: width, height: height),
+              let image = makeBitmap(width: width, height: height)?.makeImage() else { return nil }
+        return Self(layers: [PaintLayer(name: "Background", image: image, isBackground: true)], active: 0)
+    }
+
+    mutating func insertBlankLayer() throws {
+        guard canDuplicate else { throw PDNError.tooLarge }
+        let dimensions = activeLayer.image
+        guard let image = Self.makeBitmap(width: dimensions.width, height: dimensions.height)?.makeImage()
+        else { throw CocoaError(.fileReadUnknown) }
+        let names = Set(layers.map(\.name))
+        var number = 1
+        while names.contains("Layer \(number)") { number += 1 }
+        active += 1
+        layers.insert(PaintLayer(name: "Layer \(number)", image: image), at: active)
+    }
+
+    func copyingFlattened(preview: PaintLayer) -> PaintLayer? {
+        var background = self
+        background.layers[active] = preview
+        return background.flattenedLayer()
     }
 
     mutating func duplicateActiveLayer() -> Bool {
@@ -244,7 +277,7 @@ struct LayerStack {
         let combined = layers + incoming
         let width = combined.reduce(0) { max($0, $1.image.width) }
         let height = combined.reduce(0) { max($0, $1.image.height) }
-        guard combined.count <= Self.limit, Self.supportsCanvas(width: width, height: height) else {
+        guard combined.count <= Self.layerCapacity(width: width, height: height) else {
             throw PDNError.tooLarge
         }
         layers = try combined.map { layer in
@@ -297,66 +330,5 @@ struct LayerStack {
         CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-    }
-}
-
-enum PaintFiles {
-    static func readClipboardImage(_ data: Data) -> CGImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              LayerStack.supportsCanvas(width: width, height: height),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { return nil }
-        return image
-    }
-
-    static func layersForImport(from url: URL) throws -> [PaintLayer] {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        let name = url.deletingPathExtension().lastPathComponent
-        let layers = if url.pathExtension.lowercased() == "pdn" {
-            try PDNFile.read(data).layers
-        } else {
-            [PaintLayer(name: "Background", image: try readPNG(data))]
-        }
-        return layers.map { layer in
-            var imported = layer
-            imported.name = "\(name): \(layer.name)"
-            imported.isBackground = false
-            return imported
-        }
-    }
-
-    static func readPNG(_ data: Data) throws -> CGImage {
-        let corrupt = CocoaError(.fileReadCorruptFile, userInfo: [
-            NSLocalizedDescriptionKey: "The file could not be read as a static PNG image."
-        ])
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetType(source) as String? == UTType.png.identifier,
-              CGImageSourceGetCount(source) == 1,
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0 else { throw corrupt }
-
-        guard LayerStack.supportsCanvas(width: width, height: height) else {
-            throw CocoaError(.fileReadTooLarge, userInfo: [
-                NSLocalizedDescriptionKey: "PNG images can be at most 4,096 pixels per side and 8,388,608 pixels total."
-            ])
-        }
-
-        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { throw corrupt }
-        return image
-    }
-
-    static func pngData(_ image: CGImage) throws -> Data {
-        let bytes = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(bytes, UTType.png.identifier as CFString, 1, nil)
-        else { throw CocoaError(.fileWriteUnknown) }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
-        return bytes as Data
     }
 }

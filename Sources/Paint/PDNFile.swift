@@ -29,8 +29,7 @@ enum PDNFile {
         let height = try PDNRecords.integer(document["height"])
         let list = try graph.fields(document["layers"], named: "PaintDotNet.LayerList")
         let count = try PDNRecords.integer(list["ArrayList+_size"])
-        guard LayerStack.supportsCanvas(width: width, height: height),
-              (1...LayerStack.limit).contains(count) else { throw PDNError.tooLarge }
+        guard count > 0, count <= LayerStack.layerCapacity(width: width, height: height) else { throw PDNError.tooLarge }
         let items = try graph.array(list["ArrayList+_items"])
         guard items.count >= count else { throw PDNError.invalid }
         let documentMetadata = try metadata(document["userMetadataItems"], in: graph)
@@ -152,6 +151,7 @@ enum PDNFile {
     static func write(_ stack: LayerStack) throws -> Data {
         let width = stack.activeLayer.image.width
         let height = stack.activeLayer.image.height
+        guard stack.layers.count <= LayerStack.layerCapacity(width: width, height: height) else { throw PDNError.tooLarge }
         var writer = PDNWriter(width: width, height: height, stack: stack)
         guard writer.data.count <= graphLimit else { throw PDNError.unsupported("oversized project metadata") }
         for layer in stack.layers {

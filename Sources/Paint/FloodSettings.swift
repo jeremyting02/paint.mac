@@ -203,7 +203,7 @@ private struct FloodRegion {
 }
 
 extension PaintLayer {
-    func filling(_ outline: SelectionOutline, blue: UInt8, green: UInt8, red: UInt8) -> PaintLayer? {
+    func filling(_ outline: SelectionOutline, blue: UInt8, green: UInt8, red: UInt8, alpha: UInt8 = 255) -> PaintLayer? {
         let bounds = outline.bounds.integral
         let rect = CGRect(x: bounds.minX, y: CGFloat(image.height) - bounds.maxY,
                           width: bounds.width, height: bounds.height)
@@ -211,11 +211,21 @@ extension PaintLayer {
               var pixels = straightPixels else { return nil }
         let width = Int(rect.width)
         let origin = Int(rect.minY) * image.width + Int(rect.minX)
-        let fill = (UInt32(blue) | UInt32(green) << 8 | UInt32(red) << 16 | 0xff000000).littleEndian
+        guard alpha != 0 else { return nil }
+        let source = Int(alpha) * 255
+        let channels = [blue, green, red]
         let changed = pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
             var changed = false
             for index in mask.indices where mask[index] != 0 {
                 let offset = (origin + index / width * image.width + index % width) * 4
+                let backdrop = Int(target[offset + 3]) * (255 - Int(alpha))
+                let total = source + backdrop
+                var fill = UInt32((total + 127) / 255) << 24
+                for (channel, value) in channels.enumerated() {
+                    let sum = Int(value) * source + Int(target[offset + channel]) * backdrop
+                    fill |= UInt32((sum + total / 2) / total) << (8 * channel)
+                }
+                fill = fill.littleEndian
                 guard target.loadUnaligned(fromByteOffset: offset, as: UInt32.self) != fill else { continue }
                 target.storeBytes(of: fill, toByteOffset: offset, as: UInt32.self)
                 changed = true

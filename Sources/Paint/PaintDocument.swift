@@ -17,7 +17,7 @@ final class PaintDocument: NSDocument {
     private static let pixelClipboardTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .init(UTType.jpeg.identifier)]
     private(set) var stack: LayerStack?
     var image: CGImage? { stack?.activeLayer.image }
-    private weak var editor: EditorView?
+    private(set) weak var editor: EditorView?
     private(set) var historyEntries = ["New Image"]
     private(set) var historyPosition = 0
 
@@ -91,11 +91,14 @@ final class PaintDocument: NSDocument {
 
     @objc func cut(_ sender: Any?) { copyPixels(to: .general, cutting: true) }
     @objc func copy(_ sender: Any?) { copyPixels(to: .general, cutting: false) }
+    @objc func copyFlattened(_ sender: Any?) { copyPixels(to: .general, cutting: false, flattened: true) }
     @objc func paste(_ sender: Any?) { pastePixels(from: .general) }
+    @objc func pasteIntoNewLayer(_ sender: Any?) { pastePixels(from: .general, intoNewLayer: true) }
+    @objc func pasteIntoNewImage(_ sender: Any?) { pasteNewImage(from: .general) }
 
-    func copyPixels(to clipboard: NSPasteboard, cutting: Bool) {
-        guard let canvas = editor?.canvas, canvas.canCopyPixels, let layer = canvas.copyableLayer else { return }
-        var copied = layer
+    func copyPixels(to clipboard: NSPasteboard, cutting: Bool, flattened: Bool = false) {
+        guard let canvas = editor?.canvas, canvas.canCopyPixels, let layer = canvas.copyableLayer,
+              var copied = flattened ? stack?.copyingFlattened(preview: layer) : layer else { return }
         var cutLayer: PaintLayer?
         if let outline = canvas.copyableOutline {
             let bounds = outline.bounds.integral
@@ -123,25 +126,99 @@ final class PaintDocument: NSDocument {
         }
     }
 
-    func pastePixels(from clipboard: NSPasteboard) {
-        guard let canvas = editor?.canvas, stack?.activeLayer.isVisible == true else { return }
+    static func image(on clipboard: NSPasteboard) -> CGImage? {
         for type in Self.pixelClipboardTypes {
             if let data = clipboard.data(forType: type), let image = PaintFiles.readClipboardImage(data) {
-                canvas.pastePixels(image)
-                return
+                return image
             }
         }
-        NSSound.beep()
+        return nil
+    }
+
+    func pastePixels(from clipboard: NSPasteboard, intoNewLayer: Bool = false) {
+        guard let stack, editor != nil,
+              intoNewLayer ? stack.canDuplicate : stack.activeLayer.isVisible else { return }
+        guard let pasted = Self.image(on: clipboard) else { NSSound.beep(); return }
+        let requiredWidth = max(pasted.width, stack.activeLayer.image.width)
+        let requiredHeight = max(pasted.height, stack.activeLayer.image.height)
+        if requiredWidth == stack.activeLayer.image.width && requiredHeight == stack.activeLayer.image.height {
+            performPaste(pasted, intoNewLayer: intoNewLayer, expand: false)
+        } else if let window = windowForSheet, window.attachedSheet == nil {
+            let alert = NSAlert()
+            alert.messageText = "The clipboard image is larger than the canvas."
+            let requiredLayers = stack.layers.count + (intoNewLayer ? 1 : 0)
+            let canExpand = requiredLayers <= LayerStack.layerCapacity(width: requiredWidth, height: requiredHeight)
+            if canExpand { alert.addButton(withTitle: "Expand Canvas") }
+            alert.addButton(withTitle: "Keep Canvas Size")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { [weak self] response in
+                if canExpand && response == .alertFirstButtonReturn {
+                    self?.performPaste(pasted, intoNewLayer: intoNewLayer, expand: true)
+                } else if response == (canExpand ? .alertSecondButtonReturn : .alertFirstButtonReturn) {
+                    self?.performPaste(pasted, intoNewLayer: intoNewLayer, expand: false)
+                }
+            }
+        }
+    }
+
+    func performPaste(_ pasted: CGImage, intoNewLayer: Bool, expand: Bool) {
+        guard let canvas = editor?.canvas else { return }
+        if !intoNewLayer && !expand {
+            canvas.pastePixels(pasted)
+            return
+        }
+        canvas.finishSelection()
+        guard var prepared = stack else { return }
+        do {
+            if expand {
+                prepared = try prepared.resizedCanvas(width: max(prepared.activeLayer.image.width, pasted.width),
+                                                       height: max(prepared.activeLayer.image.height, pasted.height),
+                                                       anchor: .topLeft)
+            }
+            if intoNewLayer { try prepared.insertBlankLayer() }
+            canvas.pastePixels(pasted, replacingStack: prepared, fromTopLeft: expand,
+                               actionName: intoNewLayer ? "Paste into New Layer" : "Paste")
+        } catch {
+            presentError(error)
+        }
+    }
+
+    func pasteNewImage(from clipboard: NSPasteboard) {
+        guard let pasted = Self.image(on: clipboard), let document = Self.makePastedImage(from: pasted) else {
+            NSSound.beep()
+            return
+        }
+        document.showWindows()
+    }
+
+    static func makePastedImage(from pasted: CGImage) -> PaintDocument? {
+        guard let blank = LayerStack.blank(width: pasted.width, height: pasted.height) else { return nil }
+        let document = PaintDocument()
+        document.fileType = Self.projectType
+        document.stack = blank
+        NSDocumentController.shared.addDocument(document)
+        document.makeWindowControllers()
+        document.editor?.canvas.pastePixels(pasted, fromTopLeft: true, actionName: "Paste into New Image")
+        return document
     }
 
     @objc func pasteSelection(_ sender: Any?) {
-        guard let canvas = editor?.canvas, let outline = clipboardOutline else { return }
-        canvas.finishSelection()
-        commitSelection(outline, actionName: "Paste Selection")
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        let tag = (sender as? NSMenuItem)?.tag ?? 0
+        guard SelectionOutline.Mode.allCases.indices.contains(tag) else { return }
+        pasteSelection(text, mode: SelectionOutline.Mode.allCases[tag])
     }
 
-    private var clipboardOutline: SelectionOutline? {
-        guard let image, let text = NSPasteboard.general.string(forType: .string) else { return nil }
+    func pasteSelection(_ text: String, mode: SelectionOutline.Mode) {
+        guard let canvas = editor?.canvas, let outline = clipboardOutline(from: text) else { return }
+        canvas.finishSelection()
+        let combined = mode.applying(outline, to: canvas.selectionOutline)
+        let name = mode == .replace ? "Paste Selection" : "Paste Selection (\(mode.rawValue))"
+        commitSelection(combined, actionName: name)
+    }
+
+    private func clipboardOutline(from text: String) -> SelectionOutline? {
+        guard let image else { return nil }
         let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         return SelectionOutline(clipboardText: text, imageHeight: image.height)?.clipped(to: bounds)
     }
@@ -155,14 +232,7 @@ final class PaintDocument: NSDocument {
 
     func addLayer() {
         editor?.canvas.finishSelection()
-        guard var next = stack, next.layers.count < LayerStack.limit else { return }
-        let image = next.activeLayer.image
-        guard let blank = LayerStack.makeBitmap(width: image.width, height: image.height)?.makeImage() else { return }
-        let names = Set(next.layers.map(\.name))
-        var number = 1
-        while names.contains("Layer \(number)") { number += 1 }
-        next.active += 1
-        next.layers.insert(PaintLayer(name: "Layer \(number)", image: blank), at: next.active)
+        guard var next = stack, (try? next.insertBlankLayer()) != nil else { return }
         applyEdit(replacingStack: next, actionName: "Add Layer")
     }
 
@@ -175,10 +245,23 @@ final class PaintDocument: NSDocument {
     }
 
     func moveLayer(by offset: Int) {
+        guard let active = stack?.active else { return }
+        reorderLayer(at: active, to: active + offset)
+    }
+
+    func reorderLayer(at source: Int, to destination: Int) {
         editor?.canvas.finishSelection()
-        guard var next = stack, next.layers.indices.contains(next.active + offset) else { return }
-        next.layers.swapAt(next.active, next.active + offset)
-        next.active += offset
+        guard var next = stack, source != destination, next.layers.indices.contains(source),
+              next.layers.indices.contains(destination) else { return }
+        let moved = next.layers.remove(at: source)
+        next.layers.insert(moved, at: destination)
+        if next.active == source {
+            next.active = destination
+        } else if source < next.active && next.active <= destination {
+            next.active -= 1
+        } else if destination <= next.active && next.active < source {
+            next.active += 1
+        }
         applyEdit(replacingStack: next, actionName: "Move Layer")
     }
 
@@ -206,7 +289,7 @@ final class PaintDocument: NSDocument {
         editor?.canvas.finishSelection()
         guard let window = windowForSheet, window.attachedSheet == nil, stack?.canDuplicate == true else { return }
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, Self.projectContentType]
+        panel.allowedContentTypes = RasterFormat.readable.map(\.contentType) + [Self.projectContentType]
         panel.allowsMultipleSelection = true
         panel.directoryURL = fileURL?.deletingLastPathComponent()
         panel.prompt = "Import"
@@ -223,13 +306,21 @@ final class PaintDocument: NSDocument {
     func importLayerFiles(_ urls: [URL]) throws {
         editor?.canvas.finishSelection()
         guard var next = stack, !urls.isEmpty else { return }
-        let capacity = LayerStack.limit - next.layers.count
+        let capacity = next.remainingLayerCapacity
         guard urls.count <= capacity else { throw PDNError.tooLarge }
         var incoming: [PaintLayer] = []
+        var width = next.activeLayer.image.width
+        var height = next.activeLayer.image.height
         for url in urls {
             guard incoming.count < capacity else { throw PDNError.tooLarge }
-            incoming += try PaintFiles.layersForImport(from: url)
-            guard incoming.count <= capacity else { throw PDNError.tooLarge }
+            let imported = try PaintFiles.layersForImport(from: url)
+            for layer in imported {
+                width = max(width, layer.image.width)
+                height = max(height, layer.image.height)
+            }
+            let totalLayers = next.layers.count + incoming.count + imported.count
+            guard totalLayers <= LayerStack.layerCapacity(width: width, height: height) else { throw PDNError.tooLarge }
+            incoming += imported
         }
         try next.importLayers(incoming)
         applyEdit(replacingStack: next, actionName: "Import From File")
@@ -296,7 +387,7 @@ final class PaintDocument: NSDocument {
                   moveChange: (editor?.canvas.move, nil))
     }
 
-    private func applyEdit(replacingStack replacement: LayerStack? = nil, actionName: String,
+    func applyEdit(replacingStack replacement: LayerStack? = nil, actionName: String,
                            selectionChange: (before: SelectionOutline?, after: SelectionOutline?)? = nil,
                            moveChange: (before: CanvasView.MoveSession?, after: CanvasView.MoveSession?)? = nil) {
         guard let previous = stack else { return }
@@ -365,6 +456,10 @@ final class PaintDocument: NSDocument {
 
     @objc func resetUtilityPanels(_ sender: Any?) { editor?.resetPanels() }
 
+    @objc func toggleWorkspaceRulers(_ sender: Any?) { editor?.toggleRulers() }
+
+    @objc func toggleWorkspaceGrid(_ sender: Any?) { editor?.toggleGrid() }
+
     @objc func layerCommand(_ sender: NSMenuItem) {
         guard let command = LayerCommand(rawValue: sender.tag), let stack else { return }
         switch command {
@@ -382,18 +477,24 @@ final class PaintDocument: NSDocument {
         }
     }
 
-    @objc func exportPNG(_ sender: Any?) {
+    @objc func exportPNG(_ sender: Any?) { showExportPanel(fixedFormat: .png) }
+    @objc func exportImage(_ sender: Any?) { showExportPanel() }
+
+    private func showExportPanel(fixedFormat: RasterFormat? = nil) {
         editor?.canvas.finishSelection()
-        guard let window = windowForSheet, let stack else { return }
+        guard let window = windowForSheet, window.attachedSheet == nil, let stack else { return }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = fileURL?.deletingPathExtension().lastPathComponent ?? displayName
         panel.directoryURL = fileURL?.deletingLastPathComponent()
+        panel.allowsOtherFileTypes = false
+        let options = ExportOptions(panel: panel, formats: fixedFormat.map { [$0] } ?? RasterFormat.writable)
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             do {
                 guard let image = stack.flattenedLayer()?.image else { throw CocoaError(.fileWriteUnknown) }
-                try PaintFiles.pngData(image).write(to: url, options: .atomic)
+                let data = try PaintFiles.rasterData(image, as: options.format, quality: options.quality,
+                                                     resolution: stack.resolution)
+                try data.write(to: url, options: .atomic)
             } catch {
                 self?.presentError(error)
             }
@@ -402,15 +503,37 @@ final class PaintDocument: NSDocument {
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
+        case #selector(applyAdjustment(_:)), #selector(applyEffect(_:)): return canFilterActiveLayer
+        case #selector(rotateZoomLayer(_:)): return canFilterActiveLayer
+        case #selector(repeatEffect(_:)): return validateRepeatEffect(item as? NSMenuItem)
+        case #selector(selectAllPixels(_:)): return editor != nil && image != nil
+        case #selector(invertPixelSelection(_:)): return editor?.canvas.copyableOutline != nil
+        case #selector(eraseSelectedPixels(_:)), #selector(fillSelectedPixels(_:)):
+            return stack?.activeLayer.isVisible == true && editor?.canvas.copyableOutline != nil
+        case #selector(toggleWorkspaceRulers(_:)):
+            (item as? NSMenuItem)?.state = editor?.showsRulers == true ? .on : .off
+            return editor != nil
+        case #selector(toggleWorkspaceGrid(_:)):
+            (item as? NSMenuItem)?.state = editor?.showsGrid == true ? .on : .off
+            return editor != nil
         case #selector(undoStroke(_:)): return undoManager?.canUndo == true || editor?.canvas.hasLiveEditChange == true
         case #selector(redoStroke(_:)): return undoManager?.canRedo == true && editor?.canvas.hasLiveEditChange != true
         case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
         case #selector(copySelection(_:)): return editor?.canvas.copyableOutline != nil
         case #selector(cut(_:)): return editor?.canvas.copyableOutline != nil
-        case #selector(copy(_:)): return editor?.canvas.canCopyPixels == true
+        case #selector(copy(_:)), #selector(copyFlattened(_:)): return editor?.canvas.canCopyPixels == true
         case #selector(paste(_:)): return stack?.activeLayer.isVisible == true
             && NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
-        case #selector(pasteSelection(_:)): return clipboardOutline != nil
+        case #selector(pasteIntoNewLayer(_:)): return stack?.canDuplicate == true
+            && NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
+        case #selector(pasteIntoNewImage(_:)): return NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
+        case #selector(imageCommand(_:)), #selector(flipLayerHorizontal(_:)), #selector(flipLayerVertical(_:)),
+             #selector(rotateLayer180(_:)),
+             #selector(exportImage(_:)), #selector(exportPNG(_:)):
+            return stack != nil && windowForSheet?.attachedSheet == nil
+        case #selector(pasteSelection(_:)):
+            guard editor != nil, let text = NSPasteboard.general.string(forType: .string) else { return false }
+            return clipboardOutline(from: text) != nil
         case #selector(deselect(_:)):
             guard let canvas = editor?.canvas else { return false }
             return canvas.imageSelection != nil || canvas.hasPendingMove || canvas.hasPendingFloodEdit ||
@@ -425,7 +548,7 @@ final class PaintDocument: NSDocument {
             guard let stack, let menuItem = item as? NSMenuItem,
                   let command = LayerCommand(rawValue: menuItem.tag) else { return false }
             switch command {
-            case .add: return stack.layers.count < LayerStack.limit
+            case .add: return stack.canDuplicate
             case .selectAbove, .moveUp: return stack.active < stack.layers.count - 1
             case .selectBelow, .moveDown: return stack.active > 0
             case .toggleVisibility:
@@ -484,9 +607,11 @@ final class PaintDocument: NSDocument {
     override func read(from data: Data, ofType typeName: String) throws {
         if Self.isProject(typeName) {
             stack = try PDNFile.read(data)
-        } else if typeName == "PNG Image" || typeName == UTType.png.identifier {
-            let image = try PaintFiles.readPNG(data)
-            stack = LayerStack(layers: [PaintLayer(name: "Background", image: image, isBackground: true)], active: 0)
+        } else if typeName == "Bitmap Image" || typeName == "PNG Image" || RasterFormat(rawValue: typeName) != nil {
+            let format = typeName == "PNG Image" ? .png : RasterFormat(rawValue: typeName)
+            let raster = try PaintFiles.decodeRaster(data, expected: format)
+            let layer = PaintLayer(name: "Background", image: raster.image, isBackground: true)
+            stack = LayerStack(layers: [layer], active: 0, metadata: raster.resolution?.updating([]) ?? [])
         } else {
             throw CocoaError(.fileReadUnknown)
         }

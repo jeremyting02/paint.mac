@@ -1,6 +1,7 @@
 import AppKit
 
 final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate {
+    private static let layerDrag = NSPasteboard.PasteboardType("com.paintmac.layer-row")
     private weak var document: PaintDocument?
     private let table = NSTableView()
     private let add = EditorView.icon("plus", label: "Add Layer")
@@ -30,6 +31,8 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
         table.delegate = self
         table.target = self
         table.doubleAction = #selector(openClickedLayer(_:))
+        table.registerForDraggedTypes([Self.layerDrag])
+        table.setDraggingSourceOperationMask(.move, forLocal: true)
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
@@ -65,7 +68,7 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         table.scrollRowToVisible(row)
         refreshing = false
-        add.isEnabled = stack.layers.count < LayerStack.limit
+        add.isEnabled = stack.canDuplicate
         up.isEnabled = stack.active < stack.layers.count - 1
         down.isEnabled = stack.active > 0
         delete.isEnabled = stack.layers.count > 1
@@ -99,6 +102,39 @@ final class LayersView: NSStackView, NSTableViewDataSource, NSTableViewDelegate 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !refreshing, table.selectedRow >= 0, let count = document?.stack?.layers.count else { return }
         document?.selectLayer(count - 1 - table.selectedRow)
+    }
+
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        let item = NSPasteboardItem()
+        item.setString(String(row), forType: Self.layerDrag)
+        return item
+    }
+
+    func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo,
+                   proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        guard let source = (info.draggingSource as? NSTableView), source === tableView, dropOperation == .above,
+              dragIndices(info, destinationRow: row) != nil else { return [] }
+        return .move
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo,
+                   row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        guard let indices = dragIndices(info, destinationRow: row) else { return false }
+        document?.reorderLayer(at: indices.source, to: indices.destination)
+        return true
+    }
+
+    private func dragIndices(_ info: any NSDraggingInfo, destinationRow: Int) -> (source: Int, destination: Int)? {
+        guard let text = info.draggingPasteboard.string(forType: Self.layerDrag), let sourceRow = Int(text),
+              let count = document?.stack?.layers.count,
+              let destination = Self.dropDestination(from: sourceRow, above: destinationRow, count: count) else { return nil }
+        return (count - 1 - sourceRow, destination)
+    }
+
+    static func dropDestination(from sourceRow: Int, above targetRow: Int, count: Int) -> Int? {
+        guard count > 0, (0..<count).contains(sourceRow), (0...count).contains(targetRow) else { return nil }
+        let destinationRow = sourceRow < targetRow ? targetRow - 1 : targetRow
+        return destinationRow == sourceRow ? nil : count - 1 - destinationRow
     }
 
     @objc private func addLayer(_ sender: NSButton) { document?.addLayer() }

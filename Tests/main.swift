@@ -5,6 +5,9 @@ let fixture = URL(fileURLWithPath: CommandLine.arguments[1])
 let data = try Data(contentsOf: fixture)
 let imported = try PDNFile.read(data)
 let reopened = try PDNFile.read(PDNFile.write(imported))
+precondition(imported.resolution == .standard && reopened.resolution == imported.resolution)
+precondition(reopened.metadata.map(\.key) == imported.metadata.map(\.key))
+precondition(reopened.metadata.map(\.value) == imported.metadata.map(\.value))
 
 let base: [UInt8] = [0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255,
                      98, 31, 71, 0, 200, 20, 50, 128, 255, 255, 255, 255]

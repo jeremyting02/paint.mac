@@ -87,7 +87,7 @@ enum BGRA8 {
         }
     }
 
-    static func render(width: Int, height: Int, draw: (CGContext) -> Void) -> Data? {
+    static func render(width: Int, height: Int, opaque: Bool = false, draw: (CGContext) -> Void) -> Data? {
         let bytesPerRow = width * 4
         var pixels = Data(count: bytesPerRow * height)
         let converted = pixels.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
@@ -96,6 +96,7 @@ enum BGRA8 {
                                           bitmapInfo: byteOrder | CGImageAlphaInfo.premultipliedFirst.rawValue)
             else { return false }
             draw(context)
+            if opaque { return true }
             for index in stride(from: 0, to: bytes.count, by: 4) {
                 let alpha = Int(bytes[index + 3])
                 if alpha == 0 || alpha == 255 { continue }

@@ -1,0 +1,165 @@
+import Foundation
+
+struct ImageResampler {
+    enum Mode: String, CaseIterable {
+        case bicubic = "Bicubic"
+        case bicubicSmooth = "Bicubic (Smooth)"
+        case bilinear = "Bilinear"
+        case bilinearLowQuality = "Bilinear (Low Quality)"
+        case adaptiveSharp = "Adaptive (Sharp)"
+        case lanczos = "Lanczos"
+        case fant = "Fant"
+        case nearest = "Nearest Neighbor"
+    }
+
+    private struct Tap {
+        let index: Int
+        let weight: Float
+    }
+
+    private let sourceWidth: Int
+    private let sourceHeight: Int
+    private let width: Int
+    private let height: Int
+    private let horizontal: [[Tap]]
+    private let vertical: [[Tap]]
+    private let mode: Mode
+    private let linearLight: Bool
+
+    init(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int, mode: Mode, linearLight: Bool) {
+        self.sourceWidth = sourceWidth
+        self.sourceHeight = sourceHeight
+        self.width = width
+        self.height = height
+        self.mode = mode
+        self.linearLight = linearLight
+        horizontal = Self.taps(from: sourceWidth, to: width, mode: mode)
+        vertical = Self.taps(from: sourceHeight, to: height, mode: mode)
+    }
+
+    func resample(_ pixels: Data) -> Data {
+        var result = Data(count: width * height * 4)
+        pixels.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+            result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                if mode == .nearest {
+                    for y in 0..<height {
+                        for x in 0..<width {
+                            let offset = (vertical[y][0].index * sourceWidth + horizontal[x][0].index) * 4
+                            let value = source.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                            target.storeBytes(of: value, toByteOffset: (y * width + x) * 4, as: UInt32.self)
+                        }
+                    }
+                    return
+                }
+
+                // Choose the pass order that uses the smaller intermediate raster.
+                let horizontalFirst = width * sourceHeight <= sourceWidth * height
+                let middleWidth = horizontalFirst ? width : sourceWidth
+                let middleHeight = horizontalFirst ? sourceHeight : height
+                let table = linearLight ? Self.linearSRGB : Self.identitySRGB
+                var middle = [SIMD4<Float>](repeating: .zero, count: middleWidth * middleHeight)
+                for y in 0..<middleHeight {
+                    for x in 0..<middleWidth {
+                        var value = SIMD4<Float>.zero
+                        for tap in horizontalFirst ? horizontal[x] : vertical[y] {
+                            let index = horizontalFirst ? y * sourceWidth + tap.index : tap.index * sourceWidth + x
+                            value += Self.readPixel(source, offset: index * 4, colors: table) * tap.weight
+                        }
+                        middle[y * middleWidth + x] = value
+                    }
+                }
+                for y in 0..<height {
+                    for x in 0..<width {
+                        var value = SIMD4<Float>.zero
+                        for tap in horizontalFirst ? vertical[y] : horizontal[x] {
+                            let index = horizontalFirst ? tap.index * middleWidth + x : y * middleWidth + tap.index
+                            value += middle[index] * tap.weight
+                        }
+                        let offset = (y * width + x) * 4
+                        let alpha = Self.byte(value.w)
+                        target[offset + 3] = alpha
+                        guard alpha > 0 else { continue }
+                        for channel in 0..<3 {
+                            let unpremultiplied = min(1, max(0, value[channel] / value.w))
+                            target[offset + channel] = Self.byte(linearLight ? Self.encodeSRGB(unpremultiplied) : unpremultiplied)
+                        }
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private static func readPixel(_ data: UnsafeRawBufferPointer, offset: Int, colors: [Float]) -> SIMD4<Float> {
+        let alpha = Float(data[offset + 3]) / 255
+        return SIMD4(colors[Int(data[offset])] * alpha, colors[Int(data[offset + 1])] * alpha,
+                     colors[Int(data[offset + 2])] * alpha, alpha)
+    }
+
+    private static func byte(_ value: Float) -> UInt8 { UInt8((min(1, max(0, value)) * 255).rounded()) }
+
+    private static let identitySRGB = (0...255).map { Float($0) / 255 }
+    private static let linearSRGB = identitySRGB.map { value in
+        value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+    }
+
+    private static func encodeSRGB(_ value: Float) -> Float {
+        value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1 / 2.4) - 0.055
+    }
+
+    private static func taps(from source: Int, to target: Int, mode: Mode) -> [[Tap]] {
+        if source == target { return (0..<source).map { [Tap(index: $0, weight: 1)] } }
+        let ratio = Float(source) / Float(target)
+        let kernel: Mode = mode == .adaptiveSharp ? (ratio > 1 ? .lanczos : .bicubic) : mode
+        return (0..<target).map { index in
+            let edge = Float(index) * ratio
+            let center = edge + ratio / 2 - 0.5
+            if kernel == .nearest {
+                return [Tap(index: min(source - 1, Int(edge + ratio / 2)), weight: 1)]
+            }
+            if kernel == .fant && ratio > 1 {
+                let end = Float(index + 1) * ratio
+                return (Int(edge)..<min(source, Int(ceil(end)))).map { pixel in
+                    let overlap = min(end, Float(pixel + 1)) - max(edge, Float(pixel))
+                    return Tap(index: pixel, weight: overlap / ratio)
+                }
+            }
+            let scale = kernel == .bilinearLowQuality ? 1 : max(ratio, 1)
+            let radius: Float
+            switch kernel {
+            case .lanczos: radius = 3
+            case .bicubic, .bicubicSmooth: radius = 2
+            default: radius = 1
+            }
+            let first = Int(ceil(center - radius * scale))
+            let last = Int(floor(center + radius * scale))
+            let weights = (first...last).map { weight(abs(Float($0) - center) / scale, mode: kernel) }
+            let total = weights.reduce(0, +)
+            // Extend the source's edge pixels for samples outside the image.
+            return weights.enumerated().compactMap { offset, value in
+                guard value != 0 else { return nil }
+                return Tap(index: min(source - 1, max(0, offset + first)), weight: value / total)
+            }
+        }
+    }
+
+    private static func weight(_ x: Float, mode: Mode) -> Float {
+        switch mode {
+        case .lanczos:
+            if x == 0 { return 1 }
+            guard x < 3 else { return 0 }
+            let t = Float.pi * x
+            return (sin(t) / t) * (sin(t / 3) / (t / 3))
+        case .bicubic:
+            if x < 1 { return ((1.5 * x - 2.5) * x) * x + 1 }
+            if x < 2 { return ((-0.5 * x + 2.5) * x - 4) * x + 2 }
+            return 0
+        case .bicubicSmooth:
+            if x < 1 { return ((3 * x - 6) * x * x + 4) / 6 }
+            let distance = max(0, 2 - x)
+            return distance * distance * distance / 6
+        default:
+            return max(0, 1 - x)
+        }
+    }
+}
