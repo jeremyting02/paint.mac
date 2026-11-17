@@ -80,7 +80,8 @@ if CommandLine.arguments.contains("--initial") {
 }
 
 #if METAL_MOVE_BENCHMARK
-if CommandLine.arguments.contains("--move-rotation") {
+let translatesSelection = CommandLine.arguments.contains("--move-selection")
+if translatesSelection || CommandLine.arguments.contains("--move-rotation") {
     setbuf(stdout, nil)
     guard let name = MetalMovePreview.deviceName else {
         fputs("Metal preview is unavailable\n", stderr)
@@ -94,6 +95,10 @@ if CommandLine.arguments.contains("--move-rotation") {
         let canvas = CanvasView(document: document)
         scroll.documentView = canvas
         canvas.tool = .moveSelectedPixels
+        if translatesSelection {
+            let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+            canvas.setSelection(SelectionOutline(rect: bounds.insetBy(dx: 32, dy: 32))!)
+        }
         for zoom: CGFloat? in [nil, 100] {
             canvas.setZoom(zoom)
             let viewport = canvas.visibleRect
@@ -106,16 +111,18 @@ if CommandLine.arguments.contains("--move-rotation") {
                 canvas.usesMetalMovePreview = metal
                 canvas.draw(viewport)
                 func event(_ type: NSEvent.EventType, step: Int) -> NSEvent {
-                    let point = CGPoint(x: image.midX + 135, y: image.midY + 30 + CGFloat(step * 5))
+                    let point = CGPoint(x: image.midX + 135 - (translatesSelection ? CGFloat(step * 2) : 0),
+                                        y: image.midY + 30 + CGFloat(step * 5))
                     return NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil),
                         modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
                         eventNumber: step, clickCount: 1, pressure: 1)!
                 }
-                canvas.rightMouseDown(with: event(.rightMouseDown, step: 0))
+                let down = event(translatesSelection ? .leftMouseDown : .rightMouseDown, step: 0)
+                if translatesSelection { canvas.mouseDown(with: down) } else { canvas.rightMouseDown(with: down) }
                 let samples = (1...frames).map { step in
-                    let drag = event(.rightMouseDragged, step: step)
+                    let drag = event(translatesSelection ? .leftMouseDragged : .rightMouseDragged, step: step)
                     return time {
-                        canvas.rightMouseDragged(with: drag)
+                        if translatesSelection { canvas.mouseDragged(with: drag) } else { canvas.rightMouseDragged(with: drag) }
                         canvas.draw(viewport)
                     }
                 }
@@ -124,7 +131,7 @@ if CommandLine.arguments.contains("--move-rotation") {
                     fputs("\(label) did not use the expected preview for all frames\n", stderr)
                     exit(1)
                 }
-                stats("\(label) / first rotation frame", [samples[0]])
+                stats("\(label) / first \(translatesSelection ? "translation" : "rotation") frame", [samples[0]])
                 stats("\(label) / subsequent drag + viewport draw", Array(samples.dropFirst()))
                 canvas.cancelEditingGesture()
             }

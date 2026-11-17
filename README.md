@@ -137,7 +137,7 @@ Hold **Shift** while rotating to snap to 15° steps.
 Choose **Bicubic** (the default) or **Nearest Neighbor (Antialiased)** in the
 Move Pixels toolbar. Changing the sampler updates a floating preview and adds
 a History entry if the move is already in progress.
-Large resize and rotation previews use Metal when available. Rotated edges can
+Large move, resize, and rotation previews use Metal when available. Rotated edges can
 look slightly different in the floating preview. Finish uses the same CPU
 sampler for the committed pixels on every Mac.
 
@@ -282,6 +282,8 @@ and drag redraws for translation and rotation at 100% and Fit to Window.
 Use `sh Tests/canvas-benchmark.sh --move-rotation` on a Metal-capable Mac to
 compare CPU and Metal rotation previews on the same 4,096 × 2,048 documents.
 It reports the first frame, including layer upload, and subsequent viewport redraws.
+Use `sh Tests/canvas-benchmark.sh --move-selection` for the same comparison while
+dragging a rectangular selection covering about 95% of the canvas.
 The [5.2 parity checklist](docs/PARITY_5_2.md) records coverage and differences.
 The [reference fixture instructions](Tests/reference-pixels/README.md) show
 how to generate and compare Paint.NET PNGs using the installed Wine build.

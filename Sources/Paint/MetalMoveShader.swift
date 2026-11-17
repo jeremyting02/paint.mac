@@ -3,6 +3,8 @@ let metalMoveShader = """
 #include <metal_stdlib>
 using namespace metal;
 
+constant bool translating [[function_constant(0)]];
+
 struct Parameters {
     uint4 canvas;     // width, layer count, active layer index, cleared-layer offset or UINT_MAX
     uint4 region;     // x, y, width, height (top-left origin)
@@ -10,6 +12,7 @@ struct Parameters {
     uint4 flags;      // copy, antialiased nearest, axis aligned, unused
     float4 inverse;
     float4 offsetAndTransition;
+    int2 destinationOrigin;
 };
 
 float4 texel(device const uchar4 *pixels, uint4 source, int2 point) {
@@ -113,15 +116,22 @@ kernel void renderMovePreview(device const uchar4 *pixels [[buffer(0)]],
     uint pixel = location.y * p.canvas.x + location.x;
     uint activeOffset = p.flags.x ? layers[p.canvas.z].x : p.canvas.w;
     uchar4 active = activeOffset == 0xffffffffu ? uchar4(0) : pixels[activeOffset + pixel];
-    float2 center = float2(location) + 0.5f;
-    float2 dx = p.inverse.xy, dy = p.inverse.zw;
-    float2 mapped = center.x * dx + center.y * dy + p.offsetAndTransition.xy;
-    float coverage = selectionCoverage(mapped, dx, dy, float2(p.foreground.zw), p.flags.z != 0);
-    if (coverage > 0) {
-        float4 sample = sampleSelection(pixels, p, mapped - 0.5f);
-        if (sample.w > 0) {
-            uchar4 moved = toBytes(float4(sample.xyz / sample.w, sample.w * coverage));
-            active = sourceOver(moved, active);
+    if (translating) {
+        uint2 source = location - uint2(p.destinationOrigin);
+        if (all(source < p.foreground.zw)) {
+            active = sourceOver(pixels[p.foreground.x + source.y * p.foreground.y + source.x], active);
+        }
+    } else {
+        float2 center = float2(location) + 0.5f;
+        float2 dx = p.inverse.xy, dy = p.inverse.zw;
+        float2 mapped = center.x * dx + center.y * dy + p.offsetAndTransition.xy;
+        float coverage = selectionCoverage(mapped, dx, dy, float2(p.foreground.zw), p.flags.z != 0);
+        if (coverage > 0) {
+            float4 sample = sampleSelection(pixels, p, mapped - 0.5f);
+            if (sample.w > 0) {
+                uchar4 moved = toBytes(float4(sample.xyz / sample.w, sample.w * coverage));
+                active = sourceOver(moved, active);
+            }
         }
     }
 

@@ -89,10 +89,7 @@ final class MoveTilePreview {
                     sampling: MoveResampler.Mode) -> (region: CGRect, image: CGImage)? {
         let destination = pixels.destinationRegion(by: transform).intersection(visible)
         guard !destination.isEmpty, destination.width * destination.height >= 65_536 else { return nil }
-        let integralTranslation = transform.a == 1 && transform.b == 0 && transform.c == 0 && transform.d == 1 &&
-            transform.tx == transform.tx.rounded() && transform.ty == transform.ty.rounded()
-        guard !integralTranslation,
-              let preview = metal?.render(in: visible, by: transform, copy: copy, sampling: sampling) else { return nil }
+        guard let preview = metal?.render(in: visible, by: transform, copy: copy, sampling: sampling) else { return nil }
         metalDraws += 1
         return preview
     }

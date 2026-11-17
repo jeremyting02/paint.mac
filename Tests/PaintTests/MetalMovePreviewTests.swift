@@ -31,7 +31,9 @@ struct MetalMovePreviewTests {
         let visible = CGRect(x: 16, y: 12, width: 251, height: 200)
         let rotate = CGAffineTransform(translationX: 46, y: -31).rotated(by: 0.23)
         let scale = CGAffineTransform(translationX: 39.75, y: 6.25).scaledBy(x: 1.21, y: 0.91)
-        for (pixels, transform, copy) in [(cut, rotate, false), (cut, scale, true), (paste, rotate, false)] {
+        let translate = CGAffineTransform(translationX: -50, y: 37)
+        for (pixels, transform, copy) in [(cut, rotate, false), (cut, scale, true), (paste, rotate, false),
+                                          (cut, translate, false), (cut, translate, true), (paste, translate, false)] {
             let metal = try #require(MetalMovePreview(stack: stack, pixels: pixels))
             let cpu = try #require(MoveTilePreview(stack: stack, pixels: pixels))
             let frame = try #require(metal.render(in: visible, by: transform, copy: copy, sampling: sampling))
@@ -41,11 +43,13 @@ struct MetalMovePreviewTests {
             let differences = zip(actual, expected).map { abs(Int($0) - Int($1)) }
             // Rotated edges use GPU coverage samples. Most bytes should still agree to within one level.
             #expect(differences.filter { $0 > 1 }.count < actual.count / 100)
-            #expect(differences.max() ?? 0 <= (transform == scale ? 2 : 30))
+            if transform == translate { #expect(differences.max() ?? 0 <= 1) }
+            else { #expect(differences.max() ?? 0 <= (transform == scale ? 2 : 30)) }
         }
     }
 
-    @MainActor @Test func finishingAndUndoingAMetalPreviewUsesTheSamePixelsAsCPU() throws {
+    @MainActor @Test(arguments: [false, true])
+    func finishingAndUndoingAMetalPreviewUsesTheSamePixelsAsCPU(translateSelection: Bool) throws {
         guard MTLCreateSystemDefaultDevice() != nil else { return }
         _ = NSApplication.shared
         let width = 384, height = 288
@@ -60,16 +64,30 @@ struct MetalMovePreviewTests {
         canvas.setZoom(nil)
         canvas.updateViewport()
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        let outline = try #require(SelectionOutline(rect: bounds))
-        let pixels = try #require(SelectedPixelsTransform(layer: layer, selection: bounds))
-        let pivot = CGPoint(x: bounds.midX, y: bounds.midY)
-        let initial = MoveGeometry(rect: bounds, pivot: pivot)
-        var rotated = initial
-        rotated.angle = 0.25
+        let rect = translateSelection ? CGRect(x: 8, y: 7, width: 368, height: 271) : bounds
+        let outline = try #require(SelectionOutline(rect: rect))
+        let selection = CGRect(x: rect.minX, y: bounds.height - rect.maxY, width: rect.width, height: rect.height)
+        let pixels = try #require(SelectedPixelsTransform(layer: layer, selection: selection))
+        let pivot = CGPoint(x: rect.midX, y: rect.midY)
+        let initial = MoveGeometry(rect: rect, pivot: pivot)
+        var moved = initial
+        if translateSelection {
+            canvas.setSelection(outline)
+            moved.rect = rect.offsetBy(dx: -17, dy: 21)
+        } else {
+            moved.angle = 0.25
+        }
         let session = CanvasView.MoveSession(layerIndex: 0, pixels: pixels, outline: outline,
-                                            initialGeometry: initial, geometry: rotated, recorded: true)
+                                            initialGeometry: initial, geometry: moved, recorded: true)
         let expected = try #require(session.renderedLayer()?.straightPixels)
-        document.recordMove(from: nil, to: session, actionName: "Rotate")
+        if translateSelection {
+            let stack = try #require(document.stack)
+            let metal = try #require(MetalMovePreview(stack: stack, pixels: pixels))
+            let frame = try #require(metal.render(in: bounds, by: session.transform, copy: false, sampling: .bicubic))
+            let preview = try #require(BGRA8.pixels(from: frame.image))
+            #expect(preview == expected)
+        }
+        document.recordMove(from: nil, to: session, actionName: translateSelection ? "Move" : "Rotate")
         let visible = canvas.visibleRect
         let context = try #require(LayerStack.makeBitmap(width: Int(ceil(visible.width)), height: Int(ceil(visible.height))))
         context.translateBy(x: -visible.minX, y: -visible.minY)

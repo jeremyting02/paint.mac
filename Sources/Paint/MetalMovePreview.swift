@@ -9,18 +9,28 @@ final class MetalMovePreview {
         let device: MTLDevice
         let queue: MTLCommandQueue
         let pipeline: MTLComputePipelineState
+        let translationPipeline: MTLComputePipelineState
 
         init?() {
             guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return nil }
             let options = MTLCompileOptions()
             if #available(macOS 15, *) { options.mathMode = .safe }
             else { options.fastMathEnabled = false }
-            guard let library = try? device.makeLibrary(source: metalMoveShader, options: options),
-                  let function = library.makeFunction(name: "renderMovePreview"),
-                  let pipeline = try? device.makeComputePipelineState(function: function) else { return nil }
+            guard let library = try? device.makeLibrary(source: metalMoveShader, options: options) else { return nil }
+            func pipeline(translating: Bool) -> MTLComputePipelineState? {
+                let constants = MTLFunctionConstantValues()
+                var translating = translating
+                constants.setConstantValue(&translating, type: .bool, index: 0)
+                guard let function = try? library.makeFunction(name: "renderMovePreview", constantValues: constants)
+                else { return nil }
+                return try? device.makeComputePipelineState(function: function)
+            }
+            guard let affine = pipeline(translating: false), let translation = pipeline(translating: true)
+            else { return nil }
             self.device = device
             self.queue = queue
-            self.pipeline = pipeline
+            self.pipeline = affine
+            translationPipeline = translation
         }
     }
 
@@ -31,6 +41,7 @@ final class MetalMovePreview {
         let flags: SIMD4<UInt32>
         let inverse: SIMD4<Float>
         let offsetAndTransition: SIMD4<Float>
+        let destinationOrigin: SIMD2<Int32>
     }
 
     private struct Frame: Equatable {
@@ -135,6 +146,15 @@ final class MetalMovePreview {
         let height = bounds.height
         let width = Int(region.width), rows = Int(region.height)
         let byteCount = width * rows * 4
+        // The source rectangle uses top-left coordinates, so a positive canvas y shift moves it up.
+        let destinationOrigin: SIMD2<Int32>?
+        if transform.a == 1, transform.b == 0, transform.c == 0, transform.d == 1,
+           let x = Int32(exactly: selection.minX + transform.tx),
+           let y = Int32(exactly: selection.minY - transform.ty) {
+            destinationOrigin = SIMD2(x, y)
+        } else {
+            destinationOrigin = nil
+        }
         var parameters = Parameters(
             canvas: canvas, region: SIMD4(UInt32(region.minX), UInt32(region.minY), UInt32(width), UInt32(rows)),
             foreground: foreground,
@@ -144,19 +164,21 @@ final class MetalMovePreview {
             offsetAndTransition: SIMD4(Float(inverse.tx + inverse.c * height - selection.minX),
                                        Float(height * (1 - inverse.d) - inverse.ty - selection.minY),
                                        Float(min(1, hypot(inverse.a, inverse.c))),
-                                       Float(min(1, hypot(inverse.b, inverse.d))))
+                                       Float(min(1, hypot(inverse.b, inverse.d)))),
+            destinationOrigin: destinationOrigin ?? .zero
         )
         guard let output = engine.device.makeBuffer(length: byteCount, options: .storageModeShared),
               let command = engine.queue.makeCommandBuffer(), let encoder = command.makeComputeCommandEncoder() else {
             return nil
         }
-        encoder.setComputePipelineState(engine.pipeline)
+        let pipeline = destinationOrigin == nil ? engine.pipeline : engine.translationPipeline
+        encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(layerInfo, offset: 0, index: 1)
         encoder.setBuffer(output, offset: 0, index: 2)
         encoder.setBytes(&parameters, length: MemoryLayout<Parameters>.stride, index: 3)
-        let lanes = engine.pipeline.threadExecutionWidth
-        let threads = MTLSize(width: lanes, height: min(4, engine.pipeline.maxTotalThreadsPerThreadgroup / lanes), depth: 1)
+        let lanes = pipeline.threadExecutionWidth
+        let threads = MTLSize(width: lanes, height: min(4, pipeline.maxTotalThreadsPerThreadgroup / lanes), depth: 1)
         let groups = MTLSize(width: (width + threads.width - 1) / threads.width,
                              height: (rows + threads.height - 1) / threads.height, depth: 1)
         encoder.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
