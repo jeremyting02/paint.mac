@@ -2,6 +2,29 @@ import CoreGraphics
 import Foundation
 
 struct SelectionOutline: Equatable {
+    enum Mode: String, CaseIterable {
+        case replace = "Replace"
+        case add = "Add"
+        case subtract = "Subtract"
+        case intersect = "Intersect"
+        case xor = "XOR"
+
+        func applying(_ incoming: SelectionOutline?, to previous: SelectionOutline?) -> SelectionOutline? {
+            // A click or a drag with no area only clears the selection in Replace mode.
+            guard let incoming else { return self == .replace ? nil : previous }
+            guard let previous else { return self == .subtract || self == .intersect ? nil : incoming }
+
+            let path = previous.path
+            switch self {
+            case .replace: return incoming
+            case .add: return SelectionOutline(path: path.union(incoming.path, using: .evenOdd))
+            case .subtract: return SelectionOutline(path: path.subtracting(incoming.path, using: .evenOdd))
+            case .intersect: return SelectionOutline(path: path.intersection(incoming.path, using: .evenOdd))
+            case .xor: return SelectionOutline(path: path.symmetricDifference(incoming.path, using: .evenOdd))
+            }
+        }
+    }
+
     let path: CGPath
 
     init?(path: CGPath) {

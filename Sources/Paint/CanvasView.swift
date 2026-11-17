@@ -2,10 +2,26 @@ import AppKit
 
 final class CanvasView: NSView {
     enum Tool {
-        case brush, eraser, rectangleSelect, ellipseSelect, moveSelectedPixels, moveSelection
+        case brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, moveSelectedPixels, moveSelection
 
-        var drawsSelection: Bool { self == .rectangleSelect || self == .ellipseSelect }
+        var selectionName: String? {
+            switch self {
+            case .rectangleSelect: return "Rectangle Select"
+            case .ellipseSelect: return "Ellipse Select"
+            case .lassoSelect: return "Lasso Select"
+            default: return nil
+            }
+        }
+        var drawsSelection: Bool { selectionName != nil }
         var transformsSelection: Bool { self == .moveSelectedPixels || self == .moveSelection }
+    }
+
+    private struct SelectionDrag {
+        let anchor: CGPoint
+        var end: CGPoint
+        let before: SelectionOutline?
+        let mode: SelectionOutline.Mode
+        let lassoPath: CGMutablePath?
     }
 
     struct MoveGeometry: Equatable {
@@ -150,8 +166,9 @@ final class CanvasView: NSView {
     private var composite: CGImage?
 
     private(set) var selectionOutline: SelectionOutline?
+    var selectionMode: SelectionOutline.Mode = .replace
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
-    private var selectionDrag: (anchor: CGPoint, end: CGPoint, before: SelectionOutline?)?
+    private var selectionDrag: SelectionDrag?
 
     private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String, imageSelection: CGRect?)?
     private(set) var move: MoveSession?
@@ -410,13 +427,23 @@ final class CanvasView: NSView {
     }
 
     private func updateSelectionDrag(in image: CGImage, modifiers: NSEvent.ModifierFlags) {
-        guard let (anchor, end, _) = selectionDrag else { return }
+        guard let drag = selectionDrag else { return }
+        let outline: SelectionOutline?
+        if let path = drag.lassoPath?.mutableCopy() {
+            path.closeSubpath()
+            outline = SelectionOutline(path: path.normalized(using: .evenOdd))
+        } else {
+            outline = shapeSelection(from: drag.anchor, to: drag.end, modifiers: modifiers)
+        }
+        let clipped = outline?.clipped(to: canvasBounds(for: image))
+        setSelection(drag.mode.applying(clipped, to: drag.before))
+    }
+
+    private func shapeSelection(from anchor: CGPoint, to end: CGPoint,
+                                modifiers: NSEvent.ModifierFlags) -> SelectionOutline? {
         let rect = CGRect(x: min(anchor.x, end.x), y: min(anchor.y, end.y),
                           width: abs(anchor.x - end.x), height: abs(anchor.y - end.y))
-        guard tool == .ellipseSelect else {
-            setSelection(SelectionOutline(rect: rect))
-            return
-        }
+        guard tool == .ellipseSelect else { return SelectionOutline(rect: rect) }
         var bounds = rect
         if modifiers.contains(.shift) {
             // The drag endpoints define the diameter, in any direction.
@@ -424,8 +451,7 @@ final class CanvasView: NSView {
             bounds = CGRect(x: rect.midX - diameter / 2, y: rect.midY - diameter / 2,
                             width: diameter, height: diameter)
         }
-        let outline = SelectionOutline(path: CGPath(ellipseIn: bounds, transform: nil))
-        setSelection(outline?.clipped(to: canvasBounds(for: image)))
+        return SelectionOutline(path: CGPath(ellipseIn: bounds, transform: nil))
     }
 
     func setSelection(_ outline: SelectionOutline?) {
@@ -787,8 +813,11 @@ final class CanvasView: NSView {
         window?.makeFirstResponder(self)
         if tool.drawsSelection {
             let anchor = pixelEdge(at: location, in: image)
-            selectionDrag = (anchor, anchor, selectionOutline)
-            setSelection(nil)
+            let path = tool == .lassoSelect ? CGMutablePath() : nil
+            path?.move(to: anchor)
+            selectionDrag = SelectionDrag(anchor: anchor, end: anchor, before: selectionOutline,
+                                          mode: selectionMode, lassoPath: path)
+            if selectionMode == .replace { setSelection(nil) }
             return
         }
         guard document?.stack?.activeLayer.isVisible == true else {
@@ -820,8 +849,15 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard !imageRect.isEmpty else { return }
         let location = convert(event.locationInWindow, from: nil)
-        if selectionDrag != nil, let image = document?.image {
-            selectionDrag?.end = pixelEdge(at: location, in: image)
+        if var drag = selectionDrag, let image = document?.image {
+            let point = imagePoint(location)
+            let end = drag.lassoPath == nil ? pixelEdge(at: location, in: image)
+                : CGPoint(x: point.x.rounded(), y: point.y.rounded())
+            if end != drag.end {
+                drag.lassoPath?.addLine(to: end)
+                drag.end = end
+                selectionDrag = drag
+            }
             updateSelectionDrag(in: image, modifiers: event.modifierFlags)
             return
         }
@@ -845,11 +881,11 @@ final class CanvasView: NSView {
             return
         }
         mouseDragged(with: event)
-        if selectionDrag != nil {
+        if let drag = selectionDrag, let name = tool.selectionName {
             let outline = selectionOutline
             cancelSelectionDrag()
-            let toolName = tool == .ellipseSelect ? "Ellipse Select" : "Rectangle Select"
-            document?.commitSelection(outline, actionName: outline == nil ? "Deselect" : toolName)
+            let actionName = drag.mode == .replace ? (outline == nil ? "Deselect" : name) : "\(name) (\(drag.mode.rawValue))"
+            document?.commitSelection(outline, actionName: actionName)
             return
         }
         guard let current = stroke else { return }

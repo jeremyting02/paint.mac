@@ -20,10 +20,17 @@ in image pixels. Drag on the canvas to paint or erase.
 
 Choose **Rectangle Select** or **Ellipse Select** and drag to select an area.
 Hold **Shift** with Ellipse Select to draw a circle, using the start and end of
-the drag as opposite points on its edge. The selection stays
-active when you switch tools and limits paintbrush and eraser strokes to that
-area. Press **Escape** to deselect. The status bar shows the selection size and
-its top-left pixel. To crop, choose **Image → Crop to Selection**
+the drag as opposite points on its edge. With **Lasso Select**, drag a freehand
+outline. The tool closes it with a straight line back to the start.
+
+Use the toolbar's **Selection Mode** menu with any of these tools. **Replace**
+starts a new selection, **Add** combines both areas, **Subtract** removes the
+new area, **Intersect** keeps only the overlap, and **XOR** keeps only the areas
+outside the overlap. Each completed change can be undone in one step.
+
+The selection stays active when you switch tools and limits paintbrush and
+eraser strokes to that area. Press **Escape** to deselect. The status bar shows
+the selection size and its top-left pixel. To crop, choose **Image → Crop to Selection**
 (Shift-Command-X) or click the crop button above the canvas.
 
 Choose **Move Selected Pixels** in **Tools** or press **M**. The tool acts on the
@@ -61,8 +68,8 @@ pixel. Hold **Command** and scroll
 to zoom toward or away from the pointer. Hold the middle mouse button and drag
 to pan the canvas with any tool active. Scrolling without Command moves the view.
 
-Use **Command-Z** and **Command-Y** to undo or redo an edit. **Rectangle Select**,
-**Ellipse Select**, and **Deselect** also appear in **History**.
+Use **Command-Z** and **Command-Y** to undo or redo an edit. Selection changes
+also appear in **History**.
 Each document keeps its undo history until you close it. Scroll the floating
 **History** window and select an entry to jump to it. In **Layers**, use **+** to insert a transparent
 layer above the selected row, click a row to edit it, and use its checkbox to

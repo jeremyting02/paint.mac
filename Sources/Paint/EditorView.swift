@@ -12,6 +12,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let eraser = EditorView.icon("eraser", label: "Eraser")
     private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
     private let ellipseSelect = EditorView.icon("circle.dashed", label: "Ellipse Select")
+    private let lassoSelect = EditorView.icon("lasso", label: "Lasso Select")
     private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
     private let moveSelection = EditorView.icon("rectangle.dashed.and.paperclip", label: "Move Selection")
     private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
@@ -20,6 +21,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private let color = NSColorWell()
     private let toolButtons = NSStackView()
+    private let brushControls = NSStackView()
+    private let selectionModes = NSPopUpButton()
     private let colorControls = NSStackView()
     private let historyScroll = NSScrollView()
     private let historyTable = NSTableView()
@@ -36,10 +39,11 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
-        for button in [brush, eraser, rectangleSelect, ellipseSelect, moveSelectedPixels, moveSelection] {
+        for button in [brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, moveSelectedPixels, moveSelection] {
             button.setButtonType(.pushOnPushOff)
             button.target = self
             button.action = #selector(selectTool(_:))
+            toolButtons.addArrangedSubview(button)
         }
         selectTool(brush)
         for button in [undo, historyUndo] {
@@ -107,11 +111,16 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         color.target = self
         color.action = #selector(changeColor(_:))
 
-        let toolbar = NSStackView(views: [undo, redo, NSTextField(labelWithString: "Size"), size, applyCrop, finishMove])
+        brushControls.spacing = 8
+        brushControls.addArrangedSubview(NSTextField(labelWithString: "Size"))
+        brushControls.addArrangedSubview(size)
+        selectionModes.addItems(withTitles: SelectionOutline.Mode.allCases.map(\.rawValue))
+        selectionModes.setAccessibilityLabel("Selection Mode")
+        selectionModes.toolTip = "Selection Mode"
+        selectionModes.target = self
+        selectionModes.action = #selector(changeSelectionMode(_:))
+        let toolbar = NSStackView(views: [undo, redo, brushControls, selectionModes, applyCrop, finishMove])
         toolbar.spacing = 8
-        for button in [brush, eraser, rectangleSelect, ellipseSelect, moveSelectedPixels, moveSelection] {
-            toolButtons.addArrangedSubview(button)
-        }
         toolButtons.distribution = .fillEqually
         toolButtons.spacing = 1
         let swatches = NSStackView(views: swatchColors.enumerated().map { index, swatch in
@@ -213,6 +222,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func updateStatus() {
+        brushControls.isHidden = canvas.tool.drawsSelection
+        selectionModes.isHidden = !canvas.tool.drawsSelection
         applyCrop.isEnabled = canvas.cropRect != nil
         finishMove.isHidden = !canvas.tool.transformsSelection
         finishMove.isEnabled = canvas.hasPendingMove
@@ -271,7 +282,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     @objc private func selectTool(_ sender: NSButton) {
         let tools: [(NSButton, CanvasView.Tool)] = [
             (brush, .brush), (eraser, .eraser), (rectangleSelect, .rectangleSelect),
-            (ellipseSelect, .ellipseSelect),
+            (ellipseSelect, .ellipseSelect), (lassoSelect, .lassoSelect),
             (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)
         ]
         for (button, tool) in tools {
@@ -299,6 +310,13 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         if let pixels = sender.selectedItem?.tag {
             canvas.brushSize = CGFloat(pixels)
         }
+    }
+
+    @objc private func changeSelectionMode(_ sender: NSPopUpButton) {
+        if let title = sender.titleOfSelectedItem, let mode = SelectionOutline.Mode(rawValue: title) {
+            canvas.selectionMode = mode
+        }
+        canvas.window?.makeFirstResponder(canvas)
     }
 
     @objc private func changeColor(_ sender: NSColorWell) {
