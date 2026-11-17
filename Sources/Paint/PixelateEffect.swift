@@ -28,15 +28,22 @@ enum PixelateEffect {
     ], renderInColorSpace: { source, width, height, colorSpace, _, values, isCancelled in
         let size = Int(values[0])
         if size == 1 { return source }
-        let columns = (width + size - 1) / size
-        let rows = (height + size - 1) / size
         let reduction = Downsampling.allCases[Int(values[1])]
         let enlargement = upsampling[Int(values[2])]
+        // Smooth reconstruction also uses cells whose centers lie outside the canvas.
+        // Sample those cells from the edge-extended original before scaling up.
+        let halo = switch enlargement {
+        case .nearest: 0
+        case .bilinear: 1
+        default: 2
+        }
+        let columns = (width + size - 1) / size + 2 * halo
+        let rows = (height + size - 1) / size + 2 * halo
         let cells: Data
         if reduction == .multisampleBilinear {
             let transfer = LinearEffectTransfer(colorSpace: colorSpace)
             guard let sampled = multisample(source, width: width, height: height, cellSize: size,
-                                            columns: columns, rows: rows, transfer: transfer,
+                                            columns: columns, rows: rows, halo: halo, transfer: transfer,
                                             isCancelled: isCancelled)
             else { return nil }
             cells = sampled
@@ -44,14 +51,17 @@ enum PixelateEffect {
             let scaler = ImageResampler(sourceWidth: width, sourceHeight: height, width: columns, height: rows,
                                         mode: reduction.resamplingMode, linearLight: true,
                                         samplingRatio: SIMD2(repeating: Float(size)),
+                                        samplingOrigin: SIMD2(repeating: Float(-halo * size)),
                                         widenKernel: reduction == .highQualityBicubic, colorSpace: colorSpace)
-            cells = scaler.resample(source)
+            guard let sampled = scaler.resample(source, isCancelled: isCancelled) else { return nil }
+            cells = sampled
         }
         guard !isCancelled() else { return nil }
         let scaler = ImageResampler(sourceWidth: columns, sourceHeight: rows, width: width, height: height,
                                     mode: enlargement, linearLight: true,
-                                    samplingRatio: SIMD2(repeating: 1 / Float(size)), colorSpace: colorSpace)
-        return scaler.resample(cells)
+                                    samplingRatio: SIMD2(repeating: 1 / Float(size)),
+                                    samplingOrigin: SIMD2(repeating: Float(halo)), colorSpace: colorSpace)
+        return scaler.resample(cells, isCancelled: isCancelled)
     })
 
     private static let fractions: [SIMD2<Double>] = [
@@ -59,7 +69,7 @@ enum PixelateEffect {
     ]
 
     private static func multisample(_ pixels: Data, width: Int, height: Int, cellSize: Int,
-                                    columns: Int, rows: Int, transfer: LinearEffectTransfer,
+                                    columns: Int, rows: Int, halo: Int, transfer: LinearEffectTransfer,
                                     isCancelled: () -> Bool) -> Data? {
         var cells = Data(count: columns * rows * 4)
         let finished = pixels.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
@@ -67,7 +77,7 @@ enum PixelateEffect {
                 for row in 0..<rows {
                     if isCancelled() { return false }
                     for column in 0..<columns {
-                        let origin = SIMD2(Double(column * cellSize), Double(row * cellSize))
+                        let origin = SIMD2(Double((column - halo) * cellSize), Double((row - halo) * cellSize))
                         var sample = SIMD4<Double>.zero
                         // Four rotated-grid samples are bilinearly interpolated in premultiplied linear light.
                         for fraction in fractions {

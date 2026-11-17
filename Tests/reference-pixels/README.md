@@ -22,7 +22,12 @@ the original for each capture.
 | Invert Colors | Default | `invert-colors.png` |
 | Posterize | Four levels in each RGBA channel | `posterize-4.png` |
 | Pixelate | Cell Size 4, Scale Down Multisample Bilinear, Scale Up Nearest Neighbor | `pixelate-4.png` |
+| Pixelate | Cell Size 4, Scale Down Nearest Neighbor, Scale Up Bilinear | `pixelate-4-nearest-bilinear.png` |
+| Pixelate | Cell Size 4, Scale Down Bilinear, Scale Up Nearest Neighbor | `pixelate-4-bilinear-nearest.png` |
 | Square Blur | Radius 2, default Gamma Boost | `square-blur-2.png` |
+| Square Blur | Radius 4, Gamma Boost +1 | `square-blur-4-gamma-1.png` |
+| Square Blur | Radius 4, Gamma Boost +0.50 | `square-blur-4-gamma-half.png` |
+| Square Blur | Radius 4, Gamma Boost −0.50 | `square-blur-4-gamma-minus-half.png` |
 
 For the layered project check, open `mac-edited.pdn` in Paint.NET and use Save As
 to write `paintnet-resaved.pdn`. Keep the original for comparison.
@@ -36,8 +41,9 @@ PAINTNET_REFERENCE_DIR=.build/reference-check swift test --filter 'PaintNET.*Tes
 
 The tests run against the checked-in captures by default. Pixel
 comparisons check every straight 8-bit channel of the edited layer and its
-PNG export, including RGB at alpha zero. The expected bytes are read
-independently of the app's pixel conversion.
+PNG export, including RGB at alpha zero. For opaque RGB PNGs the comparator
+supplies alpha 255. The expected bytes are read independently of the app's
+pixel conversion.
 
 The PDN comparison checks every stored pixel, layer order, names, visibility,
 opacity, blend modes, dimensions, and metadata. Paint.NET renumbers EXIF
@@ -51,3 +57,24 @@ synthetic `input.png`, choosing **Image → Color Profile**, and assigning its
 built-in Display P3 profile. The embedded profile identifies its license as
 CC0. The test checks all stored pixels, profile bytes, and metadata before
 and after a paint.mac save. [Compact ICC Profiles](https://github.com/saucecontrol/Compact-ICC-Profiles)
+
+## Paintbrush dab fixture
+
+`brush-dabs-input.png` is a 49 × 17 sRGB image with transparent pixels and
+synthetic magenta brackets. The brackets mark the centers of the pixels at
+(8, 8), (24, 8), and (40, 8), measured from the top left. No third-party
+image is used.
+
+`brush-dabs.png` was saved as 32-bit PNG from Paint.NET 5.2 after placing
+one opaque black dab at each marker with the normal blend mode and solid fill.
+
+| Marker | Brush size | Hardness | Antialiasing |
+| --- | --- | --- | --- |
+| Left | 9 px | 100% | On |
+| Middle | 9 px | 25% | On |
+| Right | 8 px | 100% | Off |
+
+The regression compares all 289 pixels in the right-hand region. The brush
+click snaps to a pixel intersection and produces the captured 8 × 8
+footprint. The other dabs record antialiasing and hardness output at their
+observed subpixel click positions. Their edge coverage remains different.

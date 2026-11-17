@@ -29,7 +29,8 @@ struct ImageResampler {
     private let profileTransfer: RasterTransferCurve?
 
     init(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int, mode: Mode, linearLight: Bool,
-         samplingRatio: SIMD2<Float>? = nil, widenKernel: Bool = true, colorSpace: CGColorSpace? = nil) {
+         samplingRatio: SIMD2<Float>? = nil, samplingOrigin: SIMD2<Float> = .zero,
+         widenKernel: Bool = true, colorSpace: CGColorSpace? = nil) {
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
         self.width = width
@@ -43,25 +44,27 @@ struct ImageResampler {
             profileTransfer = nil
             self.linearLight = linearLight
         }
-        horizontal = Self.taps(from: sourceWidth, to: width, mode: mode, ratio: samplingRatio?.x,
+        horizontal = Self.taps(from: sourceWidth, to: width, mode: mode, ratio: samplingRatio?.x, origin: samplingOrigin.x,
                                widenKernel: widenKernel)
-        vertical = Self.taps(from: sourceHeight, to: height, mode: mode, ratio: samplingRatio?.y,
+        vertical = Self.taps(from: sourceHeight, to: height, mode: mode, ratio: samplingRatio?.y, origin: samplingOrigin.y,
                              widenKernel: widenKernel)
     }
 
-    func resample(_ pixels: Data) -> Data {
+    func resample(_ pixels: Data, isCancelled: () -> Bool = { false }) -> Data? {
+        guard !isCancelled() else { return nil }
         var result = Data(count: width * height * 4)
-        pixels.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
-            result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+        let completed = pixels.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+            result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) -> Bool in
                 if mode == .nearest {
                     for y in 0..<height {
+                        if isCancelled() { return false }
                         for x in 0..<width {
                             let offset = (vertical[y][0].index * sourceWidth + horizontal[x][0].index) * 4
                             let value = source.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
                             target.storeBytes(of: value, toByteOffset: (y * width + x) * 4, as: UInt32.self)
                         }
                     }
-                    return
+                    return true
                 }
 
                 // Choose the pass order that uses the smaller intermediate raster.
@@ -71,6 +74,7 @@ struct ImageResampler {
                 let table = linearLight ? Self.linearSRGB : Self.identitySRGB
                 var middle = [SIMD4<Float>](repeating: .zero, count: middleWidth * middleHeight)
                 for y in 0..<middleHeight {
+                    if isCancelled() { return false }
                     for x in 0..<middleWidth {
                         var value = SIMD4<Float>.zero
                         for tap in horizontalFirst ? horizontal[x] : vertical[y] {
@@ -82,6 +86,7 @@ struct ImageResampler {
                     }
                 }
                 for y in 0..<height {
+                    if isCancelled() { return false }
                     for x in 0..<width {
                         var value = SIMD4<Float>.zero
                         for tap in horizontalFirst ? vertical[y] : horizontal[x] {
@@ -102,9 +107,10 @@ struct ImageResampler {
                         }
                     }
                 }
+                return true
             }
         }
-        return result
+        return completed ? result : nil
     }
 
     private static func readPixel(_ data: UnsafeRawBufferPointer, offset: Int, colors: [Float],
@@ -130,23 +136,23 @@ struct ImageResampler {
         value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1 / 2.4) - 0.055
     }
 
-    private static func taps(from source: Int, to target: Int, mode: Mode, ratio explicitRatio: Float?,
+    private static func taps(from source: Int, to target: Int, mode: Mode, ratio explicitRatio: Float?, origin: Float,
                              widenKernel: Bool) -> [[Tap]] {
         let ratio = explicitRatio ?? Float(source) / Float(target)
-        if source == target && ratio == 1 { return (0..<source).map { [Tap(index: $0, weight: 1)] } }
+        if source == target && ratio == 1 && origin == 0 { return (0..<source).map { [Tap(index: $0, weight: 1)] } }
         let kernel: Mode = mode == .adaptiveSharp ? (ratio > 1 ? .lanczos : .bicubic) : mode
         return (0..<target).map { index in
-            let edge = Float(index) * ratio
+            let edge = origin + Float(index) * ratio
             let center = edge + ratio / 2 - 0.5
             if kernel == .nearest {
-                return [Tap(index: min(source - 1, Int(edge + ratio / 2)), weight: 1)]
+                return [Tap(index: min(source - 1, max(0, Int(edge + ratio / 2))), weight: 1)]
             }
             if kernel == .fant && ratio > 1 {
-                let end = Float(index + 1) * ratio
+                let end = origin + Float(index + 1) * ratio
                 let last = explicitRatio == nil ? min(source, Int(ceil(end))) : Int(ceil(end))
-                return (Int(edge)..<last).map { pixel in
+                return (Int(floor(edge))..<last).map { pixel in
                     let overlap = min(end, Float(pixel + 1)) - max(edge, Float(pixel))
-                    return Tap(index: min(source - 1, pixel), weight: overlap / ratio)
+                    return Tap(index: min(source - 1, max(0, pixel)), weight: overlap / ratio)
                 }
             }
             let scale = widenKernel && kernel != .bilinearLowQuality ? max(ratio, 1) : 1

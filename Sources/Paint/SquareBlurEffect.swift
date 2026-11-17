@@ -1,11 +1,15 @@
 import Foundation
 
 enum SquareBlurEffect {
-    static let filter = RasterFilter("Square Blur", category: "Blurs", [.init("Radius", 0...100, 4)],
+    static let filter = RasterFilter("Square Blur", category: "Blurs", [
+                                        .init("Radius", 0...300, 4),
+                                        .init("Gamma Boost", -0.99...2, 0, step: 0.01)
+                                     ],
                                      renderInColorSpace: { source, width, height, colorSpace, _, values, isCancelled in
         let radius = Int(values[0])
         guard radius > 0 else { return source }
-        let transfer = LinearEffectTransfer(colorSpace: colorSpace)
+        // Average RGB with an adjusted exponent and undo it after blur. Alpha is averaged separately.
+        let transfer = LinearEffectTransfer(colorSpace: colorSpace, sampleExponent: 1 + values[1])
         return blur(source, width: width, height: height, radius: radius, transfer: transfer, isCancelled: isCancelled)
     })
 

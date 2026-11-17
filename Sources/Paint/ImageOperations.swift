@@ -112,8 +112,9 @@ extension LayerStack {
                                        mode: sampling, linearLight: linearLight, colorSpace: activeLayer.workingColorSpace)
         var result = self
         result.layers = try layers.map { layer in
-            guard let source = layer.straightPixels else { throw CocoaError(.fileReadUnknown) }
-            return try layer.replacingRaster(resampler.resample(source), width: width, height: height)
+            guard let source = layer.straightPixels, let resized = resampler.resample(source)
+            else { throw CocoaError(.fileReadUnknown) }
+            return try layer.replacingRaster(resized, width: width, height: height)
         }
         return result
     }

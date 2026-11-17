@@ -10,14 +10,16 @@ struct LinearEffectTransfer {
 
     private let encoding: Encoding
     private let decoded: [SIMD3<Double>]
+    private let inverseExponent: Double
 
-    init(colorSpace: CGColorSpace) {
+    init(colorSpace: CGColorSpace, sampleExponent: Double = 1) {
+        let linear: [SIMD3<Double>]
         if colorSpace == BGRA8.sRGB {
             encoding = .sRGB
-            decoded = Self.linearSRGB
+            linear = Self.linearSRGB
         } else if let curve = RasterTransferCurve(colorSpace: colorSpace) {
             encoding = .profile(curve)
-            decoded = (0...255).map { value in
+            linear = (0...255).map { value in
                 let byte = UInt8(value)
                 return SIMD3(Double(curve.linearValue(of: byte, channel: 0)),
                              Double(curve.linearValue(of: byte, channel: 1)),
@@ -26,7 +28,12 @@ struct LinearEffectTransfer {
         } else {
             // Match the resampler's encoded-domain fallback for profiles without a linear counterpart.
             encoding = .identity
-            decoded = Self.identity
+            linear = Self.identity
+        }
+        inverseExponent = 1 / sampleExponent
+        decoded = sampleExponent == 1 ? linear : linear.map {
+            SIMD3(pow(max(0, $0.x), sampleExponent), pow(max(0, $0.y), sampleExponent),
+                  pow(max(0, $0.z), sampleExponent))
         }
     }
 
@@ -37,14 +44,15 @@ struct LinearEffectTransfer {
     }
 
     func encode(_ linear: Double, channel: Int) -> UInt8 {
+        let color = inverseExponent == 1 ? linear : pow(max(0, linear), inverseExponent)
         let encoded: Double
         switch encoding {
         case .sRGB:
-            encoded = linear <= 0.0031308 ? linear * 12.92 : 1.055 * pow(linear, 1 / 2.4) - 0.055
+            encoded = color <= 0.0031308 ? color * 12.92 : 1.055 * pow(color, 1 / 2.4) - 0.055
         case let .profile(curve):
-            return curve.encodedByte(for: Float(linear), channel: channel)
+            return curve.encodedByte(for: Float(color), channel: channel)
         case .identity:
-            encoded = linear
+            encoded = color
         }
         return UInt8(clamping: Int((encoded * 255).rounded(.toNearestOrEven)))
     }

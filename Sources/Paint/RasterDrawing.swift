@@ -145,11 +145,26 @@ final class RasterDrawing {
     }
 
     private func stamp(_ sample: BrushPath.Sample) {
-        let size = radius * sample.pressure
-        guard size > 0 else { return }
+        let requestedRadius = radius * sample.pressure
+        guard requestedRadius > 0 else { return }
         let width = layer.image.width, height = layer.image.height
-        let x = options.antialiased ? sample.point.x : floor(sample.point.x) + 0.5
-        let y = options.antialiased ? sample.point.y : floor(sample.point.y) + 0.5
+        let size: CGFloat
+        let center: CGPoint
+        if options.antialiased {
+            size = requestedRadius
+            center = sample.point
+        } else {
+            let diameter = max(1, (requestedRadius * 2).rounded())
+            size = diameter / 2
+            // Odd tips center on a pixel. Even tips center on the intersection of four pixels.
+            // Snap in top-left image coordinates so ties choose the same direction on both axes.
+            let phase: CGFloat = diameter.truncatingRemainder(dividingBy: 2) == 0 ? 0 : 0.5
+            func snap(_ coordinate: CGFloat) -> CGFloat {
+                floor(coordinate + 0.5 - phase) + phase
+            }
+            center = CGPoint(x: snap(sample.point.x), y: CGFloat(height) - snap(CGFloat(height) - sample.point.y))
+        }
+        let x = center.x, y = center.y
         let reach = size + (options.antialiased ? 0.5 : 0)
         let core = size * CGFloat(min(max(options.hardness, 0), 100)) / 100
         let left = max(0, Int(floor(x - reach))), right = min(width - 1, Int(ceil(x + reach)))

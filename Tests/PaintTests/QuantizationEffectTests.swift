@@ -72,9 +72,9 @@ struct QuantizationEffectTests {
         let bytes: [UInt8] = [0, 0, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255]
         let source = try input(bytes, width: 3, height: 1)
         let filter = SquareBlurEffect.filter
-        let pixels = try #require(source.render(filter, values: [1])?.straightPixels)
+        let pixels = try #require(source.render(filter, values: [1, 0])?.straightPixels)
         #expect(pixels == Data([0, 0, 255, 170, 188, 188, 255, 170, 255, 255, 255, 170]))
-        #expect(source.render(filter, values: [0])?.straightPixels == Data(bytes))
+        #expect(source.render(filter, values: [0, 0])?.straightPixels == Data(bytes))
     }
 
     private func input(_ bytes: [UInt8], width: Int, height: Int) throws -> RasterFilter.Input {

@@ -19,10 +19,16 @@ Run the Mac checks described in the [README](../README.md).
 
 The [Paint.NET 5.2 reference fixtures](../Tests/reference-pixels/README.md)
 verify exact output across all 1,024 pixels per case for Black and White,
-Invert Colors, Posterize at four RGBA levels, Pixelate with four-pixel cells
-and the default samplers, and Square Blur at radius two and default gamma.
-The edited layers and their PNG exports match, including RGB bytes at alpha zero.
-Alternate settings and the rest of the adjustment and effect catalog need captures.
+Invert Colors, Posterize at four RGBA levels, three sampler pairs for Pixelate
+with four-pixel cells, and Square Blur at radius two with default gamma and
+radius four with Gamma Boost −0.50, +0.50, and +1. The edited layers and their
+PNG exports match, including RGB bytes at alpha zero. Other options and
+effects need separate captures.
+
+An 8-pixel opaque Paintbrush dab with antialiasing off matches every byte
+in its 17 × 17 reference region. Hard and soft antialiased dabs are captured
+as well. Their coverage and differing subpixel click positions still need
+to be resolved.
 
 Paint.NET 5.2 reopened and resaved a Mac-edited 8 × 6 PDN. All 144 stored
 pixels across three layers, layer properties and resolution matched after

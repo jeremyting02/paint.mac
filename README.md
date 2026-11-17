@@ -212,7 +212,9 @@ Use **Adjustments** for tonal and color edits and **Effects** for the built-in
 filters. They operate on the active visible layer and honor the selection.
 **Posterize** links the red, green, and blue levels by default and lets you set
 the alpha levels separately. **Pixelate** offers independent Scale Down and
-Scale Up settings.
+Scale Up settings. **Square Blur** supports a radius from 0 to 300 and
+Gamma Boost from −0.99 to +2. Raising Gamma Boost gives brighter samples more
+weight in the blur.
 Configurable filters preview changes as you adjust their values. **Apply**
 adds a single history entry and **Cancel** discards the preview. **Effects →
 Repeat Last Effect** reuses the most recently applied effect settings.

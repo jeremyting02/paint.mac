@@ -93,6 +93,20 @@ import Testing
         #expect(ordinary.resample(Data([0, 0, 255, 255, 255, 0, 0, 0])) == Data([0, 0, 255, 128]))
     }
 
+    @Test func cancelledResamplingDiscardsThePartialImage() {
+        let source = Data(repeating: 255, count: 8 * 8 * 4)
+        for mode in [ImageResampler.Mode.nearest, .bicubic] {
+            let resampler = ImageResampler(sourceWidth: 8, sourceHeight: 8, width: 4, height: 4,
+                                           mode: mode, linearLight: true)
+            var checks = 0
+            let result = resampler.resample(source) {
+                checks += 1
+                return checks >= 3
+            }
+            #expect(result == nil)
+        }
+    }
+
     @Test func testDocumentImageCommandsUndoAndRedoAsSingleEdits() throws {
         let layer = try makeLayer([1, 2, 3, 4, 5, 6], width: 3)
         let document = PaintDocument()

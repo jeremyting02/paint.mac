@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -30,7 +31,12 @@ struct PaintNETPixelReferenceTests {
         Capture("Invert Colors", "invert-colors"),
         Capture("Posterize", "posterize-4", values: [4, 4, 4, 4]),
         Capture("Pixelate", "pixelate-4", values: [4, 2, 2]),
-        Capture("Square Blur", "square-blur-2", values: [2])
+        Capture("Pixelate", "pixelate-4-nearest-bilinear", values: [4, 5, 1]),
+        Capture("Pixelate", "pixelate-4-bilinear-nearest", values: [4, 4, 2]),
+        Capture("Square Blur", "square-blur-2", values: [2, 0]),
+        Capture("Square Blur", "square-blur-4-gamma-1", values: [4, 1]),
+        Capture("Square Blur", "square-blur-4-gamma-half", values: [4, 0.5]),
+        Capture("Square Blur", "square-blur-4-gamma-minus-half", values: [4, -0.5])
     ])
     func matchesPaintNET52Pixels(_ capture: Capture) throws {
         let source = try Self.loadPNG(Self.fixtureDirectory.appendingPathComponent("input.png"))
@@ -57,6 +63,41 @@ struct PaintNETPixelReferenceTests {
         #expect(exportDifferences.count == 0, Comment(rawValue: "Exported PNG: \(exportDifferences.description)"))
     }
 
+    @MainActor @Test func pixelatePanelPreviewsTheSelectedSamplers() async throws {
+        _ = NSApplication.shared
+        let source = try Self.loadPNG(Self.fixtureDirectory.appendingPathComponent("input.png"))
+        let input = try #require(RasterFilter.Input(layer: PaintLayer(name: "Input", image: source), selection: nil))
+        let panel = RasterFilterPanel(filter: PixelateEffect.filter, input: input)
+        defer { panel.stopPreview() }
+        let views = descendants(of: try #require(panel.contentView))
+        let size = try #require(views.compactMap { $0 as? NSSlider }.first)
+        let popups = views.compactMap { $0 as? NSPopUpButton }
+        let down = try #require(popups.first { $0.accessibilityLabel() == "Scale Down" })
+        let up = try #require(popups.first { $0.accessibilityLabel() == "Scale Up" })
+
+        panel.updatePreview()
+        size.doubleValue = 4
+        NSApp.sendAction(try #require(size.action), to: size.target, from: size)
+        down.selectItem(withTitle: "Nearest Neighbor")
+        NSApp.sendAction(try #require(down.action), to: down.target, from: down)
+        up.selectItem(withTitle: "Bilinear")
+        NSApp.sendAction(try #require(up.action), to: up.target, from: up)
+
+        for _ in 0..<100 where panel.result == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let captureURL = try #require(Self.referenceFile("pixelate-4-nearest-bilinear.png"))
+        let expected = try Self.storedBGRA(in: Self.loadPNG(captureURL))
+        let preview = try #require(panel.result?.straightPixels)
+        let differences = Self.differences(actual: preview, expected: expected, width: source.width)
+        #expect(differences.count == 0, Comment(rawValue: differences.description))
+        #expect(input.layer.image === source)
+    }
+
+    @MainActor private func descendants(of view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { descendants(of: $0) }
+    }
+
     static func referenceFile(_ name: String) -> URL? {
         for directory in [captureDirectory, fixtureDirectory].compactMap({ $0 }) {
             let url = directory.appendingPathComponent(name)
@@ -69,17 +110,25 @@ struct PaintNETPixelReferenceTests {
         try PaintFiles.readRaster(Data(contentsOf: url), expected: .png)
     }
 
-    private static func storedBGRA(in image: CGImage) throws -> Data {
-        try #require(image.bitsPerComponent == 8 && image.bitsPerPixel == 32 && image.alphaInfo == .last)
+    static func storedBGRA(in image: CGImage) throws -> Data {
+        try #require(image.bitsPerComponent == 8)
         try #require(image.bitmapInfo.intersection(.byteOrderMask) == .byteOrderDefault)
         try #require(image.colorSpace?.name == CGColorSpace.sRGB)
+        let packedRGB = image.bitsPerPixel == 24 && image.alphaInfo == .none
+        let paddedRGB = image.bitsPerPixel == 32 && image.alphaInfo == .noneSkipLast
+        let rgba = image.bitsPerPixel == 32 && image.alphaInfo == .last
+        try #require(packedRGB || paddedRGB || rgba)
+        let bytesPerPixel = packedRGB ? 3 : 4
         let bytes = try #require(image.dataProvider?.data) as Data
+        try #require(image.bytesPerRow >= image.width * bytesPerPixel)
+        try #require(bytes.count >= (image.height - 1) * image.bytesPerRow + image.width * bytesPerPixel)
         var bgra = Data()
         bgra.reserveCapacity(image.width * image.height * 4)
         for row in 0..<image.height {
             for column in 0..<image.width {
-                let offset = row * image.bytesPerRow + column * 4
-                bgra.append(contentsOf: [bytes[offset + 2], bytes[offset + 1], bytes[offset], bytes[offset + 3]])
+                let offset = row * image.bytesPerRow + column * bytesPerPixel
+                bgra.append(contentsOf: [bytes[offset + 2], bytes[offset + 1], bytes[offset],
+                                         rgba ? bytes[offset + 3] : 255])
             }
         }
         return bgra
