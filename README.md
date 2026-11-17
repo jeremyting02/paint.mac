@@ -36,6 +36,13 @@ Choose **Layer** to sample the active layer or **Image** to sample the visible
 composite. **Contiguous** selects connected pixels. **Global**, or **Shift-click**,
 also selects matching pixels in disconnected areas.
 
+Choose **Paint Bucket** or press **F**, then click to fill matching pixels on the active layer
+with the current paint color. It uses the same tolerance, sampling, and flood
+controls as Magic Wand. With a selection active, the fill starts and stays
+inside it. Adjust the color or tolerance or drag the sample handle while the
+fill is active. Click **Finish** or press **Return** to commit the fill as one
+undo step.
+
 Use the toolbar's **Selection Mode** menu with any selection tool. **Replace**
 starts a new selection, **Add** combines both areas, **Subtract** removes the
 new area, **Intersect** keeps only the overlap, and **XOR** keeps only the areas

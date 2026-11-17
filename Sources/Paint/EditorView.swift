@@ -10,6 +10,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let zoomLevel = NSTextField(labelWithString: "")
     private let brush = EditorView.icon("paintbrush", label: "Paintbrush")
     private let eraser = EditorView.icon("eraser", label: "Eraser")
+    private let paintBucket = EditorView.icon(EditorView.bucketImage, label: "Paint Bucket")
     private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
     private let ellipseSelect = EditorView.icon("circle.dashed", label: "Ellipse Select")
     private let lassoSelect = EditorView.icon("lasso", label: "Lasso Select")
@@ -24,8 +25,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let toolButtons = NSStackView()
     private let brushControls = NSStackView()
     private let selectionModes = NSPopUpButton()
-    private let wandControls = NSStackView()
-    private let wandToleranceValue = NSTextField(labelWithString: "")
+    private let floodControls = NSStackView()
+    private let floodToleranceValue = NSTextField(labelWithString: "")
     private let colorControls = NSStackView()
     private let historyScroll = NSScrollView()
     private let historyTable = NSTableView()
@@ -35,6 +36,11 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let layersView: LayersView
     private var panels: UtilityPanels?
     private let swatchColors: [(String, NSColor)] = [("Black", .black), ("Red", .systemRed), ("Blue", .systemBlue)]
+    private var tools: [(button: NSButton, tool: CanvasView.Tool)] {
+        [(brush, .brush), (eraser, .eraser), (paintBucket, .paintBucket), (rectangleSelect, .rectangleSelect),
+         (ellipseSelect, .ellipseSelect), (lassoSelect, .lassoSelect), (magicWand, .magicWand),
+         (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)]
+    }
 
     init(document: PaintDocument) {
         self.document = document
@@ -42,7 +48,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
-        for button in [brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection] {
+        for (button, _) in tools {
             button.setButtonType(.pushOnPushOff)
             button.target = self
             button.action = #selector(selectTool(_:))
@@ -79,9 +85,9 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         finish.action = #selector(commitSelection(_:))
         finish.toolTip = "Finish editing and keep the selection"
         canvas.selectionDidChange = { [weak self] in self?.updateStatus() }
-        canvas.selectTransformTool = { [weak self] tool in
-            guard let self else { return }
-            self.selectTool(tool == .moveSelection ? self.moveSelection : self.moveSelectedPixels)
+        canvas.selectTool = { [weak self] tool in
+            guard let self, let button = tools.first(where: { $0.tool == tool })?.button else { return }
+            selectTool(button)
         }
 
         scrollView.documentView = canvas
@@ -124,8 +130,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         selectionModes.action = #selector(changeSelectionMode(_:))
         let toolbar = NSStackView(views: [undo, redo, brushControls, selectionModes, applyCrop, finish])
         toolbar.spacing = 8
-        configureWandControls()
-        let toolbarRows = NSStackView(views: [toolbar, wandControls])
+        configureFloodControls()
+        let toolbarRows = NSStackView(views: [toolbar, floodControls])
         toolbarRows.orientation = .vertical
         toolbarRows.alignment = .leading
         toolbarRows.spacing = 5
@@ -230,12 +236,12 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func updateStatus() {
-        brushControls.isHidden = canvas.tool.drawsSelection
+        brushControls.isHidden = canvas.tool.drawsSelection || canvas.tool == .paintBucket
         selectionModes.isHidden = !canvas.tool.drawsSelection
-        wandControls.isHidden = canvas.tool != .magicWand
+        floodControls.isHidden = !canvas.tool.usesFlood
         applyCrop.isEnabled = canvas.cropRect != nil
-        finish.isHidden = !canvas.tool.transformsSelection && canvas.tool != .magicWand
-        finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingWandSelection
+        finish.isHidden = !canvas.tool.transformsSelection && !canvas.tool.usesFlood
+        finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingFloodEdit
         updateUndoButtons(document?.undoManager)
         let dimensions = document?.image.map { "\($0.width) × \($0.height) px" } ?? ""
         if let angle = canvas.rotationDegrees, abs(angle) >= 0.05 {
@@ -253,8 +259,8 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func updateUndoButtons(_ history: UndoManager?) {
-        undo.isEnabled = history?.canUndo == true || canvas.hasWandSelectionChange
-        redo.isEnabled = history?.canRedo == true && !canvas.hasWandSelectionChange
+        undo.isEnabled = history?.canUndo == true || canvas.hasFloodChange
+        redo.isEnabled = history?.canRedo == true && !canvas.hasFloodChange
         historyUndo.isEnabled = undo.isEnabled
         historyRedo.isEnabled = redo.isEnabled
     }
@@ -289,11 +295,6 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     @objc private func selectTool(_ sender: NSButton) {
-        let tools: [(NSButton, CanvasView.Tool)] = [
-            (brush, .brush), (eraser, .eraser), (rectangleSelect, .rectangleSelect),
-            (ellipseSelect, .ellipseSelect), (lassoSelect, .lassoSelect), (magicWand, .magicWand),
-            (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)
-        ]
         for (button, tool) in tools {
             let selected = button === sender
             button.state = selected ? .on : .off
@@ -328,55 +329,55 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         canvas.window?.makeFirstResponder(canvas)
     }
 
-    private func configureWandControls() {
+    private func configureFloodControls() {
         let label = NSTextField(labelWithString: "Tolerance")
-        let tolerance = NSSlider(value: Double(canvas.magicWand.tolerance), minValue: 0, maxValue: 100,
-                                 target: self, action: #selector(changeWandTolerance(_:)))
+        let tolerance = NSSlider(value: Double(canvas.floodSettings.tolerance), minValue: 0, maxValue: 100,
+                                 target: self, action: #selector(changeFloodTolerance(_:)))
         tolerance.isContinuous = true
         tolerance.setAccessibilityLabel("Tolerance")
-        wandToleranceValue.alignment = .right
-        wandToleranceValue.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        wandToleranceValue.stringValue = "\(canvas.magicWand.tolerance)%"
+        floodToleranceValue.alignment = .right
+        floodToleranceValue.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        floodToleranceValue.stringValue = "\(canvas.floodSettings.tolerance)%"
 
         let sampling = NSPopUpButton()
-        sampling.addItems(withTitles: MagicWand.Sampling.allCases.map(\.rawValue))
-        sampling.selectItem(withTitle: canvas.magicWand.sampling.rawValue)
+        sampling.addItems(withTitles: FloodSettings.Sampling.allCases.map(\.rawValue))
+        sampling.selectItem(withTitle: canvas.floodSettings.sampling.rawValue)
         sampling.setAccessibilityLabel("Sampling")
         sampling.toolTip = "Sample the active layer or the composite image"
         sampling.target = self
-        sampling.action = #selector(changeWandSampling(_:))
+        sampling.action = #selector(changeFloodSampling(_:))
 
         let flood = NSPopUpButton()
-        flood.addItems(withTitles: MagicWand.Flood.allCases.map(\.rawValue))
-        flood.selectItem(withTitle: canvas.magicWand.flood.rawValue)
+        flood.addItems(withTitles: FloodSettings.Flood.allCases.map(\.rawValue))
+        flood.selectItem(withTitle: canvas.floodSettings.flood.rawValue)
         flood.setAccessibilityLabel("Flood Mode")
         flood.toolTip = "Select touching pixels or matching pixels anywhere"
         flood.target = self
-        flood.action = #selector(changeWandFlood(_:))
+        flood.action = #selector(changeFloodFlood(_:))
 
-        wandControls.spacing = 8
-        for view in [label, tolerance, wandToleranceValue, sampling, flood] {
-            wandControls.addArrangedSubview(view)
+        floodControls.spacing = 8
+        for view in [label, tolerance, floodToleranceValue, sampling, flood] {
+            floodControls.addArrangedSubview(view)
         }
         tolerance.widthAnchor.constraint(equalToConstant: 86).isActive = true
-        wandToleranceValue.widthAnchor.constraint(equalToConstant: 38).isActive = true
+        floodToleranceValue.widthAnchor.constraint(equalToConstant: 38).isActive = true
     }
 
-    @objc private func changeWandTolerance(_ sender: NSSlider) {
-        canvas.setWandTolerance(Int(sender.doubleValue.rounded()))
-        wandToleranceValue.stringValue = "\(canvas.magicWand.tolerance)%"
+    @objc private func changeFloodTolerance(_ sender: NSSlider) {
+        canvas.setFloodTolerance(Int(sender.doubleValue.rounded()))
+        floodToleranceValue.stringValue = "\(canvas.floodSettings.tolerance)%"
     }
 
-    @objc private func changeWandSampling(_ sender: NSPopUpButton) {
-        if let title = sender.titleOfSelectedItem, let mode = MagicWand.Sampling(rawValue: title) {
-            canvas.magicWand.sampling = mode
+    @objc private func changeFloodSampling(_ sender: NSPopUpButton) {
+        if let title = sender.titleOfSelectedItem, let mode = FloodSettings.Sampling(rawValue: title) {
+            canvas.floodSettings.sampling = mode
         }
         canvas.window?.makeFirstResponder(canvas)
     }
 
-    @objc private func changeWandFlood(_ sender: NSPopUpButton) {
-        if let title = sender.titleOfSelectedItem, let mode = MagicWand.Flood(rawValue: title) {
-            canvas.magicWand.flood = mode
+    @objc private func changeFloodFlood(_ sender: NSPopUpButton) {
+        if let title = sender.titleOfSelectedItem, let mode = FloodSettings.Flood(rawValue: title) {
+            canvas.floodSettings.flood = mode
         }
         canvas.window?.makeFirstResponder(canvas)
     }
@@ -391,11 +392,36 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     static func icon(_ symbol: String, label: String) -> NSButton {
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage()
+        icon(NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(), label: label)
+    }
+
+    private static func icon(_ image: NSImage, label: String) -> NSButton {
         let button = NSButton(image: image, target: nil, action: nil)
         button.bezelStyle = .texturedRounded
         button.toolTip = label
         button.setAccessibilityLabel(label)
         return button
     }
+
+    private static let bucketImage: NSImage = {
+        let image = NSImage(size: CGSize(width: 17, height: 17), flipped: false) { _ in
+            NSColor.black.set()
+            let bucket = NSBezierPath()
+            bucket.move(to: CGPoint(x: 1.5, y: 8))
+            bucket.line(to: CGPoint(x: 7.5, y: 14))
+            bucket.line(to: CGPoint(x: 13.5, y: 8))
+            bucket.line(to: CGPoint(x: 7.5, y: 2))
+            bucket.close()
+            bucket.move(to: CGPoint(x: 7.5, y: 10))
+            bucket.line(to: CGPoint(x: 4.5, y: 16))
+            bucket.lineWidth = 1.4
+            bucket.lineJoinStyle = .round
+            bucket.lineCapStyle = .round
+            bucket.stroke()
+            NSBezierPath(ovalIn: CGRect(x: 13.5, y: 3, width: 3, height: 3.5)).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 }

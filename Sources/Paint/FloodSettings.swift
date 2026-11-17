@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-struct MagicWand {
+struct FloodSettings {
     enum Sampling: String, CaseIterable {
         case layer = "Layer"
         case image = "Image"
@@ -16,21 +16,24 @@ struct MagicWand {
     var sampling: Sampling = .layer
     var flood: Flood = .contiguous
 
-    func select(in layer: PaintLayer, x: Int, y: Int) -> SelectionOutline? {
+    func select(in layer: PaintLayer, x: Int, y: Int, within mask: Data? = nil) -> SelectionOutline? {
         let width = layer.image.width, height = layer.image.height
-        guard (0..<width).contains(x), (0..<height).contains(y),
-              let pixels = layer.straightPixels else { return nil }
-        if tolerance == 100 {
+        guard (0..<width).contains(x), (0..<height).contains(y) else { return nil }
+        let seedIndex = y * width + x
+        if let mask, mask.count != width * height || mask[seedIndex] == 0 { return nil }
+        if tolerance == 100 && mask == nil {
             return SelectionOutline(rect: CGRect(x: 0, y: 0, width: width, height: height))
         }
+        guard let pixels = layer.straightPixels else { return nil }
 
-        var region = WandRegion(width: width, height: height)
+        var region = FloodRegion(width: width, height: height)
         pixels.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
-            let seed = Sample(bytes, at: (y * width + x) * 4)
+            let seed = Sample(bytes, at: seedIndex * 4)
             let maximum = tolerance * 255 * 255 / 100
             let limit = 4 * maximum * maximum
             region.select(x: x, y: y, flood: flood) { index in
-                seed.matches(Sample(bytes, at: index * 4), limit: limit)
+                if let mask, mask[index] == 0 { return false }
+                return seed.matches(Sample(bytes, at: index * 4), limit: limit)
             }
         }
         return region.outline()
@@ -59,7 +62,7 @@ struct MagicWand {
     }
 }
 
-private struct WandRegion {
+private struct FloodRegion {
     private enum Direction: Int, CaseIterable {
         case east, south, west, north
 
@@ -92,7 +95,7 @@ private struct WandRegion {
         }
     }
 
-    mutating func select(x: Int, y: Int, flood: MagicWand.Flood, matches: (Int) -> Bool) {
+    mutating func select(x: Int, y: Int, flood: FloodSettings.Flood, matches: (Int) -> Bool) {
         if flood == .global {
             for row in 0..<height {
                 for column in 0..<width where matches(row * width + column) {
@@ -196,5 +199,29 @@ private struct WandRegion {
         case .west: return contains(vertex - stride - 1) && !contains(vertex - 1)
         case .north: return contains(vertex - stride) && !contains(vertex - stride - 1)
         }
+    }
+}
+
+extension PaintLayer {
+    func filling(_ outline: SelectionOutline, blue: UInt8, green: UInt8, red: UInt8) -> PaintLayer? {
+        let bounds = outline.bounds.integral
+        let rect = CGRect(x: bounds.minX, y: CGFloat(image.height) - bounds.maxY,
+                          width: bounds.width, height: bounds.height)
+        guard let mask = outline.mask(in: rect, imageHeight: image.height),
+              var pixels = straightPixels else { return nil }
+        let width = Int(rect.width)
+        let origin = Int(rect.minY) * image.width + Int(rect.minX)
+        let fill = (UInt32(blue) | UInt32(green) << 8 | UInt32(red) << 16 | 0xff000000).littleEndian
+        let changed = pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+            var changed = false
+            for index in mask.indices where mask[index] != 0 {
+                let offset = (origin + index / width * image.width + index % width) * 4
+                guard target.loadUnaligned(fromByteOffset: offset, as: UInt32.self) != fill else { continue }
+                target.storeBytes(of: fill, toByteOffset: offset, as: UInt32.self)
+                changed = true
+            }
+            return changed
+        }
+        return changed ? withPixels(pixels) : nil
     }
 }

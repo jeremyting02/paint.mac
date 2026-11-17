@@ -2,7 +2,7 @@ import AppKit
 
 final class CanvasView: NSView {
     enum Tool {
-        case brush, eraser, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection
+        case brush, eraser, paintBucket, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection
 
         var selectionName: String? {
             switch self {
@@ -14,6 +14,7 @@ final class CanvasView: NSView {
             }
         }
         var drawsSelection: Bool { selectionName != nil }
+        var usesFlood: Bool { self == .magicWand || self == .paintBucket }
         var transformsSelection: Bool { self == .moveSelectedPixels || self == .moveSelection }
     }
 
@@ -25,13 +26,17 @@ final class CanvasView: NSView {
         let lassoPath: CGMutablePath?
     }
 
-    private struct WandSelection {
+    private struct FloodEdit {
+        enum Operation {
+            case select(mode: SelectionOutline.Mode, before: SelectionOutline?)
+            case fill(layer: PaintLayer, mask: Data?)
+        }
+
         let source: PaintLayer
         var x: Int
         var y: Int
-        let flood: MagicWand.Flood
-        let mode: SelectionOutline.Mode
-        let before: SelectionOutline?
+        let flood: FloodSettings.Flood
+        let operation: Operation
     }
 
     struct MoveSession {
@@ -148,8 +153,8 @@ final class CanvasView: NSView {
         }
         return NSCursor(image: image, hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2))
     }()
-    private static let wandHandleIcon = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right",
-                                                 accessibilityDescription: "Move Magic Wand click point")
+    private static let floodHandleIcon = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right",
+                                                 accessibilityDescription: "Move flood tool click point")
 
     private weak var document: PaintDocument?
     var tool = Tool.brush {
@@ -168,10 +173,12 @@ final class CanvasView: NSView {
     private(set) var zoomPercent: CGFloat?
     private(set) var displayedZoomPercent: CGFloat = 0
     var zoomDidChange: (() -> Void)?
-    var brushColor = NSColor.black
+    var brushColor = NSColor.black {
+        didSet { if tool == .paintBucket { updateFloodEdit() } }
+    }
     var brushSize: CGFloat = 12
     var selectionDidChange: (() -> Void)?
-    var selectTransformTool: ((Tool) -> Void)?
+    var selectTool: ((Tool) -> Void)?
     var layerPreview: LayerStack? {
         didSet {
             composite = nil
@@ -182,9 +189,10 @@ final class CanvasView: NSView {
 
     private(set) var selectionOutline: SelectionOutline?
     var selectionMode: SelectionOutline.Mode = .replace
-    var magicWand = MagicWand()
-    private var wandSelection: WandSelection?
-    private var wandDrag: (anchor: CGPoint, x: Int, y: Int)?
+    var floodSettings = FloodSettings()
+    private var floodEdit: FloodEdit?
+    private var fillPreview: PaintLayer?
+    private var floodDrag: (anchor: CGPoint, x: Int, y: Int)?
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionDrag: SelectionDrag?
 
@@ -279,7 +287,7 @@ final class CanvasView: NSView {
     @objc private func windowDidResignKey(_ notification: Notification) {
         completeMoveDrag()
         cancelSelectionDrag()
-        wandDrag = nil
+        floodDrag = nil
         guard panLocation != nil else { return }
         panLocation = nil
         window?.invalidateCursorRects(for: self)
@@ -311,19 +319,19 @@ final class CanvasView: NSView {
 
     override func cursorUpdate(with event: NSEvent) {
         if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
-        else if tool == .magicWand { updateWandCursor(at: convert(event.locationInWindow, from: nil)) }
+        else if tool.usesFlood { updateFloodCursor(at: convert(event.locationInWindow, from: nil)) }
         else { super.cursorUpdate(with: event) }
     }
 
     override func mouseMoved(with event: NSEvent) {
         if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
-        else if tool == .magicWand { updateWandCursor(at: convert(event.locationInWindow, from: nil)) }
+        else if tool.usesFlood { updateFloodCursor(at: convert(event.locationInWindow, from: nil)) }
         else { super.mouseMoved(with: event) }
     }
 
-    private func updateWandCursor(at location: CGPoint) {
-        if wandDrag != nil || panLocation != nil { NSCursor.closedHand.set() }
-        else if wandHandle?.frame.contains(location) == true { NSCursor.openHand.set() }
+    private func updateFloodCursor(at location: CGPoint) {
+        if floodDrag != nil || panLocation != nil { NSCursor.closedHand.set() }
+        else if floodHandle?.frame.contains(location) == true { NSCursor.openHand.set() }
         else { (imageRect.contains(location) ? NSCursor.crosshair : .arrow).set() }
     }
 
@@ -359,7 +367,7 @@ final class CanvasView: NSView {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, wandDrag == nil, panLocation == nil,
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, floodDrag == nil, panLocation == nil,
               let scrollView = enclosingScrollView else { return }
 
         let steps: Int
@@ -396,7 +404,7 @@ final class CanvasView: NSView {
             super.otherMouseDown(with: event)
             return
         }
-        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, wandDrag == nil else { return }
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, floodDrag == nil else { return }
         panLocation = event.locationInWindow
         NSCursor.closedHand.set()
         window?.invalidateCursorRects(for: self)
@@ -427,8 +435,8 @@ final class CanvasView: NSView {
         let location = convert(event.locationInWindow, from: nil)
         if tool.transformsSelection && visibleRect.contains(location) {
             updateMoveCursor(at: location)
-        } else if tool == .magicWand && visibleRect.contains(location) {
-            updateWandCursor(at: location)
+        } else if tool.usesFlood && visibleRect.contains(location) {
+            updateFloodCursor(at: location)
         } else if visibleRect.contains(location) && imageRect.contains(location) {
             NSCursor.crosshair.set()
         } else {
@@ -500,7 +508,7 @@ final class CanvasView: NSView {
         return selectionOutline
     }
 
-    var copyableLayer: PaintLayer? { move?.preview ?? document?.stack?.activeLayer }
+    var copyableLayer: PaintLayer? { move?.preview ?? fillPreview ?? document?.stack?.activeLayer }
     var canCopyPixels: Bool {
         copyableLayer != nil && (copyableOutline != nil || (selectionOutline == nil && move?.isPaste != true))
     }
@@ -534,11 +542,12 @@ final class CanvasView: NSView {
     func cancelEditingGesture() {
         stroke = nil
         cancelSelectionDrag()
-        wandDrag = nil
-        if let wandSelection {
-            self.wandSelection = nil
-            setSelection(wandSelection.before)
+        floodDrag = nil
+        if let floodEdit {
+            self.floodEdit = nil
+            if case .select(_, let before) = floodEdit.operation { setSelection(before) }
         }
+        fillPreview = nil
         if let drag = moveDrag {
             moveDrag = nil
             move = drag.before
@@ -549,12 +558,15 @@ final class CanvasView: NSView {
     }
 
     var hasPendingMove: Bool { move?.recorded == true || move?.changed == true }
-    var hasPendingWandSelection: Bool { wandSelection != nil }
-    var hasWandSelectionChange: Bool {
-        guard let wandSelection else { return false }
-        return wandSelection.before != selectionOutline
+    var hasPendingFloodEdit: Bool { floodEdit != nil }
+    var hasFloodChange: Bool {
+        guard let floodEdit else { return false }
+        switch floodEdit.operation {
+        case .select(_, let before): return before != selectionOutline
+        case .fill: return fillPreview != nil
+        }
     }
-    var hasPendingPixelMove: Bool { move?.preview != nil }
+    var hasPendingPixelEdit: Bool { move?.preview != nil || fillPreview != nil }
     var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
 
     func restoreMove(_ session: MoveSession?) {
@@ -562,7 +574,7 @@ final class CanvasView: NSView {
         if let session {
             let transformTool: Tool = session.pixels == nil ? .moveSelection : .moveSelectedPixels
             if tool != transformTool {
-                if let selectTransformTool { selectTransformTool(transformTool) }
+                if let selectTool { selectTool(transformTool) }
                 else { tool = transformTool }
             }
         }
@@ -574,7 +586,7 @@ final class CanvasView: NSView {
     }
 
     func finishSelection() {
-        finishWandSelection()
+        finishFloodEdit()
         completeMoveDrag()
         guard let session = move, let image = document?.image else { return }
         guard session.recorded else {
@@ -651,13 +663,18 @@ final class CanvasView: NSView {
         let isEscape = event.keyCode == 53
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         let deselects = (isEscape || isReturn) &&
-            (move != nil || !selection.isEmpty || selectionDrag != nil || hasPendingWandSelection)
+            (move != nil || !selection.isEmpty || selectionDrag != nil || hasPendingFloodEdit)
         if event.isARepeat && (isEscape || deselects) { return }
-        if !event.isARepeat, event.charactersIgnoringModifiers?.lowercased() == "m",
-           event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-           let selectTransformTool {
-            let outline = event.modifierFlags.contains(.shift) || tool == .moveSelectedPixels
-            selectTransformTool(outline ? .moveSelection : .moveSelectedPixels)
+        if !event.isARepeat, event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+           let selectTool, let shortcut = event.charactersIgnoringModifiers?.lowercased(), shortcut == "m" || shortcut == "f" {
+            if shortcut == "f" {
+                selectTool(.paintBucket)
+            } else {
+                let outline = event.modifierFlags.contains(.shift) || tool == .moveSelectedPixels
+                selectTool(outline ? .moveSelection : .moveSelectedPixels)
+            }
+        } else if (isEscape || isReturn) && tool == .paintBucket && hasPendingFloodEdit {
+            finishFloodEdit()
         } else if deselects {
             document?.deselect(nil)
         } else if tool.transformsSelection, let delta = nudge(for: event), moveDrag == nil,
@@ -847,10 +864,10 @@ final class CanvasView: NSView {
             return
         }
         let location = convert(event.locationInWindow, from: nil)
-        if let edit = wandSelection, wandHandle?.frame.contains(location) == true {
+        if let edit = floodEdit, floodHandle?.frame.contains(location) == true {
             window?.makeFirstResponder(self)
-            wandDrag = (imagePoint(location), edit.x, edit.y)
-            updateWandCursor(at: location)
+            floodDrag = (imagePoint(location), edit.x, edit.y)
+            updateFloodCursor(at: location)
             return
         }
         guard imageRect.contains(location), let image = document?.image else {
@@ -859,8 +876,8 @@ final class CanvasView: NSView {
         }
 
         window?.makeFirstResponder(self)
-        if tool == .magicWand {
-            selectWithWand(at: imagePoint(location), global: event.modifierFlags.contains(.shift))
+        if tool.usesFlood {
+            beginFloodEdit(at: imagePoint(location), modifiers: event.modifierFlags)
             return
         }
         if tool.drawsSelection {
@@ -898,59 +915,102 @@ final class CanvasView: NSView {
         needsDisplay = true
     }
 
-    private func selectWithWand(at point: CGPoint, global: Bool) {
-        finishWandSelection()
-        guard let stack = document?.stack,
-              var source = magicWand.sampling == .image ? stack.flattenedLayer() : stack.activeLayer,
+    private func beginFloodEdit(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
+        finishFloodEdit()
+        guard let stack = document?.stack else { return }
+        let fillsPixels = tool == .paintBucket
+        if fillsPixels && !stack.activeLayer.isVisible {
+            NSSound.beep()
+            return
+        }
+        let sampleImage = floodSettings.sampling == .image
+        guard var source = sampleImage ? stack.flattenedLayer() : stack.activeLayer,
               let pixels = source.straightPixels else { return }
         source.pdnPixels = pixels
         let x = min(max(0, Int(point.x)), source.image.width - 1)
         let y = min(max(0, source.image.height - 1 - Int(point.y)), source.image.height - 1)
-        wandSelection = WandSelection(source: source, x: x, y: y, flood: global ? .global : magicWand.flood,
-                                      mode: selectionMode, before: selectionOutline)
-        updateWandSelection()
+        let operation: FloodEdit.Operation
+        if fillsPixels {
+            var layer = stack.activeLayer
+            guard let original = sampleImage ? layer.straightPixels : pixels else { return }
+            layer.pdnPixels = original
+            var mask: Data?
+            if let outline = selectionOutline {
+                guard let selectionMask = outline.mask(in: canvasBounds(for: layer.image), imageHeight: layer.image.height),
+                      selectionMask[y * layer.image.width + x] != 0 else { return }
+                mask = selectionMask
+            }
+            operation = .fill(layer: layer, mask: mask)
+        } else {
+            operation = .select(mode: selectionMode, before: selectionOutline)
+        }
+        let flood: FloodSettings.Flood = modifiers.contains(.shift) ? .global : floodSettings.flood
+        floodEdit = FloodEdit(source: source, x: x, y: y, flood: flood, operation: operation)
+        updateFloodEdit()
         needsDisplay = true
         selectionDidChange?()
     }
 
-    func setWandTolerance(_ tolerance: Int) {
-        guard magicWand.tolerance != tolerance else { return }
-        magicWand.tolerance = tolerance
-        updateWandSelection()
+    func setFloodTolerance(_ tolerance: Int) {
+        guard floodSettings.tolerance != tolerance else { return }
+        floodSettings.tolerance = tolerance
+        updateFloodEdit()
     }
 
-    private func updateWandSelection() {
-        guard let edit = wandSelection else { return }
-        var wand = magicWand
-        wand.flood = edit.flood
-        guard let outline = wand.select(in: edit.source, x: edit.x, y: edit.y) else { return }
-        setSelection(edit.mode.applying(outline, to: edit.before))
+    private func updateFloodEdit() {
+        guard let edit = floodEdit else { return }
+        var settings = floodSettings
+        settings.flood = edit.flood
+        switch edit.operation {
+        case .select(let mode, let before):
+            guard let outline = settings.select(in: edit.source, x: edit.x, y: edit.y) else { return }
+            setSelection(mode.applying(outline, to: before))
+        case .fill(let layer, let mask):
+            let outline = settings.select(in: edit.source, x: edit.x, y: edit.y, within: mask)
+            let color = brushColor.usingColorSpace(.sRGB) ?? .black
+            func byte(_ component: CGFloat) -> UInt8 { UInt8((min(max(component, 0), 1) * 255).rounded()) }
+            fillPreview = outline.flatMap {
+                layer.filling($0, blue: byte(color.blueComponent), green: byte(color.greenComponent),
+                              red: byte(color.redComponent))
+            }
+            composite = nil
+            needsDisplay = true
+            selectionDidChange?()
+        }
     }
 
-    func finishWandSelection() {
-        guard let edit = wandSelection else { return }
-        let result = selectionOutline
-        wandDrag = nil
-        wandSelection = nil
+    func finishFloodEdit() {
+        guard let edit = floodEdit else { return }
+        floodDrag = nil
+        floodEdit = nil
         needsDisplay = true
-        setSelection(edit.before)
-        let name = edit.mode == .replace ? "Magic Wand" : "Magic Wand (\(edit.mode.rawValue))"
-        document?.commitSelection(result, actionName: name)
+        switch edit.operation {
+        case .select(let mode, let before):
+            let result = selectionOutline
+            setSelection(before)
+            let name = mode == .replace ? "Magic Wand" : "Magic Wand (\(mode.rawValue))"
+            document?.commitSelection(result, actionName: name)
+        case .fill:
+            let result = fillPreview
+            fillPreview = nil
+            composite = nil
+            if let result { document?.commitBucketFill(result) }
+        }
         selectionDidChange?()
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard !imageRect.isEmpty else { return }
         let location = convert(event.locationInWindow, from: nil)
-        if let drag = wandDrag, var edit = wandSelection {
+        if let drag = floodDrag, var edit = floodEdit {
             let delta = imagePoint(location) - drag.anchor
             let x = min(max(0, drag.x + Int(delta.x.rounded())), edit.source.image.width - 1)
             let y = min(max(0, drag.y - Int(delta.y.rounded())), edit.source.image.height - 1)
             if edit.x != x || edit.y != y {
                 edit.x = x
                 edit.y = y
-                wandSelection = edit
-                updateWandSelection()
+                floodEdit = edit
+                updateFloodEdit()
                 needsDisplay = true
             }
             return
@@ -987,9 +1047,9 @@ final class CanvasView: NSView {
             return
         }
         mouseDragged(with: event)
-        if wandDrag != nil {
-            wandDrag = nil
-            updateWandCursor(at: convert(event.locationInWindow, from: nil))
+        if floodDrag != nil {
+            floodDrag = nil
+            updateFloodCursor(at: convert(event.locationInWindow, from: nil))
             return
         }
         if let drag = selectionDrag, let name = tool.selectionName {
@@ -1016,13 +1076,13 @@ final class CanvasView: NSView {
         let visible = rect.intersection(dirtyRect)
         guard let context = NSGraphicsContext.current?.cgContext,
               var stack = layerPreview ?? document?.stack else { return }
-        if let preview = move?.preview { stack.layers[stack.active] = preview }
+        if let preview = move?.preview ?? fillPreview { stack.layers[stack.active] = preview }
         let image = stack.activeLayer.image
         let showsHandles = showsTransformHandles(on: stack.activeLayer)
         let geometry = moveGeometry(for: image)
         let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
-            if let handle = wandHandle { drawWandHandle(at: handle.seed, frame: handle.frame, in: context) }
+            if let handle = floodHandle { drawFloodHandle(at: handle.seed, frame: handle.frame, in: context) }
             if showsHandles && !marquee.isEmpty {
                 let pivot = self.marquee(for: CGRect(origin: geometry.pivot, size: .zero), imageWidth: image.width).origin
                 drawTransformHandles(around: marquee, angle: geometry.angle, pivot: pivot, in: context)
@@ -1082,8 +1142,8 @@ final class CanvasView: NSView {
         }
     }
 
-    private var wandHandle: (seed: CGPoint, frame: CGRect)? {
-        guard tool == .magicWand, let edit = wandSelection, !imageRect.isEmpty else { return nil }
+    private var floodHandle: (seed: CGPoint, frame: CGRect)? {
+        guard tool.usesFlood, let edit = floodEdit, !imageRect.isEmpty else { return nil }
         let pixel = CGPoint(x: CGFloat(edit.x) + 0.5, y: CGFloat(edit.source.image.height - edit.y) - 0.5)
         let seed = marquee(for: CGRect(origin: pixel, size: .zero), imageWidth: edit.source.image.width).origin
         let viewport = visibleRect
@@ -1095,7 +1155,7 @@ final class CanvasView: NSView {
         return (seed, CGRect(x: x - halfSize, y: y - halfSize, width: 2 * halfSize, height: 2 * halfSize))
     }
 
-    private func drawWandHandle(at seed: CGPoint, frame: CGRect, in context: CGContext) {
+    private func drawFloodHandle(at seed: CGPoint, frame: CGRect, in context: CGContext) {
         context.saveGState()
         context.setStrokeColor(NSColor.black.cgColor)
         context.setFillColor(NSColor.black.cgColor)
@@ -1111,7 +1171,7 @@ final class CanvasView: NSView {
         context.fill(frame)
         context.setStrokeColor(NSColor.black.cgColor)
         context.stroke(frame)
-        Self.wandHandleIcon?.draw(in: frame.insetBy(dx: 3, dy: 3))
+        Self.floodHandleIcon?.draw(in: frame.insetBy(dx: 3, dy: 3))
         context.restoreGState()
     }
 
