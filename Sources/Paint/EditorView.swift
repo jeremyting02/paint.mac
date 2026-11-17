@@ -425,14 +425,58 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let document else { return nil }
         let identifier = NSUserInterfaceItemIdentifier("History Entry")
-        let label = tableView.makeView(withIdentifier: identifier, owner: nil) as? NSTextField
-            ?? NSTextField(labelWithString: "")
-        label.identifier = identifier
-        label.stringValue = document.historyEntries[row]
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        label.lineBreakMode = .byTruncatingTail
-        return label
+        let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? HistoryCell ?? HistoryCell()
+        let action = document.historyEntries[row]
+        cell.identifier = identifier
+        cell.textField?.stringValue = action
+        cell.imageView?.image = historyIcon(for: action)
+        return cell
     }
+
+    private func historyIcon(for action: String) -> NSImage? {
+        // Selection tools append the combination mode to the action name.
+        let name = action.range(of: " (").map { String(action[..<$0.lowerBound]) } ?? action
+        switch name {
+        case "Move Selected Pixels", "Resize Selected Pixels", "Rotate Pixels":
+            return moveSelectedPixels.image
+        case "Crop to Selection":
+            return applyCrop.image
+        default:
+            if let tool = tools.first(where: { $0.button.toolTip == name }) { return tool.button.image }
+        }
+
+        let symbol = switch name {
+        case "New Image": "doc.badge.plus"
+        case "Open Image", "Import From File": "folder"
+        case "Cut": "scissors"
+        case "Paste", "Paste into New Layer", "Paste into New Image": "doc.on.clipboard"
+        case "Paste Selection", "Select All", "Invert Selection", "Deselect", "Finish Selection": "rectangle.dashed"
+        case "Erase Selection": "eraser"
+        case "Fill Selection": "drop.fill"
+        case "Add Layer": "plus.square.on.square"
+        case "Duplicate Layer": "plus.square.on.square"
+        case "Delete Layer": "trash"
+        case "Show Layer": "eye"
+        case "Hide Layer": "eye.slash"
+        case "Move Layer": "arrow.up.arrow.down"
+        case "Merge Layer Down", "Flatten": "square.3.layers.3d"
+        case "Layer Properties": "slider.horizontal.3"
+        case "Resize", "Canvas Size", "Set Resolution": "arrow.up.left.and.arrow.down.right"
+        case "Assign Color Profile", "Convert Color Profile": "paintpalette"
+        case let title where title.hasPrefix("Rotate"): "rotate.right"
+        case let title where title.hasPrefix("Flip"): "arrow.left.and.right.righttriangle.left.righttriangle.right"
+        default: Self.historyFilterSymbols[action] ?? "pencil"
+        }
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
+    }
+
+    private static let historyFilterSymbols: [String: String] = {
+        var symbols: [String: String] = [:]
+        for filter in RasterFilter.adjustments { symbols[filter.title] = "slider.horizontal.3" }
+        for filter in RasterFilter.effects { symbols[filter.title] = "wand.and.stars" }
+        return symbols
+    }()
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !updatingHistory, historyTable.selectedRow >= 0 else { return }
@@ -638,6 +682,35 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         image.isTemplate = true
         return image
     }()
+}
+
+private final class HistoryCell: NSTableCellView {
+    init() {
+        super.init(frame: .zero)
+        let icon = NSImageView()
+        icon.imageScaling = .scaleProportionallyDown
+        icon.setAccessibilityElement(false)
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.lineBreakMode = .byTruncatingTail
+        imageView = icon
+        textField = label
+        for view in [icon, label] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.heightAnchor.constraint(equalTo: icon.widthAnchor),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
 }
 
 private final class WorkspaceOptionsArea: NSView {

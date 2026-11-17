@@ -175,9 +175,10 @@ dragging or pressing the arrow keys to pan temporarily with another tool active.
 
 Use **Command-Z** and **Command-Y** to undo or redo an edit. Selection changes
 also appear in **History**.
-Each document keeps its undo history until you close it. Scroll the floating
-**History** window and select an entry to jump to it. In **Layers**, use **+** to insert a transparent
-layer above the selected row, click a row to edit it, and use its checkbox to
+Each document keeps its undo history until you close it. The **History**
+window shows tool and action icons. Select an entry to jump to it.
+In **Layers**, use **+** to insert a transparent layer above the selected row,
+click a row to edit it, and use its checkbox to
 hide or show it. Drag a row to reorder the stack. The arrows move the selected
 layer and the trash button deletes it. The **Layer** menu offers the same
 commands. Small canvases can have up to 128 layers. The layer limit decreases
@@ -229,7 +230,8 @@ watching both histograms update. **Auto** fits the selected channels using the
 colors in the active selection or, with no selection, the layer.
 
 Use the toolbar buttons or **Window** menu to show or hide each utility
-window (F5–F8). Drag a window by its title bar or use **Window → Reset Panel
+window (F5–F8). Utility windows move and stack with the editor. Drag a utility
+window by its title bar to reposition it, or use **Window → Reset Panel
 Layout** to put the four windows back in their corners.
 
 In **Colors**, click the overlapping squares or press **C** to choose the

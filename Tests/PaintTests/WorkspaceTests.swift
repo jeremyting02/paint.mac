@@ -157,6 +157,75 @@ struct WorkspaceTests {
                                             chromeHeight: 24, preferredHeight: 246) == 246)
     }
 
+    @Test func utilityPanelsFollowOwnerAndKeepManualPlacementWhenToggled() throws {
+        final class OwnerWindow: NSWindow {
+            override var isMainWindow: Bool { true }
+            var isUncovered = false
+            override var occlusionState: NSWindow.OcclusionState { isUncovered ? .visible : [] }
+        }
+        _ = NSApplication.shared
+        let owner = OwnerWindow(contentRect: CGRect(x: 100, y: 120, width: 640, height: 460),
+                                styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        owner.isReleasedWhenClosed = false
+        defer { owner.close() }
+        owner.center()
+        let panels = UtilityPanels(parent: owner, colorsSize: .zero,
+                                   contents: [.history: NSView(), .layers: NSView()])
+        panels.isWorkspaceActive = true
+        #expect(owner.childWindows?.isEmpty != false)
+
+        owner.orderFront(nil)
+        #expect(owner.childWindows?.isEmpty != false)
+        owner.isUncovered = true
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: owner)
+        let history = try #require(owner.childWindows?.first(where: { $0.title == "History" }))
+        #expect(history.isVisible)
+        #expect(history.level == owner.level)
+        // WindowServer constrains frames to placeholder sizes in headless test runs.
+        let canCheckGeometry = owner.screen != nil
+        if canCheckGeometry {
+            let original = history.frame.origin
+            owner.setFrameOrigin(CGPoint(x: owner.frame.minX + 20, y: owner.frame.minY + 15))
+            #expect(history.frame.origin == CGPoint(x: original.x + 20, y: original.y + 15))
+            history.setFrameOrigin(CGPoint(x: history.frame.minX - 24, y: history.frame.minY - 14))
+        }
+        let moved = history.frame.origin
+        panels.toggle(.history)
+        #expect(history.parent == nil)
+        #expect(!history.isVisible)
+        if canCheckGeometry {
+            owner.setFrameOrigin(CGPoint(x: owner.frame.minX + 12, y: owner.frame.minY))
+        }
+        panels.toggle(.history)
+        #expect(history.parent === owner)
+        if canCheckGeometry {
+            #expect(history.frame.origin == CGPoint(x: moved.x + 12, y: moved.y))
+            let resized = owner.frame.insetBy(dx: -10, dy: -8)
+            owner.setFrame(resized, display: false)
+            #expect(history.frame.origin == CGPoint(x: moved.x + 22, y: moved.y + 8))
+        }
+
+        owner.isUncovered = false
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: owner)
+        #expect(!history.isVisible)
+        #expect(panels.isShown(.history))
+    }
+
+    @Test func historyRowsUseDifferentIconsForDocumentAndToolActions() throws {
+        _ = NSApplication.shared
+        let document = try #require(PaintDocument.newImage(width: 3, height: 3, resolution: .standard))
+        let editor = EditorView(document: document)
+        document.applyEdit(actionName: "Rectangle Select (Intersect)")
+        let table = NSTableView()
+        let first = try #require(editor.tableView(table, viewFor: nil, row: 0) as? NSTableCellView)
+        let second = try #require(editor.tableView(table, viewFor: nil, row: 1) as? NSTableCellView)
+        let documentIcon = try #require(first.imageView?.image)
+        let toolIcon = try #require(second.imageView?.image)
+        #expect(documentIcon != toolIcon)
+        #expect(first.textField?.stringValue == "New Image")
+        #expect(second.textField?.stringValue == "Rectangle Select (Intersect)")
+    }
+
     @Test func layerDragMapsTopFirstRowsToBottomFirstIndices() {
         #expect(LayersView.dropDestination(from: 3, above: 0, count: 4) == 3)
         #expect(LayersView.dropDestination(from: 0, above: 4, count: 4) == 0)
