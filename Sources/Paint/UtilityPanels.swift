@@ -13,7 +13,7 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
             case .tools: return CGSize(width: 76, height: 246)
             case .history: return CGSize(width: 160, height: 172)
             case .layers: return CGSize(width: 224, height: 151)
-            case .colors: return CGSize(width: 224, height: 104)
+            case .colors: return ColorsView.panelSize(expanded: false)
             }
         }
     }
@@ -66,12 +66,12 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     private var shown = Set(Kind.allCases)
     var visibilityDidChange: (() -> Void)?
 
-    init(parent: NSWindow, contents: [Kind: NSView]) {
+    init(parent: NSWindow, colorsSize: CGSize, contents: [Kind: NSView]) {
         self.parent = parent
         super.init()
 
         for (kind, content) in contents {
-            let panel = NSPanel(contentRect: CGRect(origin: .zero, size: kind.size),
+            let panel = NSPanel(contentRect: CGRect(origin: .zero, size: kind == .colors ? colorsSize : kind.size),
                                 styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
             panel.title = kind.title
@@ -141,13 +141,40 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     func resetPositions() {
         guard let parent else { return }
         parentFrame = parent.frame
-        for (kind, panel) in panels {
-            let left = kind == .tools || kind == .colors
-            let top = kind == .tools || kind == .history
-            var placement = Placement(fromLeft: left, fromTop: top, inset: CGPoint(x: 8, y: top ? 100 : 34))
-            resizeTopPanel(panel, kind: kind, ownerHeight: parentFrame.height)
-            placement.apply(to: panel, in: parentFrame)
-            placements[kind] = placement
+        for kind in Kind.allCases { resetPosition(kind) }
+    }
+
+    func resetColorsPosition() {
+        resetPosition(.colors)
+        shown.insert(.colors)
+        updateVisibility()
+    }
+
+    private func resetPosition(_ kind: Kind) {
+        guard let panel = panels[kind] else { return }
+        let left = kind == .tools || kind == .colors
+        let top = kind == .tools || kind == .history
+        var placement = Placement(fromLeft: left, fromTop: top, inset: CGPoint(x: 8, y: top ? 100 : 34))
+        resizeTopPanel(panel, kind: kind, ownerHeight: parentFrame.height)
+        placement.apply(to: panel, in: parentFrame)
+        placements[kind] = placement
+    }
+
+    func resizeColors(to size: CGSize) {
+        guard let panel = panels[.colors], var placement = placements[.colors] else { return }
+        if panel.frame.origin != placement.lastOrigin {
+            placement = Placement(panel: panel.frame, in: parentFrame)
+        }
+        panel.setContentSize(size)
+        placement.apply(to: panel, in: parentFrame)
+        placements[.colors] = placement
+        if let tools = panels[.tools], var toolsPlacement = placements[.tools] {
+            if tools.frame.origin != toolsPlacement.lastOrigin {
+                toolsPlacement = Placement(panel: tools.frame, in: parentFrame)
+            }
+            resizeTopPanel(tools, kind: .tools, ownerHeight: parentFrame.height)
+            toolsPlacement.apply(to: tools, in: parentFrame)
+            placements[.tools] = toolsPlacement
         }
     }
 
@@ -167,8 +194,8 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
     }
 
     static func topContentHeight(ownerHeight: CGFloat, lowerPanelHeight: CGFloat,
-                                 chromeHeight: CGFloat, preferredHeight: CGFloat) -> CGFloat {
-        min(preferredHeight, max(88, ownerHeight - 100 - 34 - 8 - lowerPanelHeight - chromeHeight))
+                                 chromeHeight: CGFloat, preferredHeight: CGFloat, minimumHeight: CGFloat = 88) -> CGFloat {
+        min(preferredHeight, max(minimumHeight, ownerHeight - 100 - 34 - 8 - lowerPanelHeight - chromeHeight))
     }
 
     private func resizeTopPanel(_ panel: NSPanel, kind: Kind, ownerHeight: CGFloat) {
@@ -177,7 +204,7 @@ final class UtilityPanels: NSObject, NSWindowDelegate {
               let content = panel.contentView else { return }
         let height = Self.topContentHeight(ownerHeight: ownerHeight, lowerPanelHeight: lower.frame.height,
                                           chromeHeight: panel.frame.height - content.frame.height,
-                                          preferredHeight: kind.size.height)
+                                          preferredHeight: kind.size.height, minimumHeight: kind == .tools ? 56 : 88)
         if abs(content.frame.height - height) >= 1 {
             panel.setContentSize(CGSize(width: kind.size.width, height: height))
         }

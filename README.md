@@ -231,9 +231,19 @@ Use the toolbar buttons or **Window** menu to show or hide each utility
 window (F5–F8). Drag a window by its title bar or use **Window → Reset Panel
 Layout** to put the four windows back in their corners.
 
-In **Colors**, select the Primary or Secondary slot to edit its hexadecimal RGB
-or RGBA value or apply a swatch. The adjacent controls swap the two colors or
-reset them to black and white.
+In **Colors**, click the overlapping squares or press **C** to choose the
+active color. Press **X** to swap the primary and secondary colors, or use the
+black-and-white button to restore the defaults. Left-click the wheel or a
+palette swatch to set the active color. Right-click to set the other color.
+Hold Control on the wheel to adjust hue only, Option to adjust saturation
+only, or Shift to snap hue to 15° increments. Control-Shift snaps hue while
+keeping saturation fixed. Use Control-Shift-F8 to reset the Colors window.
+
+Choose **More** to see all 96 palette swatches and edit RGB, HSV, six-digit
+hex RGB, and opacity (0–255). The compact view shows the first 32 swatches.
+Choose **Add active color to palette** and click a swatch to replace it. The
+palette menu can open, save, or reset Paint.NET palette text files and opens
+the Palettes folder in Finder.
 
 ## Tests and compatibility
 

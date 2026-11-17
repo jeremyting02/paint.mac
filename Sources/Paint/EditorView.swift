@@ -46,17 +46,13 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     private let finish = NSButton(title: "Finish", target: nil, action: nil)
     private let undo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let redo = EditorView.icon("arrow.uturn.forward", label: "Redo")
-    private let color = NSColorWell()
-    private let secondaryColor = NSColorWell()
-    private let colorSlot = NSPopUpButton()
-    private let hexColor = NSTextField()
+    private let colors = ColorsView(model: .shared)
     private let toolButtons = NSStackView()
     private let brushControls = NSStackView()
     private let brushSize = NSComboBox()
     private let selectionModes = NSPopUpButton()
     private let floodControls = NSStackView()
     private let floodToleranceValue = NSTextField(labelWithString: "")
-    private let colorControls = NSStackView()
     private let historyScroll = NSScrollView()
     private let historyTable = NSTableView()
     private let historyUndo = EditorView.icon("arrow.uturn.backward", label: "Undo")
@@ -65,10 +61,6 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     private let layersView: LayersView
     private var panels: UtilityPanels?
     private var panelButtons: [UtilityPanels.Kind: NSButton] = [:]
-    private let swatchColors: [(String, NSColor)] = [
-        ("Black", .black), ("White", .white), ("Gray", .gray), ("Brown", .brown), ("Red", .red), ("Orange", .orange),
-        ("Yellow", .yellow), ("Green", .green), ("Cyan", .cyan), ("Blue", .blue), ("Purple", .purple), ("Magenta", .magenta)
-    ]
     private var tools: [(button: NSButton, tool: CanvasView.Tool)] {
         [(rectangleSelect, .rectangleSelect), (moveSelectedPixels, .moveSelectedPixels),
          (lassoSelect, .lassoSelect), (moveSelection, .moveSelection), (ellipseSelect, .ellipseSelect), (zoomTool, .zoom),
@@ -118,11 +110,12 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
             guard let self, let button = tools.first(where: { $0.tool == tool })?.button else { return }
             selectTool(button)
         }
-        canvas.colorDidPick = { [weak self] picked, isSecondary in
-            guard let self else { return }
-            (isSecondary ? secondaryColor : color).color = picked
-            updateHexColor()
+        canvas.colorDidPick = { picked, isSecondary in
+            WorkspaceColors.shared.set(WorkspaceColor(picked), for: isSecondary ? .secondary : .primary)
         }
+        canvas.handleColorShortcut = { [weak self] key in self?.colors.handleShortcut(key) == true }
+        colors.colorsDidChange = { [weak self] in self?.applyColors() }
+        applyColors()
         toolOptions.configure(canvas: canvas)
 
         scrollView.documentView = canvas
@@ -150,19 +143,6 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         canvas.brushSizeDidChange = { [weak self] in self?.refreshBrushSize() }
         refreshBrushSize()
 
-        color.color = .black
-        secondaryColor.color = .white
-        for (well, label) in [(color, "Primary"), (secondaryColor, "Secondary")] {
-            well.colorWellStyle = .minimal
-            if #available(macOS 14.0, *) { well.supportsAlpha = true }
-            well.setAccessibilityLabel("\(label) color")
-            well.toolTip = "\(label) color"
-            well.target = self
-            well.action = #selector(changeColor(_:))
-            well.widthAnchor.constraint(equalToConstant: 56).isActive = true
-            well.heightAnchor.constraint(equalToConstant: 26).isActive = true
-        }
-
         brushControls.spacing = 8
         brushControls.addArrangedSubview(NSTextField(labelWithString: "Size (px)"))
         brushControls.addArrangedSubview(brushSize)
@@ -183,7 +163,6 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         let optionsArea = WorkspaceOptionsArea(contents: contextual)
         enclosingOptionsArea = optionsArea
         optionsScroll.documentView = optionsArea
-        configureColors()
         let panelsBar = NSStackView(views: UtilityPanels.Kind.allCases.map { kind in
             let button = Self.icon(kind.symbol, label: "Toggle \(kind.title)")
             button.tag = kind.rawValue
@@ -273,10 +252,17 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         historyPanel.spacing = 3
         historyScroll.widthAnchor.constraint(equalTo: historyPanel.widthAnchor).isActive = true
         separator.widthAnchor.constraint(equalTo: historyPanel.widthAnchor).isActive = true
-        panels = UtilityPanels(parent: window, contents: [
-            .tools: toolButtons, .colors: colorControls, .history: historyPanel, .layers: layersView
+        panels = UtilityPanels(parent: window, colorsSize: colors.panelSize, contents: [
+            .tools: toolButtons, .colors: colors, .history: historyPanel, .layers: layersView
         ])
-        panels?.visibilityDidChange = { [weak self] in self?.updatePanelButtons() }
+        panels?.visibilityDidChange = { [weak self] in
+            self?.updatePanelButtons()
+            self?.applyColors()
+        }
+        colors.expansionDidChange = { [weak self] in
+            guard let self else { return }
+            panels?.resizeColors(to: colors.panelSize)
+        }
         updatePanelButtons()
         if let document { WorkspaceDocuments.shared.register(document: document, window: window, strip: documentStrip) }
         refreshImage()
@@ -289,12 +275,17 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
 
     func resetPanels() { panels?.resetPositions() }
 
+    func resetColorsPanel() { panels?.resetColorsPosition() }
+
     private func updatePanelButtons() {
         for (kind, button) in panelButtons { button.state = isPanelShown(kind) ? .on : .off }
     }
 
     @objc private func togglePanelButton(_ sender: NSButton) {
-        if let kind = UtilityPanels.Kind(rawValue: sender.tag) { togglePanel(kind) }
+        guard let kind = UtilityPanels.Kind(rawValue: sender.tag) else { return }
+        let flags = NSApp.currentEvent?.modifierFlags ?? []
+        if kind == .colors, flags.contains([.control, .shift]) { resetColorsPanel() }
+        else { togglePanel(kind) }
     }
 
     private func configureToolPalette() {
@@ -605,89 +596,12 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         canvas.window?.makeFirstResponder(canvas)
     }
 
-    @objc private func changeColor(_ sender: NSColorWell) {
-        colorSlot.selectItem(at: sender === secondaryColor ? 1 : 0)
-        applyColors()
-    }
-
-    @objc private func pickSwatch(_ sender: NSButton) {
-        activeColorWell.color = swatchColors[sender.tag].1
-        applyColors()
-    }
-
-    private var activeColorWell: NSColorWell { colorSlot.indexOfSelectedItem == 1 ? secondaryColor : color }
-
-    private func configureColors() {
-        colorControls.orientation = .vertical
-        colorControls.alignment = .leading
-        colorControls.spacing = 3
-        let colorWells = NSStackView(views: [color, secondaryColor])
-        colorWells.spacing = 4
-        let swap = command("arrow.left.arrow.right", "Swap Primary and Secondary Colors", #selector(swapColors(_:)), target: self)
-        let reset = command("circle.lefthalf.filled", "Reset to Black and White", #selector(resetColors(_:)), target: self)
-        let wellsRow = NSStackView(views: [colorWells, swap, reset])
-        wellsRow.spacing = 3
-        colorControls.addArrangedSubview(wellsRow)
-
-        colorSlot.addItems(withTitles: ["Primary", "Secondary"])
-        colorSlot.controlSize = .small
-        colorSlot.setAccessibilityLabel("Active color")
-        colorSlot.target = self
-        colorSlot.action = #selector(selectColorSlot(_:))
-        hexColor.controlSize = .small
-        hexColor.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        hexColor.placeholderString = "RRGGBBAA"
-        hexColor.toolTip = "Hex RGB or RGBA"
-        hexColor.setAccessibilityLabel("Hex color")
-        hexColor.target = self
-        hexColor.action = #selector(updateColorFromHex(_:))
-        hexColor.widthAnchor.constraint(equalToConstant: 82).isActive = true
-        let colorValues = NSStackView(views: [colorSlot, hexColor])
-        colorValues.spacing = 4
-        colorControls.addArrangedSubview(colorValues)
-
-        let swatches = NSStackView()
-        swatches.spacing = 2
-        for (index, swatch) in swatchColors.enumerated() {
-            let button = Self.icon("square.fill", label: swatch.0)
-            button.isBordered = false
-            button.contentTintColor = swatch.1
-            button.tag = index
-            button.target = self
-            button.action = #selector(pickSwatch(_:))
-            button.widthAnchor.constraint(equalToConstant: 14).isActive = true
-            swatches.addArrangedSubview(button)
-        }
-        colorControls.addArrangedSubview(swatches)
-        updateHexColor()
-    }
-
     private func applyColors() {
-        if canvas.brushColor != color.color { canvas.brushColor = color.color }
-        if canvas.secondaryColor != secondaryColor.color { canvas.secondaryColor = secondaryColor.color }
-        updateHexColor()
-    }
-
-    private func updateHexColor() { hexColor.stringValue = WorkspaceColorHex.format(activeColorWell.color) }
-
-    @objc private func selectColorSlot(_ sender: NSPopUpButton) { updateHexColor() }
-
-    @objc private func updateColorFromHex(_ sender: NSTextField) {
-        if let parsed = WorkspaceColorHex.parse(sender.stringValue) { activeColorWell.color = parsed }
-        applyColors()
-    }
-
-    @objc private func swapColors(_ sender: NSButton) {
-        let primary = color.color
-        color.color = secondaryColor.color
-        secondaryColor.color = primary
-        applyColors()
-    }
-
-    @objc private func resetColors(_ sender: NSButton) {
-        color.color = .black
-        secondaryColor.color = .white
-        applyColors()
+        guard window?.isMainWindow != false else { return }
+        let primary = WorkspaceColors.shared[.primary].color
+        let secondary = WorkspaceColors.shared[.secondary].color
+        if canvas.brushColor != primary { canvas.brushColor = primary }
+        if canvas.secondaryColor != secondary { canvas.secondaryColor = secondary }
     }
 
     static func icon(_ symbol: String, label: String) -> NSButton {
@@ -766,22 +680,5 @@ enum WorkspaceZoom {
               let minimum = CanvasView.zoomSteps.first, let maximum = CanvasView.zoomSteps.last,
               number >= minimum, number <= maximum else { return nil }
         return CGFloat(number)
-    }
-}
-
-enum WorkspaceColorHex {
-    static func parse(_ string: String) -> NSColor? {
-        let input = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hex = input.hasPrefix("#") ? input.dropFirst() : input[...]
-        guard [6, 8].contains(hex.count), hex.allSatisfy(\.isHexDigit), let value = UInt32(hex, radix: 16) else { return nil }
-        let rgba = hex.count == 6 ? (value << 8) | 0xFF : value
-        func channel(_ offset: Int) -> CGFloat { CGFloat((rgba >> offset) & 0xFF) / 255 }
-        return NSColor(srgbRed: channel(24), green: channel(16), blue: channel(8), alpha: channel(0))
-    }
-
-    static func format(_ color: NSColor) -> String {
-        guard let rgb = color.usingColorSpace(.sRGB) else { return "" }
-        let components = [rgb.redComponent, rgb.greenComponent, rgb.blueComponent, rgb.alphaComponent]
-        return components.map { String(format: "%02X", Int((min(1, max(0, $0)) * 255).rounded())) }.joined()
     }
 }

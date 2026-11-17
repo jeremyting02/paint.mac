@@ -2,6 +2,8 @@ import AppKit
 
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
+// The workspace groups its document windows explicitly, independent of the system preference.
+NSWindow.allowsAutomaticWindowTabbing = false
 _ = NSDocumentController.shared
 
 let menu = NSMenu()
@@ -157,6 +159,10 @@ for kind in UtilityPanels.Kind.allCases {
     item.tag = kind.rawValue
     item.keyEquivalentModifierMask = []
 }
+let resetColors = windowMenu.addItem(withTitle: "Reset Colors Window",
+                                    action: #selector(PaintDocument.resetColorsPanel(_:)),
+                                    keyEquivalent: UtilityPanels.Kind.colors.keyEquivalent)
+resetColors.keyEquivalentModifierMask = [.control, .shift]
 windowMenu.addItem(.separator())
 windowMenu.addItem(withTitle: "Reset Panel Layout", action: #selector(PaintDocument.resetUtilityPanels(_:)), keyEquivalent: "")
 windowItem.submenu = windowMenu

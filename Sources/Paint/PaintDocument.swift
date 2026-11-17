@@ -424,6 +424,8 @@ final class PaintDocument: NSDocument {
         if let kind = UtilityPanels.Kind(rawValue: sender.tag) { editor?.togglePanel(kind) }
     }
 
+    @objc func resetColorsPanel(_ sender: Any?) { editor?.resetColorsPanel() }
+
     @objc func resetUtilityPanels(_ sender: Any?) { editor?.resetPanels() }
 
     @objc func toggleWorkspaceRulers(_ sender: Any?) { editor?.toggleRulers() }
@@ -510,6 +512,7 @@ final class PaintDocument: NSDocument {
             return canvas.imageSelection != nil || canvas.hasPendingMove || canvas.hasPendingFloodEdit ||
                 canvas.hasPendingGradient
         case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false
+        case #selector(resetColorsPanel(_:)): return editor != nil
         case #selector(toggleUtilityPanel(_:)):
             if let menuItem = item as? NSMenuItem, let kind = UtilityPanels.Kind(rawValue: menuItem.tag) {
                 menuItem.state = editor?.isPanelShown(kind) == true ? .on : .off

@@ -26,13 +26,121 @@ struct WorkspaceTests {
         #expect(vertical.pixels(in: 5.25...5.75, every: 1) == nil)
     }
 
-    @Test func rgbAndRgbaHexValues() throws {
-        let rgb = try #require(WorkspaceColorHex.parse("#EA2233"))
-        #expect(WorkspaceColorHex.format(rgb) == "EA2233FF")
-        let rgba = try #require(WorkspaceColorHex.parse("7F00a080"))
-        #expect(WorkspaceColorHex.format(rgba) == "7F00A080")
-        #expect(WorkspaceColorHex.parse("G0FF00") == nil)
-        #expect(WorkspaceColorHex.parse("FFFF") == nil)
+    @Test func rgbHexEditsPreserveOpacityAndRejectInvalidInput() {
+        var color = WorkspaceColor(WorkspaceColor.fromARGB(0x8000A0FF))
+        let accepted = color.setHex(" #ea2233 ")
+        #expect(accepted)
+        #expect(color.argb == 0x80EA2233)
+        #expect(color.rgbHex == "EA2233")
+        for invalid in ["FF997788", "G0FF00", "FFFF"] {
+            let accepted = color.setHex(invalid)
+            #expect(!accepted)
+        }
+        #expect(color.argb == 0x80EA2233)
+    }
+
+    @Test func colorWheelConstrainsHueAndSaturation() {
+        var color = WorkspaceColor(WorkspaceColor.fromARGB(0x80400000))
+        color.setHSV(hue: 0, saturation: 0.4, value: 0.5)
+        color.pickOnWheel(x: 0, y: 1, modifiers: [.control])
+        #expect(color.hue == 0.25)
+        #expect(color.saturation == 0.4)
+        #expect(color.value == 0.5)
+        #expect(WorkspaceColor.byte(color.color.alphaComponent) == 128)
+
+        color.pickOnWheel(x: 0.2, y: 0, modifiers: [.option])
+        #expect(color.hue == 0.25)
+        #expect(color.saturation == 0.2)
+
+        color.pickOnWheel(x: cos(.pi / 10) * 0.7, y: sin(.pi / 10) * 0.7, modifiers: [.control, .shift])
+        #expect(color.hue == 1.0 / 24)
+        #expect(color.saturation == 0.2)
+        color.pickOnWheel(x: 1, y: 0, modifiers: [])
+        #expect(color.argb == 0x80FF0000)
+    }
+
+    @Test func paletteFilesRoundTripAndHandleShortAndOversizedPalettes() throws {
+        let text = "\u{FEFF}; Sample palette\r\n\r\n0044AAEE\r\n 80ff0033 \r\n"
+        let padded = try WorkspacePalette.parse(text)
+        #expect(padded.count == 96)
+        #expect(Array(padded.prefix(3)) == [0x0044AAEE, 0x80FF0033, 0xFFFFFFFF])
+        #expect(try WorkspacePalette.parse(WorkspacePalette.serialize(padded)) == padded)
+        #expect(try WorkspacePalette.parse(WorkspacePalette.serialize(padded) + "ignored\n") == padded)
+        #expect(throws: WorkspacePalette.ReadError.self) {
+            try WorkspacePalette.parse("006699\n")
+        }
+        #expect(WorkspacePalette.standard.count == 96)
+        #expect(WorkspacePalette.standard[2] == 0xFFFF0000)
+        #expect(WorkspacePalette.standard[66] == 0x80FF0000)
+    }
+
+    @Test func colorSlotsAndPalettePreferencesAreIndependent() throws {
+        _ = NSApplication.shared
+        let suite = "PaintTests.Colors." + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = WorkspaceColors(defaults: defaults)
+        let view = ColorsView(model: model)
+        let red = WorkspaceColor(WorkspaceColor.fromARGB(0xFFFF0000))
+        model.set(red, for: .primary)
+        #expect(view.handleShortcut("c"))
+        #expect(model.active == .secondary)
+        #expect(view.handleShortcut("x"))
+        #expect(model.active == .secondary)
+        #expect(model[.secondary].argb == red.argb)
+        model.reset()
+        #expect(model[.primary].argb == 0xFF000000)
+        #expect(model[.secondary].argb == 0xFFFFFFFF)
+        model.toggleExpanded()
+        #expect(view.expanded)
+        var palette = WorkspacePalette.standard
+        palette[0] = 0x4080A0B0
+        model.setPalette(palette, name: "Example")
+        let reopened = WorkspaceColors(defaults: defaults)
+        #expect(reopened.expanded)
+        #expect(reopened.palette == palette)
+        #expect(reopened.paletteName == "Example")
+    }
+
+    @Test func colorsPanelRoutesSwatchesAndUpdatesExpandedControls() throws {
+        _ = NSApplication.shared
+        let suite = "PaintTests.Colors.Panel." + UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = WorkspaceColors(defaults: defaults)
+        let view = ColorsView(model: model)
+        let grid = try #require(view.subviews.first { $0.subviews.count == WorkspacePalette.count })
+        let red = try #require(grid.subviews[2] as? NSButton)
+        let orange = try #require(grid.subviews[3] as? NSButton)
+        let transparent = try #require(grid.subviews[66] as? NSButton)
+        #expect(transparent.isHidden)
+        red.performClick(nil)
+        #expect(model[.primary].argb == 0xFFFF0000)
+
+        let rightClick = try #require(NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
+                                                        timestamp: 0, windowNumber: 0, context: nil,
+                                                        eventNumber: 0, clickCount: 1, pressure: 1))
+        orange.rightMouseDown(with: rightClick)
+        #expect(model[.secondary].argb == 0xFFFF6A00)
+        #expect(model.active == .primary)
+
+        let more = try #require(view.subviews.compactMap { $0 as? NSButton }.first { $0.title == "More »" })
+        let compactSize = view.panelSize
+        more.performClick(nil)
+        #expect(view.panelSize.width > compactSize.width)
+        #expect(!transparent.isHidden)
+        transparent.performClick(nil)
+        #expect(model[.primary].argb == 0x80FF0000)
+
+        let fields = view.subviews.flatMap(\.subviews).compactMap { $0 as? NSTextField }
+        let hex = try #require(fields.first { $0.accessibilityLabel() == "Hex color" })
+        let alpha = try #require(fields.first { $0.accessibilityLabel() == "Opacity" })
+        #expect(hex.stringValue == "FF0000")
+        #expect(alpha.integerValue == 128)
+        hex.stringValue = "#2266AA"
+        view.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: hex))
+        #expect(model[.primary].argb == 0x802266AA)
+        #expect(alpha.integerValue == 128)
     }
 
     @Test func panelPlacementTracksClosestCorner() {

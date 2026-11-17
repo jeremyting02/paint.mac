@@ -262,6 +262,7 @@ final class CanvasView: NSView {
     var pickerAfter = PickerAfter.stay
     var recolorTolerance = 50
     var colorDidPick: ((NSColor, Bool) -> Void)?
+    var handleColorShortcut: ((String) -> Bool)?
     var editText: (() -> Void)?
     var showsPixelGrid = false { didSet { needsDisplay = true } }
     var canvasImageRect: CGRect { imageRect }
@@ -949,6 +950,10 @@ final class CanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+           let key = event.charactersIgnoringModifiers?.lowercased(), key == "c" || key == "x" {
+            if event.isARepeat || handleColorShortcut?(key) == true { return }
+        }
         if event.charactersIgnoringModifiers == " ",
            event.modifierFlags.intersection([.command, .option]).isEmpty {
             if !holdingSpace {
