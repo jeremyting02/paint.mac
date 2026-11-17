@@ -239,15 +239,20 @@ struct WorkspaceTests {
         if canCheckGeometry {
             #expect(history.frame.origin == CGPoint(x: moved.x + 12, y: moved.y))
             let layers = try #require(owner.childWindows?.first(where: { $0.title == "Layers" }))
-            let layerOrigin = layers.frame.origin
             let original = owner.frame
+            let historyFrame = history.frame
+            let layersFrame = layers.frame
             let resized = CGRect(x: original.minX - 10, y: original.minY - 8,
                                  width: original.width + 10, height: original.height + 8)
             owner.setFrame(resized, display: false)
             // Process the resize layout after AppKit has updated the attached windows.
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
-            #expect(history.frame.origin == CGPoint(x: moved.x + 12, y: moved.y))
-            #expect(layers.frame.origin == CGPoint(x: layerOrigin.x, y: layerOrigin.y - 8))
+            // History can grow downward while its manually placed top-right anchor stays fixed.
+            #expect(history.frame.height > historyFrame.height)
+            #expect(owner.frame.maxX - history.frame.maxX == original.maxX - historyFrame.maxX)
+            #expect(owner.frame.maxY - history.frame.maxY == original.maxY - historyFrame.maxY)
+            #expect(owner.frame.maxX - layers.frame.maxX == original.maxX - layersFrame.maxX)
+            #expect(layers.frame.minY - owner.frame.minY == layersFrame.minY - original.minY)
         }
 
         owner.isUncovered = false
