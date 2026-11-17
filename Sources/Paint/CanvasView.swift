@@ -287,7 +287,7 @@ final class CanvasView: NSView {
             NSCursor.closedHand.set()
             return
         }
-        switch moveDrag?.handle ?? transformHandle(at: location, image: layer.image) {
+        switch moveDrag?.handle ?? transformHandle(at: location, layer: layer) {
         case .rotate: Self.rotationCursor.set()
         case .move, .resize, .pivot: (moveDrag == nil ? NSCursor.openHand : .closedHand).set()
         }
@@ -512,7 +512,14 @@ final class CanvasView: NSView {
         return MoveGeometry(rect: rect, pivot: rect.center)
     }
 
-    private func transformHandle(at location: CGPoint, image: CGImage) -> TransformHandle {
+    private func showsTransformHandles(on layer: PaintLayer) -> Bool {
+        if tool == .moveSelection { return selectionOutline != nil }
+        return tool == .moveSelectedPixels && layer.isVisible && (selectionOutline != nil || move != nil)
+    }
+
+    private func transformHandle(at location: CGPoint, layer: PaintLayer) -> TransformHandle {
+        guard showsTransformHandles(on: layer) else { return .move }
+        let image = layer.image
         let geometry = moveGeometry(for: image)
         let frame = marquee(for: geometry.rect, imageWidth: image.width)
         let pivot = marquee(for: CGRect(origin: geometry.pivot, size: .zero), imageWidth: image.width).origin
@@ -602,15 +609,14 @@ final class CanvasView: NSView {
 
     private func beginMoveDrag(with event: NSEvent, rightButton: Bool) {
         let before = move
-        guard panLocation == nil, moveDrag == nil, let stack = document?.stack,
-              beginMove(on: stack) else { return }
-        let image = stack.activeLayer.image
-        window?.makeFirstResponder(self)
+        guard panLocation == nil, moveDrag == nil, let stack = document?.stack else { return }
         let location = convert(event.locationInWindow, from: nil)
-        let handle = rightButton ? .rotate : transformHandle(at: location, image: image)
+        let handle = rightButton ? .rotate : transformHandle(at: location, layer: stack.activeLayer)
+        guard beginMove(on: stack) else { return }
+        window?.makeFirstResponder(self)
         let point = imagePoint(location)
-        moveDrag = MoveDrag(before: before, geometry: moveGeometry(for: image), anchor: point, handle: handle,
-                            rightButton: rightButton, lastPoint: point)
+        moveDrag = MoveDrag(before: before, geometry: moveGeometry(for: stack.activeLayer.image), anchor: point,
+                            handle: handle, rightButton: rightButton, lastPoint: point)
         updateMoveCursor(at: location)
     }
 
@@ -832,8 +838,7 @@ final class CanvasView: NSView {
               var stack = layerPreview ?? document?.stack else { return }
         if let preview = move?.preview { stack.layers[stack.active] = preview }
         let image = stack.activeLayer.image
-        let showsHandles = tool == .moveSelection ? selectionOutline != nil
-            : tool == .moveSelectedPixels && stack.activeLayer.isVisible
+        let showsHandles = showsTransformHandles(on: stack.activeLayer)
         let geometry = moveGeometry(for: image)
         let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
@@ -874,7 +879,6 @@ final class CanvasView: NSView {
         }
         context.restoreGState()
         let outline = move?.transformedOutline ?? selectionOutline
-            ?? (showsHandles ? SelectionOutline(rect: geometry.rect) : nil)
         let scale = rect.width / CGFloat(image.width)
         let toView = CGAffineTransform(translationX: rect.minX, y: rect.minY).scaledBy(x: scale, y: scale)
         if let path = outline?.transformed(by: toView)?.path {
