@@ -57,6 +57,9 @@ final class MoveTilePreview {
     private let sources: [Source]
     private let bounds: CGRect
     private let colorSpace: CGColorSpace
+    private let stack: LayerStack
+    private lazy var metal = MetalMovePreview(stack: stack, pixels: pixels)
+    private(set) var metalDraws = 0
     private var frame: Frame?
     private var frameTiles: [Tile: CGImage] = [:]
     private var clearedTiles: [Tile: CGImage] = [:]
@@ -77,8 +80,21 @@ final class MoveTilePreview {
         }
         self.pixels = pixels
         self.sources = sources
+        self.stack = stack
         bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         colorSpace = stack.needsBlendComposite ? stack.workingColorSpace : stack.activeLayer.workingColorSpace
+    }
+
+    func metalFrame(in visible: CGRect, by transform: CGAffineTransform, copy: Bool,
+                    sampling: MoveResampler.Mode) -> (region: CGRect, image: CGImage)? {
+        let destination = pixels.destinationRegion(by: transform).intersection(visible)
+        guard !destination.isEmpty, destination.width * destination.height >= 65_536 else { return nil }
+        let integralTranslation = transform.a == 1 && transform.b == 0 && transform.c == 0 && transform.d == 1 &&
+            transform.tx == transform.tx.rounded() && transform.ty == transform.ty.rounded()
+        guard !integralTranslation,
+              let preview = metal?.render(in: visible, by: transform, copy: copy, sampling: sampling) else { return nil }
+        metalDraws += 1
+        return preview
     }
 
     func tiles(in visible: CGRect, by transform: CGAffineTransform, copy: Bool, sampling: MoveResampler.Mode)

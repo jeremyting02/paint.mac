@@ -29,11 +29,20 @@ func physicalFootprint() -> Double? {
     return status == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : nil
 }
 
-func makeDocument(width: Int, height: Int, layerCount: Int) -> PaintDocument {
+func makeDocument(width: Int, height: Int, layerCount: Int, patterned: Bool = false) -> PaintDocument {
     let document = PaintDocument.newImage(width: width, height: height, resolution: resolution)!
     var stack = document.stack!
     stack.layers = (0..<layerCount).map { index in
-        let bytes = Data(repeating: UInt8(120 + index), count: width * height * 4)
+        var bytes = Data(repeating: UInt8(120 + index), count: width * height * 4)
+        if patterned {
+            bytes.withUnsafeMutableBytes { buffer in
+                let pixels = buffer.bindMemory(to: UInt32.self)
+                for pixel in pixels.indices {
+                    let bits = UInt32(pixel) &* 2_654_435_761 &+ UInt32(index) &* 97_409
+                    pixels[pixel] = (bits & 0x7fff_ffff) | 0x4000_0000
+                }
+            }
+        }
         return PaintLayer(name: "Layer", image: BGRA8.image(from: bytes, width: width, height: height)!,
                           pdnPixels: bytes)
     }
@@ -69,6 +78,61 @@ if CommandLine.arguments.contains("--initial") {
     }
     exit(0)
 }
+
+#if METAL_MOVE_BENCHMARK
+if CommandLine.arguments.contains("--move-rotation") {
+    setbuf(stdout, nil)
+    guard let name = MetalMovePreview.deviceName else {
+        fputs("Metal preview is unavailable\n", stderr)
+        exit(1)
+    }
+    print("Metal device: \(name)")
+    let width = 4096, height = 2048, frames = 15
+    for count in [1, 4] {
+        let document = makeDocument(width: width, height: height, layerCount: count, patterned: true)
+        let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 900, height: 600))
+        let canvas = CanvasView(document: document)
+        scroll.documentView = canvas
+        canvas.tool = .moveSelectedPixels
+        for zoom: CGFloat? in [nil, 100] {
+            canvas.setZoom(zoom)
+            let viewport = canvas.visibleRect
+            let image = canvas.canvasImageRect
+            let output = LayerStack.makeBitmap(width: 900, height: 600)!
+            output.translateBy(x: -viewport.minX, y: -viewport.minY)
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: output, flipped: false)
+            defer { NSGraphicsContext.current = nil }
+            for metal in [false, true] {
+                canvas.usesMetalMovePreview = metal
+                canvas.draw(viewport)
+                func event(_ type: NSEvent.EventType, step: Int) -> NSEvent {
+                    let point = CGPoint(x: image.midX + 135, y: image.midY + 30 + CGFloat(step * 5))
+                    return NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil),
+                        modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                        eventNumber: step, clickCount: 1, pressure: 1)!
+                }
+                canvas.rightMouseDown(with: event(.rightMouseDown, step: 0))
+                let samples = (1...frames).map { step in
+                    let drag = event(.rightMouseDragged, step: step)
+                    return time {
+                        canvas.rightMouseDragged(with: drag)
+                        canvas.draw(viewport)
+                    }
+                }
+                let label = "\(width)x\(height) / \(count) layers / \(zoom == nil ? "fit" : "100%") / \(metal ? "Metal" : "CPU")"
+                guard canvas.hasPendingMove, canvas.metalMovePreviewDraws == (metal ? frames : 0) else {
+                    fputs("\(label) did not use the expected preview for all frames\n", stderr)
+                    exit(1)
+                }
+                stats("\(label) / first rotation frame", [samples[0]])
+                stats("\(label) / subsequent drag + viewport draw", Array(samples.dropFirst()))
+                canvas.cancelEditingGesture()
+            }
+        }
+    }
+    exit(0)
+}
+#endif
 
 if CommandLine.arguments.contains("--move") {
     for count in [1, 4] {

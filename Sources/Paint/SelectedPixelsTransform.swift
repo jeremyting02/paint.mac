@@ -2,6 +2,14 @@ import CoreGraphics
 import Foundation
 
 final class SelectedPixelsTransform {
+    struct PreviewSource {
+        let original: Data
+        let cleared: Data?
+        let selection: CGRect
+        let cropped: Data?
+        let isPaste: Bool
+    }
+
     private let layer: PaintLayer
     private let source: Data
     // A full-layer cut leaves a transparent backdrop everywhere.
@@ -10,6 +18,10 @@ final class SelectedPixelsTransform {
     private let bounds: CGRect
     private let croppedPixels: Data?
     let isPaste: Bool
+
+    var previewSource: PreviewSource {
+        PreviewSource(original: source, cleared: cleared, selection: selection, cropped: croppedPixels, isPaste: isPaste)
+    }
 
     init?(layer: PaintLayer, selection: CGRect, mask: Data? = nil) {
         let width = layer.image.width, height = layer.image.height

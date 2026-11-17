@@ -4,11 +4,12 @@ cd "$(dirname "$0")/.."
 
 mode=
 case "${1:-}" in
-    --initial|--move) mode=$1; shift ;;
+    --initial|--move|--move-rotation) mode=$1; shift ;;
 esac
 
-if [ "$#" -gt 1 ]; then
+if [ "$#" -gt 1 ] || { [ "$mode" = --move-rotation ] && [ "$#" -ne 0 ]; }; then
     echo "Usage: sh Tests/canvas-benchmark.sh [--initial|--move] [baseline-ref]" >&2
+    echo "       sh Tests/canvas-benchmark.sh --move-rotation" >&2
     exit 2
 fi
 
@@ -21,6 +22,7 @@ build_benchmark() {
     for source in "$directory"/Sources/Paint/*.swift; do
         [ "${source##*/}" = main.swift ] || set -- "$@" "$source"
     done
+    if [ "$mode" = --move-rotation ]; then set -- -D METAL_MOVE_BENCHMARK "$@"; fi
     swiftc -O -whole-module-optimization -I "$directory/Sources/CZlib" \
         -module-cache-path "$scratch/modules" "$@" Tests/CanvasBenchmark/main.swift -o "$directory/benchmark"
 }

@@ -140,6 +140,10 @@ enum BGRA8 {
         guard width > 0, height > 0, pixels.count.isMultiple(of: 4),
               (pixels.count / 4).isMultiple(of: width), pixels.count / 4 / width == height,
               let provider = CGDataProvider(data: pixels as CFData) else { return nil }
+        return image(from: provider, width: width, height: height, colorSpace: colorSpace)
+    }
+
+    static func image(from provider: CGDataProvider, width: Int, height: Int, colorSpace: CGColorSpace) -> CGImage? {
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
                        bytesPerRow: width * 4, space: colorSpace,
                        bitmapInfo: straightFormat,

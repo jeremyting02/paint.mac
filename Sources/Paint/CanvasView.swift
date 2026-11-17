@@ -217,6 +217,7 @@ final class CanvasView: NSView {
             }
         }
         didSet {
+            if tool == .moveSelectedPixels && usesMetalMovePreview { MetalMovePreview.prepare() }
             updateBrushCursor()
             needsDisplay = true
             window?.invalidateCursorRects(for: self)
@@ -316,6 +317,8 @@ final class CanvasView: NSView {
     private(set) var move: MoveSession?
     private var moveDrag: MoveDrag?
     private var moveTilePreview: MoveTilePreview?
+    var usesMetalMovePreview = true
+    var metalMovePreviewDraws: Int { moveTilePreview?.metalDraws ?? 0 }
     private var cursorTracking: NSTrackingArea?
     private var brushCursor: CGRect? {
         didSet {
@@ -1737,6 +1740,11 @@ final class CanvasView: NSView {
             return
         }
         let dirtyImage = imageRegion(for: visible, width: image.width)
+        if usesMetalMovePreview, let preview = moveTilePreview.metalFrame(in: dirtyImage, by: transform,
+                                                                         copy: session.copy, sampling: session.sampling) {
+            context.draw(preview.image, in: viewRegion(for: preview.region, image: image))
+            return
+        }
         let tiles = moveTilePreview.tiles(in: dirtyImage, by: transform, copy: session.copy,
                                          sampling: session.sampling)
         if tiles.isEmpty {
