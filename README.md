@@ -1,6 +1,8 @@
 # paint.mac
 
-A native macOS bitmap editor with layered Paint.NET projects. See the [MVP plan](docs/MVP_PLAN.md) for the initial scope.
+A native macOS bitmap editor that aims to match Paint.NET behavior as closely
+as possible, with support for layered Paint.NET projects. See the
+[MVP plan](docs/MVP_PLAN.md) for the initial scope.
 
 From the repository root with Swift and the macOS SDK installed:
 

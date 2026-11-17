@@ -1,15 +1,16 @@
 # Paint for Mac implementation plan
 
-Date: 6 November 2026
+Date: 6 November 2026. Reference version updated 17 November 2026.
 
-Status: Agreed product and architecture direction; implementation has not started
+Status: Product and architecture direction, with implementation underway
 
 Start with the [MVP delivery plan](MVP_PLAN.md). This document describes the
 longer-term parity target.
 
-Build a native Mac raster editor with broad Paint.NET feature parity. Use Swift,
-AppKit, selected SwiftUI panels, and a Metal rendering backend. Keep the editing
-core separate from platform services so future ports can reuse editing behavior.
+Build a native Mac raster editor that matches Paint.NET's user-visible behavior
+and output as closely as possible. Use Swift, AppKit, selected SwiftUI panels,
+and a Metal rendering backend. Keep the editing core separate from platform
+services so future ports can reuse editing behavior.
 Deliver the Mac application first; implement additional platform backends when
 another operating system becomes a committed product requirement.
 
@@ -20,9 +21,9 @@ supporting layered composition, precise selections, drawing, retouching, and
 effects. Preserve familiar Paint.NET workflows through native Mac menus,
 shortcuts, windows, clipboard behavior, and gestures.
 
-Freeze the reference baseline at Paint.NET 5.1.12, listed as the current release
-on the official website when this plan was prepared. Track later releases as
-separate scope decisions. The official roadmap places a new PDN format and layer
+Freeze the reference baseline at Paint.NET 5.2, released on 10 November 2026.
+Use the 5.2 reference app and release notes for differences from older help pages.
+Track later releases as separate scope decisions. The official roadmap places a new PDN format and layer
 groups in 6.0, with editable text, masks, and adjustment layers planned afterward.
 Those capabilities are future work under this baseline. [1]
 
@@ -37,11 +38,11 @@ FAQ prohibits incorporating its libraries into another application. [2]
 | Files | Common image formats, a native layered project format, and a dedicated PDN interoperability workstream |
 | Plugins | Investigate separately; existing Paint.NET plugin binaries are not an assumed release capability |
 
-Broad feature parity does not imply identical output for every operation or
-compatibility with the entire third-party plugin ecosystem. Maintain a versioned
-checklist that records each operation, its options, reference fixtures, completion
-state, and any accepted differences. Validate the checklist against the frozen
-application version because documentation pages may describe different revisions.
+Compare supported operations against the reference and aim for identical output
+where practical. Maintain a versioned checklist that records each operation, its
+options, reference fixtures, completion state, and any accepted differences.
+Validate the checklist against the frozen application version because
+documentation pages may describe different revisions.
 
 ## Release scope
 
@@ -266,7 +267,8 @@ operating-system interface is included in this plan.
 
 ## Sources
 
-Sources were consulted on 6 November 2026. Estimates, architecture boundaries,
+Sources were first consulted on 6 November 2026. The release history was checked
+again on 17 November 2026. Estimates, architecture boundaries,
 milestones, and acceptance criteria are project planning decisions.
 
 1. [Paint.NET release history and roadmap](https://paint.net/roadmap.html)
