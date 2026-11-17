@@ -3,13 +3,21 @@ import CoreImage
 extension RasterFilter {
     static let adjustments: [Self] = [
         autoLevel,
-        point("Black and White") { pixel, _ in
+        point("Black and White", accelerate: { source, _, cancelled in
+            MetalRasterEffects.grayscale(source, isCancelled: cancelled)
+        }) { pixel, _ in
             // Paint.NET weights encoded RGB and rounds the sum in the byte domain.
             let channels = pixel * 255
             let gray = (channels.x * 0.299 + channels.y * 0.587 + channels.z * 0.114).rounded() / 255
             return Pixel(gray, gray, gray, pixel.w)
         },
-        point("Brightness / Contrast", [.init("Brightness", -100...100, 0), .init("Contrast", -100...100, 0)]) {
+        point("Brightness / Contrast", [.init("Brightness", -100...100, 0), .init("Contrast", -100...100, 0)],
+              accelerate: { source, values, cancelled in
+            let brightness = values[0] / 100
+            let contrast = (100 + values[1]) / max(1, 100 - values[1])
+            let table = channelTable { ($0 - 0.5) * contrast + 0.5 + brightness }
+            return MetalRasterEffects.tables([table, table, table], to: source, isCancelled: cancelled)
+        }) {
             pixel, values in
             let brightness = values[0] / 100
             let contrast = (100 + values[1]) / max(1, 100 - values[1])
@@ -35,8 +43,14 @@ extension RasterFilter {
                     kCIInputSaturationKey: values[1] / 100, kCIInputBrightnessKey: values[2] / 100
                 ])
         },
-        point("Invert Alpha") { pixel, _ in Pixel(pixel.x, pixel.y, pixel.z, 1 - pixel.w) },
-        point("Invert Colors") { pixel, _ in Pixel(1 - pixel.x, 1 - pixel.y, 1 - pixel.z, pixel.w) },
+        point("Invert Alpha", accelerate: { source, _, cancelled in
+            let identity = channelTable { $0 }, inverted = channelTable { 1 - $0 }
+            return MetalRasterEffects.tables([identity, identity, identity, inverted], to: source, isCancelled: cancelled)
+        }) { pixel, _ in Pixel(pixel.x, pixel.y, pixel.z, 1 - pixel.w) },
+        point("Invert Colors", accelerate: { source, _, cancelled in
+            let table = channelTable { 1 - $0 }
+            return MetalRasterEffects.tables([table, table, table], to: source, isCancelled: cancelled)
+        }) { pixel, _ in Pixel(1 - pixel.x, 1 - pixel.y, 1 - pixel.z, pixel.w) },
         LevelSettings().filter(),
         posterize,
         coreImage("Sepia", [.init("Intensity", 0...100, 100)]) { image, values in
@@ -62,6 +76,9 @@ extension RasterFilter {
                 let bucket = byte * count / 256
                 return UInt8((bucket * 255 + (count - 1) / 2) / (count - 1))
             }
+        }
+        if let accelerated = MetalRasterEffects.tables(tables, to: source, isCancelled: isCancelled) {
+            return accelerated
         }
         var result = source
         let completed = result.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in

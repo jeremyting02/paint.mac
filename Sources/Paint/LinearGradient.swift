@@ -43,7 +43,7 @@ struct LinearGradient {
 
     func applying(to layer: PaintLayer, primary: CGColor, secondary: CGColor,
                   selection: SelectionOutline?, options: GradientOptions = GradientOptions(),
-                  reversed: Bool = false) -> PaintLayer? {
+                  reversed: Bool = false, allowsMetal: Bool = true) -> PaintLayer? {
         if options.shape != .linear || options.repeats != .none || options.transparency || options.blendMode != .normal {
             return render(to: layer, primary: primary, secondary: secondary, selection: selection,
                           options: options, reversed: reversed)
@@ -74,6 +74,11 @@ struct LinearGradient {
         if replacesLayer { return foreground == original ? nil : layer.withPixels(foreground) }
 
         // Blend straight-alpha pixels into the original bytes so untouched PDN pixels stay exact.
+        let pixelRect = CGRect(x: region.minX, y: CGFloat(height) - region.maxY, width: region.width, height: region.height)
+        if allowsMetal, let result = MetalRasterTools.composite(foreground, on: original, width: width,
+                                                                 rect: pixelRect, mode: .normal) {
+            return result == original ? nil : layer.withPixels(result)
+        }
         let rowBytes = Int(region.width) * 4
         var result = original
         let origin = (height - Int(region.maxY)) * width * 4 + Int(region.minX) * 4

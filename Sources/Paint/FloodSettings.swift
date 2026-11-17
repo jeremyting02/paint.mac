@@ -16,7 +16,8 @@ struct FloodSettings {
     var sampling: Sampling = .layer
     var flood: Flood = .contiguous
 
-    func select(in layer: PaintLayer, x: Int, y: Int, within mask: Data? = nil) -> SelectionOutline? {
+    func select(in layer: PaintLayer, x: Int, y: Int, within mask: Data? = nil,
+                allowsMetal: Bool = true) -> SelectionOutline? {
         let width = layer.image.width, height = layer.image.height
         guard (0..<width).contains(x), (0..<height).contains(y) else { return nil }
         let seedIndex = y * width + x
@@ -27,10 +28,15 @@ struct FloodSettings {
         guard let pixels = layer.straightPixels else { return nil }
 
         var region = FloodRegion(width: width, height: height)
+        let maximum = tolerance * 255 * 255 / 100
+        let limit = 4 * maximum * maximum
+        if allowsMetal, flood == .global,
+           let matches = MetalRasterTools.floodMask(pixels: pixels, seedIndex: seedIndex, limit: limit, within: mask) {
+            region.select(globalMatches: matches)
+            return region.outline()
+        }
         pixels.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
             let seed = Sample(bytes, at: seedIndex * 4)
-            let maximum = tolerance * 255 * 255 / 100
-            let limit = 4 * maximum * maximum
             region.select(x: x, y: y, flood: flood) { index in
                 if let mask, mask[index] == 0 { return false }
                 return seed.matches(Sample(bytes, at: index * 4), limit: limit)
@@ -127,6 +133,22 @@ private struct FloodRegion {
         }
     }
 
+    mutating func select(globalMatches: Data) {
+        if globalMatches.allSatisfy({ $0 == Self.selected }) {
+            count = width * height
+            return
+        }
+        cells.withUnsafeMutableBufferPointer { output in
+            globalMatches.withUnsafeBytes { input in
+                let source = input.bindMemory(to: UInt8.self)
+                for row in 0..<height {
+                    output.baseAddress!.advanced(by: (row + 1) * stride + 1)
+                        .update(from: source.baseAddress!.advanced(by: row * width), count: width)
+                }
+            }
+        }
+    }
+
     mutating func outline() -> SelectionOutline? {
         if count == width * height {
             return SelectionOutline(rect: CGRect(x: 0, y: 0, width: width, height: height))
@@ -203,7 +225,8 @@ private struct FloodRegion {
 }
 
 extension PaintLayer {
-    func filling(_ outline: SelectionOutline, blue: UInt8, green: UInt8, red: UInt8, alpha: UInt8 = 255) -> PaintLayer? {
+    func filling(_ outline: SelectionOutline, blue: UInt8, green: UInt8, red: UInt8, alpha: UInt8 = 255,
+                 allowsMetal: Bool = true) -> PaintLayer? {
         let bounds = outline.bounds.integral
         let rect = CGRect(x: bounds.minX, y: CGFloat(image.height) - bounds.maxY,
                           width: bounds.width, height: bounds.height)
@@ -212,6 +235,10 @@ extension PaintLayer {
         let width = Int(rect.width)
         let origin = Int(rect.minY) * image.width + Int(rect.minX)
         guard alpha != 0 else { return nil }
+        if allowsMetal, let filled = MetalRasterTools.fill(pixels, width: image.width, rect: rect, mask: mask,
+                                                            color: SIMD4(blue, green, red, alpha)) {
+            return filled == pixels ? nil : withPixels(filled)
+        }
         let source = Int(alpha) * 255
         let channels = [blue, green, red]
         let changed = pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in

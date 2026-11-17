@@ -5,7 +5,10 @@ extension RasterFilter {
         Self("Add Noise", category: "Noise", [.init("Intensity", 0...100, 35),
                                               .init("Color Saturation", 0...100, 0),
                                               .init("Coverage", 0...100, 100, step: 0.1),
-                                              .init("Seed", 0...65535, 0)]) { source, _, _, values, isCancelled in
+                                              .init("Seed", 0...65535, 0)], preview: { source, width, height, values, cancelled in
+            MetalRasterEffects.procedural(.noise, pixels: source, width: width, height: height,
+                                          values: values, isCancelled: cancelled)
+        }) { source, _, _, values, isCancelled in
             let intensity = values[0] * 2.55
             let saturation = values[1] / 100
             let coverage = values[2] / 100
@@ -33,6 +36,10 @@ extension RasterFilter {
             source, width, _, values, isCancelled in
             let bayer4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
             let levels = values[0] - 1
+            if let accelerated = MetalRasterEffects.orderedDither(source, width: width, levels: Int(levels),
+                                                                 isCancelled: isCancelled) {
+                return accelerated
+            }
             var result = source
             let completed = result.withUnsafeMutableBytes { (pixels: UnsafeMutableRawBufferPointer) in
                 for offset in stride(from: 0, to: pixels.count, by: 4) where pixels[offset + 3] > 0 {
@@ -65,7 +72,11 @@ extension RasterFilter {
 
     private static func cloudEffect(_ name: String, turbulence: Bool) -> Self {
         Self(name, category: "Render", [.init("Scale", 2...1000, 60),
-                                       .init("Roughness", 0...100, 50), .init("Seed", 0...65535, 0)]) {
+                                       .init("Roughness", 0...100, 50), .init("Seed", 0...65535, 0)], preview: {
+            source, width, height, values, cancelled in
+            MetalRasterEffects.procedural(turbulence ? .turbulence : .clouds, pixels: source, width: width, height: height,
+                                          values: values, isCancelled: cancelled)
+        }) {
             source, width, height, values, isCancelled in
             let scale = values[0], falloff = values[1] / 100
             let seed = UInt64(values[2])
@@ -115,7 +126,10 @@ extension RasterFilter {
             .init("Zoom", 1...100, 1, step: 0.1), .init("Iterations", 8...256, 64),
             .init("Angle", -180...180, 0)
         ]
-        return Self(name, category: "Render", controls) { source, width, height, values, isCancelled in
+        return Self(name, category: "Render", controls, preview: { source, width, height, values, cancelled in
+            MetalRasterEffects.procedural(julia ? .julia : .mandelbrot, pixels: source, width: width, height: height,
+                                          values: values, isCancelled: cancelled)
+        }) { source, width, height, values, isCancelled in
             let scale = 3.2 / Double(min(width, height)) / values[0]
             let angle = values[2] * .pi / 180
             let sine = sin(angle), cosine = cos(angle), limit = Int(values[1])

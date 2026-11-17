@@ -68,8 +68,24 @@ extension PaintDocument {
         window.beginSheet(panel) { [weak self] response in
             panel.stopPreview()
             self?.editor?.canvas.layerPreview = nil
-            guard response == .OK, let layer = panel.result else { return }
-            self?.commitFilter(filter, input: input, layer: layer, values: panel.values)
+            guard let self, response == .OK, let layer = panel.result else { return }
+            let values = panel.values
+            let renderFilter = panel.renderFilter
+            if renderFilter.hasPreviewRenderer {
+                let revision = stackRevision
+                let selection = editor?.canvas.selectionOutline
+                runDocumentJob(title: "Applying \(filter.title)…") {
+                    guard let output = input.render(renderFilter, values: values) else {
+                        throw CocoaError(.fileReadUnknown, userInfo: [NSLocalizedDescriptionKey: "Could not apply \(filter.title)."])
+                    }
+                    return output
+                } commit: { document, output in
+                    guard document.canCommitDocumentJob(revision: revision, selection: selection) else { return }
+                    document.commitFilter(filter, input: input, layer: output, values: values)
+                }
+            } else {
+                commitFilter(filter, input: input, layer: layer, values: values)
+            }
         }
         panel.updatePreview()
     }

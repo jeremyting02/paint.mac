@@ -30,6 +30,8 @@ struct RasterTransferCurve {
 
     func linearValue(of byte: UInt8, channel: Int) -> Float { decoded[Int(byte)][channel] }
 
+    var tables: (decoded: [SIMD3<Float>], thresholds: [SIMD3<Float>]) { (decoded, thresholds) }
+
     func encodedByte(for value: Float, channel: Int) -> UInt8 {
         var low = 0
         var high = thresholds.count

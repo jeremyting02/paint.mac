@@ -4,6 +4,55 @@ import Testing
 @testable import Paint
 
 struct MetalMovePreviewTests {
+    @Test func viewportCompositesPremultipliedColorsAndReusesTheCommittedStack() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        let width = 32, height = 24
+        let bytes = Data((0..<(width * height)).flatMap { index -> [UInt8] in
+            [UInt8(index % 251), UInt8(index / width), 94, 255]
+        })
+        let image = try #require(BGRA8.image(from: bytes, width: width, height: height))
+        let active = PaintLayer(name: "Markers", image: image, pdnPixels: bytes)
+        let bottom = try layer(width: width, height: height, seed: 97)
+        let stack = LayerStack(layers: [bottom, active], active: 1)
+        let committed = try #require(MetalMovePreview(stack: stack))
+        let region = CGRect(x: 4, y: 3, width: 16, height: 12)
+        let rendered = try #require(committed.renderViewport(in: region, size: region.size))
+        let actual = try #require(BGRA8.pixels(from: rendered))
+        #expect(actual == PixelRegion.read(bytes, width: width, region: region))
+
+        let pixels = try #require(SelectedPixelsTransform(layer: active, selection: region))
+        let retained = try #require(MetalMovePreview(reusing: committed, stack: stack, pixels: pixels))
+        let cold = try #require(MetalMovePreview(stack: stack, pixels: pixels))
+        let shift = CGAffineTransform(translationX: -3, y: 5)
+        let fittedSize = CGSize(width: 4, height: 3)
+        let a = try #require(retained.renderViewport(in: region, size: fittedSize, by: shift))
+        let b = try #require(cold.renderViewport(in: region, size: fittedSize, by: shift))
+        #expect(BGRA8.pixels(from: a) == BGRA8.pixels(from: b))
+    }
+
+    @MainActor @Test func visibleLayeredCanvasPresentsThroughMetal() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        _ = NSApplication.shared
+        let stack = LayerStack(layers: [try layer(width: 384, height: 288, seed: 97),
+                                       try layer(width: 384, height: 288, seed: 31)], active: 1)
+        let document = PaintDocument()
+        try document.read(from: PDNFile.write(stack), ofType: "Paint.NET Project")
+        document.showWindows()
+        defer { document.close() }
+        let editor = try #require(document.editor)
+        editor.layoutSubtreeIfNeeded()
+        let canvas = editor.canvas
+        canvas.setZoom(nil)
+        canvas.updateViewport()
+        let window = try #require(canvas.window)
+        canvas.needsDisplay = true
+        window.displayIfNeeded()
+        canvas.display()
+        #expect(canvas.cachedMetalComposite != nil, "image: \(canvas.canvasImageRect), visible: \(canvas.visibleRect)")
+        let surface = try #require(canvas.subviews.first { $0 is MetalCanvasSurface })
+        #expect(!surface.isHidden)
+    }
+
     private func layer(width: Int, height: Int, seed: Int, mode: LayerBlendMode = .normal,
                        opacity: UInt8 = 255) throws -> PaintLayer {
         let bytes = Data((0..<(width * height * 4)).map { UInt8(truncatingIfNeeded: $0 * seed + $0 / 17) })
@@ -64,6 +113,7 @@ struct MetalMovePreviewTests {
         canvas.setZoom(nil)
         canvas.updateViewport()
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        canvas.usesMetalViewportPreview = false
         let rect = translateSelection ? CGRect(x: 8, y: 7, width: 368, height: 271) : bounds
         let outline = try #require(SelectionOutline(rect: rect))
         let selection = CGRect(x: rect.minX, y: bounds.height - rect.maxY, width: rect.width, height: rect.height)

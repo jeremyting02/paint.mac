@@ -110,11 +110,19 @@ final class RasterDrawing {
     private var dirtyRight = -1, dirtyBottom = -1
     private var lastChangedTile = -1
     private var changedTiles: Set<Int> = []
+    private let allowsMetal: Bool
+    private lazy var metalStroke: MetalBrushStroke? = {
+        guard allowsMetal, selection == nil, radius >= 256,
+              !options.antialiased || options.hardness >= 100 else { return nil }
+        return MetalBrushStroke(pixels: original, width: layer.image.width, height: layer.image.height,
+                                operation: operation, options: options)
+    }()
     private(set) var changed = false
+    private(set) var metalStamps = 0
     var title: String { operation.title }
 
     init?(layer: PaintLayer, operation: Operation, diameter: CGFloat, selection: SelectionOutline?,
-          options: BrushOptions = BrushOptions()) {
+          options: BrushOptions = BrushOptions(), allowsMetal: Bool = true) {
         guard diameter.isFinite, diameter > 0, diameter <= 4096, let pixels = layer.straightPixels else { return nil }
         if case .clone(let source, _, _) = operation, source.count != pixels.count { return nil }
         self.layer = layer
@@ -131,6 +139,10 @@ final class RasterDrawing {
         let width = layer.image.width, height = layer.image.height
         grid = RasterTileGrid(width: width, height: height)
         self.selection = selection
+        self.allowsMetal = allowsMetal
+        if allowsMetal, selection == nil, diameter >= 512, !options.antialiased || options.hardness >= 100 {
+            MetalBrushStroke.prepare()
+        }
     }
 
     var preview: PaintLayer? {
@@ -264,6 +276,21 @@ final class RasterDrawing {
         let left = max(0, Int(floor(x - reach))), right = min(width - 1, Int(ceil(x + reach)))
         let bottom = max(0, Int(floor(y - reach))), top = min(height - 1, Int(ceil(y + reach)))
         guard left <= right, bottom <= top else { return }
+        if let metalStroke {
+            let rect = CGRect(x: left, y: height - 1 - top, width: right - left + 1, height: top - bottom + 1)
+            let amounts = options.antialiased
+                ? hardCoverage(in: rect, center: center, canvasHeight: height, size: size, reach: reach, core: core)
+                : nil
+            let rendered = metalStroke.stamp(in: rect, center: center, radius: size, coveragePatch: amounts) { pixels, coverage in
+                installMetalStamp(pixels, coverage: coverage, in: rect, canvasWidth: width)
+            }
+            if rendered {
+                metalStamps += 1
+                return
+            }
+            // All successful dispatches also updated the CPU tiles. The stroke can continue on the CPU.
+            self.metalStroke = nil
+        }
         for yPixel in bottom...top {
             let row = height - 1 - yPixel
             var start = left
@@ -275,20 +302,91 @@ final class RasterDrawing {
                         let dx = CGFloat(column) + 0.5 - x, dy = CGFloat(yPixel) + 0.5 - y
                         let squared = dx * dx + dy * dy
                         guard squared <= reach * reach else { continue }
-                        let amount: UInt8
-                        if let tip {
-                            amount = tip.coverage(distance: sqrt(squared), radius: size)
-                        } else if options.antialiased {
-                            let falloff = min(1, (reach - sqrt(squared)) / (reach - max(0, core - 0.5)))
-                            let strength = min(1, 4 * size * size)
-                            amount = UInt8(clamping: Int((falloff * strength * 255).rounded()))
-                        } else {
-                            amount = 255
-                        }
+                        let amount = stampCoverage(squared: squared, size: size, reach: reach, core: core)
                         apply(to: target, tile: tile, column: column, row: row, coverage: amount)
                     }
                 }
                 start = end + 1
+            }
+        }
+    }
+
+    private func stampCoverage(squared: CGFloat, size: CGFloat, reach: CGFloat, core: CGFloat) -> UInt8 {
+        if let tip { return tip.coverage(distance: sqrt(squared), radius: size) }
+        guard options.antialiased else { return 255 }
+        let falloff = min(1, (reach - sqrt(squared)) / (reach - max(0, core - 0.5)))
+        let strength = min(1, 4 * size * size)
+        return UInt8(clamping: Int((falloff * strength * 255).rounded()))
+    }
+
+    /// Fill the interior in spans and evaluate only the narrow hard-tip fringe with the canonical sampler.
+    private func hardCoverage(in rect: CGRect, center: CGPoint, canvasHeight: Int,
+                              size: CGFloat, reach: CGFloat, core: CGFloat) -> Data {
+        let columns = Int(rect.width), rows = Int(rect.height), left = Int(rect.minX), top = Int(rect.minY)
+        let opaqueRadius = max(0, size - (tip == nil ? 0.5 : 1.25))
+        let opaqueSquared = opaqueRadius * opaqueRadius, reachSquared = reach * reach
+        var result = Data(count: columns * rows)
+        result.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            for row in 0..<rows {
+                let y = CGFloat(canvasHeight - 1 - top - row) + 0.5 - center.y
+                let ySquared = y * y
+                guard ySquared <= reachSquared else { continue }
+                let outer = sqrt(reachSquared - ySquared)
+                let x = center.x - CGFloat(left) - 0.5
+                let first = max(0, Int(floor(x - outer)) - 1), last = min(columns - 1, Int(ceil(x + outer)) + 1)
+                guard first <= last else { continue }
+                let inner = opaqueSquared > ySquared ? sqrt(opaqueSquared - ySquared) : 0
+                let solidFirst = max(first, Int(ceil(x - inner)) + 1)
+                let solidLast = min(last, Int(floor(x + inner)) - 1)
+                let start = row * columns
+                func sample(_ range: ClosedRange<Int>) {
+                    for column in range {
+                        let dx = CGFloat(left + column) + 0.5 - center.x
+                        let squared = dx * dx + ySquared
+                        if squared <= reachSquared {
+                            bytes[start + column] = stampCoverage(squared: squared, size: size, reach: reach, core: core)
+                        }
+                    }
+                }
+                if solidFirst <= solidLast {
+                    memset(bytes.baseAddress!.advanced(by: start + solidFirst), 255, solidLast - solidFirst + 1)
+                    if first < solidFirst { sample(first...(solidFirst - 1)) }
+                    if solidLast < last { sample((solidLast + 1)...last) }
+                } else {
+                    sample(first...last)
+                }
+            }
+        }
+        return result
+    }
+
+    private func installMetalStamp(_ pixels: UnsafeRawBufferPointer, coverage: UnsafeRawBufferPointer,
+                                   in rect: CGRect, canvasWidth: Int) {
+        let stride = Int(rect.width)
+        for index in grid.indices(in: rect) {
+            let overlap = grid.rect(at: index).intersection(rect)
+            let left = Int(overlap.minX), columns = Int(overlap.width)
+            let tile = tile(column: left, row: Int(overlap.minY))
+            tile.pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                tile.coverage.withUnsafeMutableBufferPointer { amounts in
+                    for row in Int(overlap.minY)..<Int(overlap.maxY) {
+                        let start = tile.offset(column: left, row: row)
+                        let patch = (row - Int(rect.minY)) * stride + left - Int(rect.minX)
+                        let source = pixels.baseAddress!.advanced(by: patch * 4)
+                        let destination = target.baseAddress!.advanced(by: start * 4)
+                        let mask = coverage.baseAddress!.advanced(by: row * canvasWidth + left)
+                        amounts.baseAddress!.advanced(by: start).update(from: mask.assumingMemoryBound(to: UInt8.self),
+                                                                         count: columns)
+                        guard memcmp(source, destination, columns * 4) != 0 else { continue }
+                        var first = 0, last = columns - 1
+                        while source.loadUnaligned(fromByteOffset: first * 4, as: UInt32.self) ==
+                            destination.loadUnaligned(fromByteOffset: first * 4, as: UInt32.self) { first += 1 }
+                        while source.loadUnaligned(fromByteOffset: last * 4, as: UInt32.self) ==
+                            destination.loadUnaligned(fromByteOffset: last * 4, as: UInt32.self) { last -= 1 }
+                        destination.copyMemory(from: source, byteCount: columns * 4)
+                        recordChange(in: tile, left: left + first, right: left + last, row: row)
+                    }
+                }
             }
         }
     }
@@ -334,16 +432,20 @@ final class RasterDrawing {
             recolor(target, from: from, to: to, tolerance: tolerance, coverage: amount)
         }
         if target.loadUnaligned(as: UInt32.self) != before {
-            cachedPreview = nil
-            changed = true
-            dirtyLeft = min(dirtyLeft, column)
-            dirtyRight = max(dirtyRight, column)
-            dirtyTop = min(dirtyTop, row)
-            dirtyBottom = max(dirtyBottom, row)
-            if tile.index != lastChangedTile {
-                changedTiles.insert(tile.index)
-                lastChangedTile = tile.index
-            }
+            recordChange(in: tile, left: column, right: column, row: row)
+        }
+    }
+
+    private func recordChange(in tile: StrokeTile, left: Int, right: Int, row: Int) {
+        cachedPreview = nil
+        changed = true
+        dirtyLeft = min(dirtyLeft, left)
+        dirtyRight = max(dirtyRight, right)
+        dirtyTop = min(dirtyTop, row)
+        dirtyBottom = max(dirtyBottom, row)
+        if tile.index != lastChangedTile {
+            changedTiles.insert(tile.index)
+            lastChangedTile = tile.index
         }
     }
 

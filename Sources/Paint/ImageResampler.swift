@@ -13,7 +13,7 @@ struct ImageResampler {
         case nearest = "Nearest Neighbor"
     }
 
-    private struct Tap {
+    struct Tap {
         let index: Int
         let weight: Float
     }
@@ -50,8 +50,12 @@ struct ImageResampler {
                              widenKernel: widenKernel)
     }
 
-    func resample(_ pixels: Data, isCancelled: () -> Bool = { false }) -> Data? {
+    func resample(_ pixels: Data, useMetal: Bool = true, isCancelled: () -> Bool = { false }) -> Data? {
         guard !isCancelled() else { return nil }
+        if useMetal, width * height >= 65_536 {
+            if let result = resampleOnMetal(pixels, isCancelled: isCancelled) { return result }
+            if isCancelled() { return nil }
+        }
         var result = Data(count: width * height * 4)
         let completed = pixels.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
             result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) -> Bool in
@@ -113,6 +117,13 @@ struct ImageResampler {
         return completed ? result : nil
     }
 
+    func resampleOnMetal(_ pixels: Data, isCancelled: () -> Bool = { false }) -> Data? {
+        let transfer = linearLight && mode != .nearest ? profileTransfer?.tables ?? Self.srgbTables : nil
+        return MetalRasterGeometry.resize(pixels, sourceWidth: sourceWidth, sourceHeight: sourceHeight,
+                                          width: width, height: height, horizontal: horizontal, vertical: vertical,
+                                          nearest: mode == .nearest, transfer: transfer, isCancelled: isCancelled)
+    }
+
     private static func readPixel(_ data: UnsafeRawBufferPointer, offset: Int, colors: [Float],
                                   transfer: RasterTransferCurve?) -> SIMD4<Float> {
         let alpha = Float(data[offset + 3]) / 255
@@ -131,6 +142,20 @@ struct ImageResampler {
     private static let linearSRGB = identitySRGB.map { value in
         value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
     }
+
+    private static let srgbTables: (decoded: [SIMD3<Float>], thresholds: [SIMD3<Float>]) = {
+        // Use the canonical encoder's exact Float boundaries instead of a GPU pow approximation.
+        let thresholds = (0..<255).map { code in
+            var low: UInt32 = 0, high = Float(1).bitPattern
+            while low < high {
+                let midpoint = (low + high) / 2
+                if Int(byte(encodeSRGB(Float(bitPattern: midpoint)))) <= code { low = midpoint + 1 }
+                else { high = midpoint }
+            }
+            return SIMD3<Float>(repeating: Float(bitPattern: low))
+        }
+        return (linearSRGB.map { SIMD3<Float>(repeating: $0) }, thresholds)
+    }()
 
     private static func encodeSRGB(_ value: Float) -> Float {
         value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1 / 2.4) - 0.055

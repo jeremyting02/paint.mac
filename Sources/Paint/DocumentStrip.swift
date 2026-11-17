@@ -152,8 +152,9 @@ final class WorkspaceDocuments: NSObject {
             }
             let revision = entry.thumbnailRevision
             let composite = document.editor?.canvas.cachedCommittedComposite
+            let metal = document.editor?.canvas.cachedMetalComposite
             thumbnailQueue.async { [weak self, weak entry] in
-                let thumbnail = Self.thumbnail(of: stack, composite: composite)
+                let thumbnail = Self.thumbnail(of: stack, composite: composite, metal: metal)
                 DispatchQueue.main.async { [weak self, weak entry] in
                     guard let self, let entry, pendingThumbnails.remove(entry.id) != nil else { return }
                     if entry.thumbnailRevision == revision {
@@ -167,10 +168,13 @@ final class WorkspaceDocuments: NSObject {
         }
     }
 
-    private nonisolated static func thumbnail(of stack: LayerStack, composite: CGImage?) -> CGImage? {
+    private nonisolated static func thumbnail(of stack: LayerStack, composite: CGImage?, metal: MetalMovePreview?) -> CGImage? {
         let source = stack.activeLayer.image
         let aspect = CGFloat(source.width) / CGFloat(source.height)
         let size = NSSize(width: max(1, min(96, 48 * aspect).rounded()), height: max(1, min(48, 96 / aspect).rounded()))
+        if composite == nil, let image = metal?.renderViewport(
+            in: CGRect(x: 0, y: 0, width: source.width, height: source.height), size: size
+        ) { return image }
         let frame = CGRect(origin: .zero, size: size)
         guard let bitmap = LayerStack.makeBitmap(width: Int(size.width), height: Int(size.height)) else { return nil }
         bitmap.interpolationQuality = .high

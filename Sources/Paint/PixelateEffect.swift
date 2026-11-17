@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum PixelateEffect {
@@ -25,7 +26,16 @@ enum PixelateEffect {
         .init("Cell Size", 1...200, 2),
         .init("Scale Down", choices: Downsampling.allCases.map(\.rawValue), initial: 2),
         .init("Scale Up", choices: upsampling.map(\.rawValue), initial: 2)
-    ], renderInColorSpace: { source, width, height, colorSpace, _, values, isCancelled in
+    ], preview: { source, width, height, colorSpace, _, values, isCancelled in
+        render(source, width: width, height: height, colorSpace: colorSpace, values: values,
+               useMetal: true, isCancelled: isCancelled)
+    }, renderInColorSpace: { source, width, height, colorSpace, _, values, isCancelled in
+        render(source, width: width, height: height, colorSpace: colorSpace, values: values,
+               useMetal: false, isCancelled: isCancelled)
+    })
+
+    private static func render(_ source: Data, width: Int, height: Int, colorSpace: CGColorSpace,
+                               values: [Double], useMetal: Bool, isCancelled: () -> Bool) -> Data? {
         let size = Int(values[0])
         if size == 1 { return source }
         let reduction = Downsampling.allCases[Int(values[1])]
@@ -42,7 +52,11 @@ enum PixelateEffect {
         let cells: Data
         if reduction == .multisampleBilinear {
             let transfer = LinearEffectTransfer(colorSpace: colorSpace)
-            guard let sampled = multisample(source, width: width, height: height, cellSize: size,
+            let accelerated = useMetal ? MetalRasterEffects.pixelateCells(
+                source, width: width, height: height, cellSize: size, columns: columns, rows: rows, halo: halo,
+                transfer: transfer, isCancelled: isCancelled
+            ) : nil
+            guard let sampled = accelerated ?? multisample(source, width: width, height: height, cellSize: size,
                                             columns: columns, rows: rows, halo: halo, transfer: transfer,
                                             isCancelled: isCancelled)
             else { return nil }
@@ -53,7 +67,9 @@ enum PixelateEffect {
                                         samplingRatio: SIMD2(repeating: Float(size)),
                                         samplingOrigin: SIMD2(repeating: Float(-halo * size)),
                                         widenKernel: reduction == .highQualityBicubic, colorSpace: colorSpace)
-            guard let sampled = scaler.resample(source, isCancelled: isCancelled) else { return nil }
+            guard let sampled = scaler.resample(source, useMetal: useMetal && MetalRasterEffects.enabled,
+                                                isCancelled: isCancelled)
+            else { return nil }
             cells = sampled
         }
         guard !isCancelled() else { return nil }
@@ -61,8 +77,9 @@ enum PixelateEffect {
                                     mode: enlargement, linearLight: true,
                                     samplingRatio: SIMD2(repeating: 1 / Float(size)),
                                     samplingOrigin: SIMD2(repeating: Float(halo)), colorSpace: colorSpace)
-        return scaler.resample(cells, isCancelled: isCancelled)
-    })
+        return scaler.resample(cells, useMetal: useMetal && MetalRasterEffects.enabled && enlargement != .nearest,
+                               isCancelled: isCancelled)
+    }
 
     private static let fractions: [SIMD2<Double>] = [
         SIMD2(3, 1) / 8, SIMD2(7, 3) / 8, SIMD2(1, 5) / 8, SIMD2(5, 7) / 8

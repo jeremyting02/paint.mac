@@ -7,7 +7,11 @@ extension RasterFilter {
             .init("Scale", 1...100, 25), .init("Refraction", 0...100, 50),
             .init("Detail", 1...100, 10), .init("Turbulence", 0...100, 10),
             .init("Angle", -180...180, 137.2, step: 0.1), .init("Quality", 1...4, 2), .init("Seed", 0...9999, 0)
-        ]) { source, width, height, values, isCancelled in
+        ], preview: { source, width, height, values, cancelled in
+            guard values[1] != 0 else { return source }
+            return MetalRasterEffects.distortion(.dents, pixels: source, width: width, height: height,
+                                                  values: values, isCancelled: cancelled)
+        }) { source, width, height, values, isCancelled in
             guard values[1] != 0 else { return source }
             let size = Double(min(width, height))
             let center = SIMD2(Double(width - 1), Double(height - 1)) / 2
@@ -33,7 +37,11 @@ extension RasterFilter {
         Self("Frosted Glass", category: "Distort", [
             .init("Maximum Scatter Radius", 0...200, 4), .init("Minimum Scatter Radius", 0...200, 0),
             .init("Diffusion", 0.1...5, 1, step: 0.1), .init("Smoothness", 1...4, 2), .init("Seed", 0...9999, 0)
-        ]) { source, width, height, values, isCancelled in
+        ], preview: { source, width, height, values, cancelled in
+            guard values[0] != 0 else { return source }
+            return MetalRasterEffects.distortion(.frostedGlass, pixels: source, width: width, height: height,
+                                                  values: values, isCancelled: cancelled)
+        }) { source, width, height, values, isCancelled in
             let maximum = values[0]
             guard maximum != 0 else { return source }
             let minimum = min(maximum, values[1])
@@ -49,7 +57,11 @@ extension RasterFilter {
         Self("Polar Inversion", category: "Distort", [
             .init("Scale", -4...4, 1, step: 0.01), .init("Offset X", -100...100, 0), .init("Offset Y", -100...100, 0),
             .init("Edge (1 Clamp, 2 Reflect, 3 Wrap)", 1...3, 2), .init("Quality", 1...4, 2)
-        ]) { source, width, height, values, isCancelled in
+        ], preview: { source, width, height, values, cancelled in
+            guard values[0] != 0 else { return source }
+            return MetalRasterEffects.distortion(.polarInversion, pixels: source, width: width, height: height,
+                                                  values: values, isCancelled: cancelled)
+        }) { source, width, height, values, isCancelled in
             let amount = values[0]
             guard amount != 0 else { return source }
             let center = SIMD2(Double(width - 1) * (0.5 + values[1] / 200), Double(height - 1) * (0.5 + values[2] / 200))
@@ -67,7 +79,11 @@ extension RasterFilter {
             .init("Amplitude", 0...200, 16), .init("Wavelength", 1...400, 80),
             .init("Angle", -180...180, 0), .init("Phase", -180...180, 0), .init("Petals", 2...24, 6),
             .init("Offset X", -100...100, 0), .init("Offset Y", -100...100, 0), .init("Quality", 1...4, 2)
-        ]) { source, width, height, values, isCancelled in
+        ], preview: { source, width, height, values, cancelled in
+            guard values[1] != 0 else { return source }
+            return MetalRasterEffects.distortion(.waves, pixels: source, width: width, height: height,
+                                                  values: values, isCancelled: cancelled)
+        }) { source, width, height, values, isCancelled in
             let amplitude = values[1]
             guard amplitude != 0 else { return source }
             let mode = Int(values[0])
@@ -101,7 +117,11 @@ extension RasterFilter {
             outline(source, width, height, radius: Int(values[0]), intensity: values[1] / 100,
                     precision: Int(values[2]), isCancelled: isCancelled)
         },
-        Self("Relief", category: "Stylize", [.init("Angle", -180...180, 0, step: 0.1)]) { source, width, height, values, isCancelled in
+        Self("Relief", category: "Stylize", [.init("Angle", -180...180, 0, step: 0.1)], preview: {
+            source, width, height, values, cancelled in
+            MetalRasterEffects.distortion(.relief, pixels: source, width: width, height: height,
+                                          values: values, isCancelled: cancelled)
+        }) { source, width, height, values, isCancelled in
             relief(source, width, height, angle: values[0] * .pi / 180, isCancelled: isCancelled)
         }
     ]
@@ -221,6 +241,12 @@ extension RasterFilter {
         let count = taps.count * taps.count
         let lower = Int((Double(count - 1) * (1 - intensity) / 2).rounded())
         let upper = Int((Double(count - 1) * (1 + intensity) / 2).rounded())
+        let offsets = taps.flatMap { y in taps.map { SIMD4(Float($0), Float(y), 0, 0) } }
+        let parameters = [SIMD4(Float(count), Float(lower), Float(upper), Float(shift))] + offsets
+        if let accelerated = MetalRasterEffects.blur(.outline, pixels: source, width: width, height: height,
+                                                     parameters: parameters, isCancelled: isCancelled) {
+            return accelerated
+        }
         var samples = [UInt8](repeating: 0, count: count)
         var result = source
         let complete = source.withUnsafeBytes { (input: UnsafeRawBufferPointer) in

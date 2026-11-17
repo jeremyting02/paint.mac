@@ -1,15 +1,17 @@
 import CoreGraphics
 import Foundation
 import Metal
+import QuartzCore
 
-/// Renders a floating move into a shared buffer for the AppKit canvas. The document
-/// continues to use SelectedPixelsTransform for commits, clipboard data and history.
+/// Renders a committed stack or floating move. SelectedPixelsTransform still owns document edits.
 final class MetalMovePreview {
     private struct Engine {
         let device: MTLDevice
         let queue: MTLCommandQueue
         let pipeline: MTLComputePipelineState
         let translationPipeline: MTLComputePipelineState
+        let viewportPipeline: MTLRenderPipelineState?
+        let translatedViewportPipeline: MTLRenderPipelineState?
 
         init?() {
             guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return nil }
@@ -17,20 +19,29 @@ final class MetalMovePreview {
             if #available(macOS 15, *) { options.mathMode = .safe }
             else { options.fastMathEnabled = false }
             guard let library = try? device.makeLibrary(source: metalMoveShader, options: options) else { return nil }
-            func pipeline(translating: Bool) -> MTLComputePipelineState? {
+            func function(_ name: String, translating: Bool) -> MTLFunction? {
                 let constants = MTLFunctionConstantValues()
                 var translating = translating
                 constants.setConstantValue(&translating, type: .bool, index: 0)
-                guard let function = try? library.makeFunction(name: "renderMovePreview", constantValues: constants)
-                else { return nil }
-                return try? device.makeComputePipelineState(function: function)
+                return try? library.makeFunction(name: name, constantValues: constants)
             }
-            guard let affine = pipeline(translating: false), let translation = pipeline(translating: true)
-            else { return nil }
+            guard let affine = function("renderMovePreview", translating: false),
+                  let translation = function("renderMovePreview", translating: true),
+                  let pipeline = try? device.makeComputePipelineState(function: affine),
+                  let translationPipeline = try? device.makeComputePipelineState(function: translation) else { return nil }
+            func viewport(translating: Bool) -> MTLRenderPipelineState? {
+                let descriptor = MTLRenderPipelineDescriptor()
+                descriptor.vertexFunction = library.makeFunction(name: "viewportVertex")
+                descriptor.fragmentFunction = function("viewportFragment", translating: translating)
+                descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+                return try? device.makeRenderPipelineState(descriptor: descriptor)
+            }
             self.device = device
             self.queue = queue
-            self.pipeline = affine
-            translationPipeline = translation
+            self.pipeline = pipeline
+            self.translationPipeline = translationPipeline
+            viewportPipeline = viewport(translating: false)
+            translatedViewportPipeline = viewport(translating: true)
         }
     }
 
@@ -67,11 +78,31 @@ final class MetalMovePreview {
     private let selection: CGRect
     private let bounds: CGRect
     private let colorSpace: CGColorSpace
+    private let hasMove: Bool
+    private var previewTexture: MTLTexture?
     private var cached: (Frame, CGImage)?
 
-    init?(stack: LayerStack, pixels: SelectedPixelsTransform) {
-        guard let engine = Self.engine else { return nil }
+    init?(reusing committed: MetalMovePreview, stack: LayerStack, pixels: SelectedPixelsTransform) {
         let source = pixels.previewSource
+        guard !committed.hasMove, !source.isPaste, source.cropped == nil, source.cleared == nil else { return nil }
+        let visible = stack.layers.indices.filter { stack.layers[$0].isVisible && stack.layers[$0].opacity > 0 }
+        guard let active = visible.firstIndex(of: stack.active), visible.count == Int(committed.canvas.y) else { return nil }
+        let width = Int(committed.bounds.width), height = Int(committed.bounds.height)
+        let offset = (active * height + Int(source.selection.minY)) * width + Int(source.selection.minX)
+        engine = committed.engine
+        input = committed.input
+        layerInfo = committed.layerInfo
+        canvas = SIMD4(UInt32(width), committed.canvas.y, UInt32(active), .max)
+        foreground = SIMD4(UInt32(offset), UInt32(width), UInt32(source.selection.width), UInt32(source.selection.height))
+        selection = source.selection
+        hasMove = true
+        bounds = committed.bounds
+        colorSpace = committed.colorSpace
+    }
+
+    init?(stack: LayerStack, pixels: SelectedPixelsTransform? = nil) {
+        guard let engine = Self.engine else { return nil }
+        let source = pixels?.previewSource
         let image = stack.activeLayer.image
         let layerBytes = image.width * image.height * 4
         var parts: [Data] = []
@@ -90,27 +121,31 @@ final class MetalMovePreview {
         }
         for (index, layer) in stack.layers.enumerated() where layer.isVisible && layer.opacity > 0 {
             let isActive = index == stack.active
-            guard let bytes = isActive ? source.original : layer.straightPixels, bytes.count == layerBytes,
+            guard let bytes = (isActive ? source?.original : nil) ?? layer.straightPixels, bytes.count == layerBytes,
                   let offset = append(bytes) else { return nil }
             if isActive { active = layers.count }
             layers.append(SIMD4(offset, UInt32(layer.opacity), UInt32(layer.blendMode.rawValue), 0))
         }
-        guard let active else { return nil }
+        guard !layers.isEmpty, source == nil || active != nil else { return nil }
+        let layout = source?.selection ?? .zero
         var clearedOffset = UInt32.max
-        if source.isPaste {
+        if source?.isPaste == true, let active {
             clearedOffset = layers[active].x
-        } else if let cleared = source.cleared {
+        } else if let cleared = source?.cleared, source?.cropped != nil {
             guard let offset = append(cleared) else { return nil }
             clearedOffset = offset
         }
         let foregroundOffset: UInt32
         let foregroundStride: Int
-        if let cropped = source.cropped {
+        if let cropped = source?.cropped {
             guard let offset = append(cropped) else { return nil }
             foregroundOffset = offset
-            foregroundStride = Int(source.selection.width)
+            foregroundStride = Int(layout.width)
+        } else if let active, source != nil {
+            foregroundOffset = layers[active].x + UInt32(Int(layout.minY) * image.width + Int(layout.minX))
+            foregroundStride = image.width
         } else {
-            foregroundOffset = layers[active].x + UInt32(Int(source.selection.minY) * image.width + Int(source.selection.minX))
+            foregroundOffset = 0
             foregroundStride = image.width
         }
         guard let input = engine.device.makeBuffer(length: byteCount, options: .storageModeShared),
@@ -126,10 +161,11 @@ final class MetalMovePreview {
         self.engine = engine
         self.input = input
         self.layerInfo = layerInfo
-        canvas = SIMD4(UInt32(image.width), UInt32(layers.count), UInt32(active), clearedOffset)
-        foreground = SIMD4(foregroundOffset, UInt32(foregroundStride), UInt32(source.selection.width),
-                           UInt32(source.selection.height))
-        selection = source.selection
+        let activeIndex = source == nil ? UInt32.max : UInt32(active ?? 0)
+        canvas = SIMD4(UInt32(image.width), UInt32(layers.count), activeIndex, clearedOffset)
+        foreground = SIMD4(foregroundOffset, UInt32(foregroundStride), UInt32(layout.width), UInt32(layout.height))
+        selection = layout
+        hasMove = source != nil
         bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         colorSpace = stack.needsBlendComposite ? stack.workingColorSpace : stack.activeLayer.workingColorSpace
     }
@@ -140,38 +176,16 @@ final class MetalMovePreview {
         guard !region.isEmpty else { return nil }
         let frame = Frame(region: region, transform: transform, copy: copy, sampling: sampling)
         if let cached, cached.0 == frame { return (region, cached.1) }
-        let determinant = transform.a * transform.d - transform.b * transform.c
-        guard determinant.isFinite, abs(determinant) > 1e-12 else { return nil }
-        let inverse = transform.inverted()
-        let height = bounds.height
         let width = Int(region.width), rows = Int(region.height)
         let byteCount = width * rows * 4
-        // The source rectangle uses top-left coordinates, so a positive canvas y shift moves it up.
-        let destinationOrigin: SIMD2<Int32>?
-        if transform.a == 1, transform.b == 0, transform.c == 0, transform.d == 1,
-           let x = Int32(exactly: selection.minX + transform.tx),
-           let y = Int32(exactly: selection.minY - transform.ty) {
-            destinationOrigin = SIMD2(x, y)
-        } else {
-            destinationOrigin = nil
-        }
-        var parameters = Parameters(
-            canvas: canvas, region: SIMD4(UInt32(region.minX), UInt32(region.minY), UInt32(width), UInt32(rows)),
-            foreground: foreground,
-            flags: SIMD4(copy ? 1 : 0, sampling == .antialiasedNearest ? 1 : 0,
-                         transform.b == 0 && transform.c == 0 ? 1 : 0, 0),
-            inverse: SIMD4(Float(inverse.a), Float(-inverse.b), Float(-inverse.c), Float(inverse.d)),
-            offsetAndTransition: SIMD4(Float(inverse.tx + inverse.c * height - selection.minX),
-                                       Float(height * (1 - inverse.d) - inverse.ty - selection.minY),
-                                       Float(min(1, hypot(inverse.a, inverse.c))),
-                                       Float(min(1, hypot(inverse.b, inverse.d)))),
-            destinationOrigin: destinationOrigin ?? .zero
-        )
+        guard let (configuration, translates) = parameters(region: region, transform: transform, copy: copy,
+                                                            sampling: sampling) else { return nil }
+        var parameters = configuration
         guard let output = engine.device.makeBuffer(length: byteCount, options: .storageModeShared),
               let command = engine.queue.makeCommandBuffer(), let encoder = command.makeComputeCommandEncoder() else {
             return nil
         }
-        let pipeline = destinationOrigin == nil ? engine.pipeline : engine.translationPipeline
+        let pipeline = translates ? engine.translationPipeline : engine.pipeline
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(layerInfo, offset: 0, index: 1)
@@ -198,5 +212,115 @@ final class MetalMovePreview {
         guard let image = BGRA8.image(from: provider, width: width, height: rows, colorSpace: colorSpace) else { return nil }
         cached = (frame, image)
         return (region, image)
+    }
+
+    private func parameters(region: CGRect, transform: CGAffineTransform, copy: Bool,
+                            sampling: MoveResampler.Mode) -> (Parameters, Bool)? {
+        let determinant = transform.a * transform.d - transform.b * transform.c
+        guard determinant.isFinite, abs(determinant) > 1e-12 else { return nil }
+        let inverse = transform.inverted()
+        let height = bounds.height
+        // The source rectangle uses top-left coordinates, so a positive canvas y shift moves it up.
+        let destinationOrigin: SIMD2<Int32>?
+        if transform.a == 1, transform.b == 0, transform.c == 0, transform.d == 1,
+           let x = Int32(exactly: selection.minX + transform.tx),
+           let y = Int32(exactly: selection.minY - transform.ty) {
+            destinationOrigin = SIMD2(x, y)
+        } else {
+            destinationOrigin = nil
+        }
+        let parameters = Parameters(
+            canvas: canvas, region: SIMD4(UInt32(region.minX), UInt32(region.minY), UInt32(region.width), UInt32(region.height)),
+            foreground: foreground,
+            flags: SIMD4(copy ? 1 : 0, sampling == .antialiasedNearest ? 1 : 0,
+                         transform.b == 0 && transform.c == 0 ? 1 : 0, hasMove ? 0 : 1),
+            inverse: SIMD4(Float(inverse.a), Float(-inverse.b), Float(-inverse.c), Float(inverse.d)),
+            offsetAndTransition: SIMD4(Float(inverse.tx + inverse.c * height - selection.minX),
+                                       Float(height * (1 - inverse.d) - inverse.ty - selection.minY),
+                                       Float(min(1, hypot(inverse.a, inverse.c))),
+                                       Float(min(1, hypot(inverse.b, inverse.d)))),
+            destinationOrigin: destinationOrigin ?? .zero
+        )
+        return (parameters, destinationOrigin != nil)
+    }
+
+    func present(in layer: CAMetalLayer, region: CGRect, size: CGSize, by transform: CGAffineTransform,
+                 copy: Bool, sampling: MoveResampler.Mode, completed: @escaping @Sendable (Bool) -> Void) -> Bool {
+        layer.device = engine.device
+        layer.colorspace = colorSpace
+        if layer.drawableSize != size { layer.drawableSize = size }
+        guard let drawable = layer.nextDrawable(),
+              let command = encodeViewport(to: drawable.texture, region: region, transform: transform, copy: copy,
+                                           sampling: sampling) else { return false }
+        command.present(drawable)
+        command.addCompletedHandler { completed($0.status == .completed) }
+        command.commit()
+        return true
+    }
+
+    // Draw the same viewport offscreen for bitmaps, tests, and end-to-end comparisons.
+    func renderViewport(in region: CGRect, size: CGSize, by transform: CGAffineTransform = .identity,
+                        copy: Bool = false, sampling: MoveResampler.Mode = .bicubic) -> CGImage? {
+        guard size.width >= 1, size.height >= 1, size.width <= 8192, size.height <= 8192 else { return nil }
+        let width = Int(size.width), height = Int(size.height)
+        if previewTexture?.width != width || previewTexture?.height != height {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width,
+                                                                      height: height, mipmapped: false)
+            #if arch(x86_64)
+            descriptor.storageMode = engine.device.hasUnifiedMemory ? .shared : .managed
+            #else
+            descriptor.storageMode = .shared
+            #endif
+            descriptor.usage = .renderTarget
+            previewTexture = engine.device.makeTexture(descriptor: descriptor)
+        }
+        guard let texture = previewTexture,
+              let command = encodeViewport(to: texture, region: region, transform: transform, copy: copy,
+                                           sampling: sampling) else { return nil }
+        #if arch(x86_64)
+        if texture.storageMode == .managed {
+            guard let blit = command.makeBlitCommandEncoder() else { return nil }
+            blit.synchronize(resource: texture)
+            blit.endEncoding()
+        }
+        #endif
+        command.commit()
+        command.waitUntilCompleted()
+        guard command.status == .completed else { return nil }
+        var bytes = Data(count: width * height * 4)
+        bytes.withUnsafeMutableBytes { destination in
+            texture.getBytes(destination.baseAddress!, bytesPerRow: width * 4,
+                             from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
+        guard let provider = CGDataProvider(data: bytes as CFData) else { return nil }
+        let format = CGBitmapInfo.byteOrder32Little.union(CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: colorSpace, bitmapInfo: format, provider: provider, decode: nil,
+                       shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    private func encodeViewport(to texture: MTLTexture, region: CGRect, transform: CGAffineTransform,
+                                copy: Bool, sampling: MoveResampler.Mode) -> MTLCommandBuffer? {
+        guard !region.isEmpty,
+              let (configuration, translates) = parameters(region: bounds, transform: transform, copy: copy,
+                                                           sampling: sampling),
+              let pipeline = translates ? engine.translatedViewportPipeline : engine.viewportPipeline,
+              let command = engine.queue.makeCommandBuffer() else { return nil }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+        var configurationBytes = configuration
+        var mapping = SIMD4(Float(region.minX), Float(region.minY), Float(region.width) / Float(texture.width),
+                            Float(region.height) / Float(texture.height))
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentBuffer(input, offset: 0, index: 0)
+        encoder.setFragmentBuffer(layerInfo, offset: 0, index: 1)
+        encoder.setFragmentBytes(&configurationBytes, length: MemoryLayout<Parameters>.stride, index: 3)
+        encoder.setFragmentBytes(&mapping, length: MemoryLayout<SIMD4<Float>>.stride, index: 4)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        return command
     }
 }

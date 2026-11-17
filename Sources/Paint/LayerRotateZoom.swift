@@ -85,16 +85,37 @@ enum LayerRotateZoom {
         .init("Vertical Pan (%)", -100...100, 0, step: 0.01), .init("Zoom (%)", 1...1_000, 100, step: 0.1),
         .init("Quality", 1...4, 2), .init("Tiling", choices: ["Transparent", "Repeat", "Mirror"]),
         .init("Sampling", choices: ["Bilinear", "Nearest Neighbor"])
-    ], render: render)
+    ], preview: renderOnMetal, render: render)
 
-    private static func render(_ bytes: Data, _ width: Int, _ height: Int, _ values: [Double],
-                               _ isCancelled: () -> Bool) -> Data? {
+    private static func projection(width: Int, height: Int, values: [Double]) -> Projection {
         let degrees = Double.pi / 180
-        let projection = Projection(center: SIMD2(Double(width - 1), Double(height - 1)) / 2,
-                                    translation: SIMD2(values[3] * Double(width), values[4] * Double(height)) / 100,
-                                    zoom: values[5] / 100, roll: values[0] * degrees,
-                                    direction: values[1] * degrees, tilt: values[2] * degrees,
-                                    depth: Double(max(width, height)) * 1.75)
+        return Projection(center: SIMD2(Double(width - 1), Double(height - 1)) / 2,
+                          translation: SIMD2(values[3] * Double(width), values[4] * Double(height)) / 100,
+                          zoom: values[5] / 100, roll: values[0] * degrees,
+                          direction: values[1] * degrees, tilt: values[2] * degrees,
+                          depth: Double(max(width, height)) * 1.75)
+    }
+
+    static func renderOnMetal(_ bytes: Data, _ width: Int, _ height: Int, _ values: [Double],
+                              _ isCancelled: () -> Bool) -> Data? {
+        let projection = projection(width: width, height: height, values: values)
+        if projection.isIdentity { return isCancelled() ? nil : bytes }
+        guard width * height >= 65_536 else { return nil }
+        let modes = UInt32(values[7] * 2 + values[8])
+        let parameters = MetalRasterGeometry.ProjectionParameters(
+            sizeAndModes: SIMD4(UInt32(width), UInt32(height), UInt32(values[6]), modes),
+            centerAndPan: SIMD4(Float(projection.center.x), Float(projection.center.y),
+                                Float(projection.translation.x), Float(projection.translation.y)),
+            project: SIMD4(Float(projection.zoom), Float(projection.depth), Float(cos(projection.tilt)), Float(sin(projection.tilt))),
+            angles: SIMD4(Float(cos(projection.direction)), Float(sin(projection.direction)),
+                          Float(cos(projection.roll)), Float(sin(projection.roll)))
+        )
+        return MetalRasterGeometry.project(bytes, parameters: parameters, isCancelled: isCancelled)
+    }
+
+    static func render(_ bytes: Data, _ width: Int, _ height: Int, _ values: [Double],
+                       _ isCancelled: () -> Bool) -> Data? {
+        let projection = projection(width: width, height: height, values: values)
         if projection.isIdentity { return bytes }
         let tiling = Tiling.allCases[Int(values[7])]
         let nearest = values[8] == 1

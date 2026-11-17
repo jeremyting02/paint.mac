@@ -17,6 +17,10 @@ struct ChannelHistogram {
     private(set) var bins: [[Int]]
 
     init(pixels: Data, mask: Data?, isCancelled: () -> Bool = { false }) {
+        if let accelerated = MetalRasterEffects.histogram(pixels, mask: mask, isCancelled: isCancelled) {
+            bins = accelerated
+            return
+        }
         bins = Array(repeating: Array(repeating: 0, count: 256), count: 3)
         guard mask == nil || mask?.count == pixels.count / 4 else { return }
         func count(_ pixels: UnsafeRawBufferPointer, coverage: UnsafeRawBufferPointer?) {
@@ -246,6 +250,10 @@ extension RasterFilter {
 
 private func applyTables(_ tables: [[UInt8]], to source: Data, skipTransparent: Bool = false,
                          isCancelled: () -> Bool) -> Data? {
+    if let accelerated = MetalRasterEffects.tables(Array(tables.reversed()), to: source,
+                                                   skipTransparent: skipTransparent, isCancelled: isCancelled) {
+        return accelerated
+    }
     var output = source
     let completed = output.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
         for offset in stride(from: 0, to: bytes.count, by: 4) {
@@ -262,6 +270,9 @@ private func applyTables(_ tables: [[UInt8]], to source: Data, skipTransparent: 
 }
 
 private func applyLuminosity(_ table: [UInt8], to source: Data, isCancelled: () -> Bool) -> Data? {
+    if let accelerated = MetalRasterEffects.luminosity(table, to: source, isCancelled: isCancelled) {
+        return accelerated
+    }
     var output = source
     let completed = output.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
         for offset in stride(from: 0, to: bytes.count, by: 4) {

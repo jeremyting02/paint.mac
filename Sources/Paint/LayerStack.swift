@@ -42,7 +42,11 @@ struct PaintLayer {
         return data.flatMap { replacingPixels($0, colorSpace: colorSpace) }
     }
 
-    func clearing(_ region: CGRect, mask: Data?, from source: Data) -> Data {
+    func clearing(_ region: CGRect, mask: Data?, from source: Data, allowsMetal: Bool = true) -> Data {
+        if allowsMetal, let mask,
+           let cleared = MetalRasterTools.clear(source, width: image.width, rect: region, mask: mask) {
+            return cleared
+        }
         let width = image.width, regionWidth = Int(region.width)
         let origin = Int(region.minY) * width + Int(region.minX)
         var cleared = source

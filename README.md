@@ -140,6 +140,9 @@ a History entry if the move is already in progress.
 Large move, resize, and rotation previews use Metal when available. Rotated edges can
 look slightly different in the floating preview. Finish uses the same CPU
 sampler for the committed pixels on every Mac.
+Layered canvases and large floating moves can present directly through Metal.
+Fit renders a filtered viewport-sized preview. A rectangular move can reuse
+the layered canvas's existing GPU data.
 
 Drag a corner or edge handle to resize. Hold **Shift** to preserve proportions,
 **Option** to resize about the center, or both to combine them. Drag a handle
@@ -284,6 +287,11 @@ compare CPU and Metal rotation previews on the same 4,096 × 2,048 documents.
 It reports the first frame, including layer upload, and subsequent viewport redraws.
 Use `sh Tests/canvas-benchmark.sh --move-selection` for the same comparison while
 dragging a rectangular selection covering about 95% of the canvas.
+Run `sh Tests/canvas-benchmark.sh --metal-canvas` to compare viewport rendering,
+initial layer compositing, move setup, and thumbnail rendering.
+Run `sh Tests/metal-raster-tools-benchmark.sh`, `sh Tests/metal-effects-benchmark.sh`,
+and `sh Tests/metal-geometry-benchmark.sh` for CPU and Metal comparisons of
+the accelerated drawing tools, effects, and image geometry operations.
 The [5.2 parity checklist](docs/PARITY_5_2.md) records coverage and differences.
 The [reference fixture instructions](Tests/reference-pixels/README.md) show
 how to generate and compare Paint.NET PNGs using the installed Wine build.

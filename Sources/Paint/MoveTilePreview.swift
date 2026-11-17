@@ -58,13 +58,15 @@ final class MoveTilePreview {
     private let bounds: CGRect
     private let colorSpace: CGColorSpace
     private let stack: LayerStack
-    private lazy var metal = MetalMovePreview(stack: stack, pixels: pixels)
+    private let residentStack: MetalMovePreview?
+    private lazy var metal = residentStack.flatMap { MetalMovePreview(reusing: $0, stack: stack, pixels: pixels) }
+        ?? MetalMovePreview(stack: stack, pixels: pixels)
     private(set) var metalDraws = 0
     private var frame: Frame?
     private var frameTiles: [Tile: CGImage] = [:]
     private var clearedTiles: [Tile: CGImage] = [:]
 
-    init?(stack: LayerStack, pixels: SelectedPixelsTransform) {
+    init?(stack: LayerStack, pixels: SelectedPixelsTransform, residentStack: MetalMovePreview? = nil) {
         let image = stack.activeLayer.image
         let byteCount = image.width * image.height * 4
         var sources: [Source] = []
@@ -81,17 +83,24 @@ final class MoveTilePreview {
         self.pixels = pixels
         self.sources = sources
         self.stack = stack
+        self.residentStack = residentStack
         bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         colorSpace = stack.needsBlendComposite ? stack.workingColorSpace : stack.activeLayer.workingColorSpace
     }
 
     func metalFrame(in visible: CGRect, by transform: CGAffineTransform, copy: Bool,
                     sampling: MoveResampler.Mode) -> (region: CGRect, image: CGImage)? {
-        let destination = pixels.destinationRegion(by: transform).intersection(visible)
-        guard !destination.isEmpty, destination.width * destination.height >= 65_536 else { return nil }
-        guard let preview = metal?.render(in: visible, by: transform, copy: copy, sampling: sampling) else { return nil }
+        guard let preview = metalRenderer(in: visible, by: transform)?.render(in: visible, by: transform,
+                                                                             copy: copy, sampling: sampling)
+        else { return nil }
         metalDraws += 1
         return preview
+    }
+
+    func metalRenderer(in visible: CGRect, by transform: CGAffineTransform) -> MetalMovePreview? {
+        let destination = pixels.destinationRegion(by: transform).intersection(visible)
+        guard !destination.isEmpty, destination.width * destination.height >= 65_536 else { return nil }
+        return metal
     }
 
     func tiles(in visible: CGRect, by transform: CGAffineTransform, copy: Bool, sampling: MoveResampler.Mode)

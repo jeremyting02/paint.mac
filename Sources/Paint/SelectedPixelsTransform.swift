@@ -12,7 +12,7 @@ final class SelectedPixelsTransform {
 
     private let layer: PaintLayer
     private let source: Data
-    // A full-layer cut leaves a transparent backdrop everywhere.
+    // Rectangles are cleared per output region. Nonrectangular cuts retain their exact masked backdrop.
     private let cleared: Data?
     private let selection: CGRect
     private let bounds: CGRect
@@ -41,7 +41,7 @@ final class SelectedPixelsTransform {
         } else {
             croppedPixels = nil
         }
-        cleared = selection == bounds && mask == nil ? nil : layer.clearing(selection, mask: mask, from: source)
+        cleared = mask.map { layer.clearing(selection, mask: $0, from: source) }
     }
 
     init?(layer: PaintLayer, pastedImage: CGImage, at destination: CGRect) {
@@ -72,7 +72,7 @@ final class SelectedPixelsTransform {
     }
 
     func retainedImageOffset(by transform: CGAffineTransform, copy: Bool) -> CGPoint? {
-        guard cleared == nil, !copy,
+        guard !isPaste, croppedPixels == nil, selection == bounds, !copy,
               transform.a == 1, transform.b == 0, transform.c == 0, transform.d == 1,
               transform.tx.isFinite, transform.ty.isFinite,
               transform.tx == transform.tx.rounded(), transform.ty == transform.ty.rounded() else { return nil }
@@ -98,7 +98,8 @@ final class SelectedPixelsTransform {
         guard !region.isEmpty, bounds.contains(region), region == region.integral else { return nil }
         let width = layer.image.width
         let identity = !isPaste && transform.isIdentity
-        let base = copy || identity ? source : cleared
+        let clearsRectangle = !copy && !identity && cleared == nil
+        let base = if copy || identity || (clearsRectangle && selection != bounds) { source } else { cleared }
         let stride = Int(region.width) * 4
         var pixels = (region == bounds ? base : nil) ?? Data(count: stride * Int(region.height))
         if region != bounds, let base {
@@ -114,6 +115,19 @@ final class SelectedPixelsTransform {
             }
         }
         if identity { return pixels }
+        if clearsRectangle, base != nil {
+            let hole = selection.intersection(region)
+            if !hole.isEmpty {
+                let first = Int(hole.minY - region.minY) * stride + Int(hole.minX - region.minX) * 4
+                let rowBytes = Int(hole.width) * 4
+                pixels.withUnsafeMutableBytes { output in
+                    for row in 0..<Int(hole.height) {
+                        output.baseAddress!.advanced(by: first + row * stride)
+                            .initializeMemory(as: UInt8.self, repeating: 0, count: rowBytes)
+                    }
+                }
+            }
+        }
         let (placement, destination, translationOnly) = placement(by: transform)
         let target = placement.intersection(region)
         if !target.isEmpty {

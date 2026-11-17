@@ -135,14 +135,14 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
     func updatePreview() {
         revision += 1
         let requestedRevision = revision
-        let input = self.input, filter = specializedControls?.renderFilter() ?? self.filter, values = self.values
+        let input = self.input, filter = renderFilter, values = self.values
         renderRequest?.cancel()
         result = nil
         status.stringValue = "Rendering…"
         apply.isEnabled = false
         let request = BlockOperation()
         request.addExecutionBlock { [weak self, weak request] in
-            let rendered = input.render(filter, values: values, isCancelled: { request?.isCancelled != false })
+            let rendered = input.render(filter, values: values, preview: true, isCancelled: { request?.isCancelled != false })
             guard request?.isCancelled == false else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self, revision == requestedRevision else { return }
@@ -157,6 +157,8 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
             if !request.isCancelled { Self.renderQueue.addOperation(request) }
         }
     }
+
+    var renderFilter: RasterFilter { specializedControls?.renderFilter() ?? filter }
 
     func stopPreview() {
         revision += 1

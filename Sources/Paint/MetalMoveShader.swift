@@ -9,7 +9,7 @@ struct Parameters {
     uint4 canvas;     // width, layer count, active layer index, cleared-layer offset or UINT_MAX
     uint4 region;     // x, y, width, height (top-left origin)
     uint4 foreground; // offset, stride, width, height
-    uint4 flags;      // copy, antialiased nearest, axis aligned, unused
+    uint4 flags;      // copy, antialiased nearest, axis aligned, committed stack
     float4 inverse;
     float4 offsetAndTransition;
     int2 destinationOrigin;
@@ -106,22 +106,27 @@ float3 blend(uint mode, float3 a, float3 b) {
     }
 }
 
-kernel void renderMovePreview(device const uchar4 *pixels [[buffer(0)]],
-                              device const uint4 *layers [[buffer(1)]],
-                              device uchar4 *output [[buffer(2)]],
-                              constant Parameters &p [[buffer(3)]],
-                              uint2 id [[thread_position_in_grid]]) {
-    if (any(id >= p.region.zw)) return;
-    uint2 location = p.region.xy + id;
+uchar4 compositePixel(device const uchar4 *pixels, device const uint4 *layers,
+                      constant Parameters &p, uint2 location) {
     uint pixel = location.y * p.canvas.x + location.x;
-    uint activeOffset = p.flags.x ? layers[p.canvas.z].x : p.canvas.w;
-    uchar4 active = activeOffset == 0xffffffffu ? uchar4(0) : pixels[activeOffset + pixel];
-    if (translating) {
+    uchar4 active = 0;
+    if (!p.flags.w) {
+        uint original = layers[p.canvas.z].x;
+        uint activeOffset = p.flags.x ? original : p.canvas.w;
+        if (activeOffset != 0xffffffffu) {
+            active = pixels[activeOffset + pixel];
+        } else {
+            uint offset = p.foreground.x - original;
+            uint2 origin = uint2(offset % p.canvas.x, offset / p.canvas.x);
+            if (any(location - origin >= p.foreground.zw)) active = pixels[original + pixel];
+        }
+    }
+    if (!p.flags.w && translating) {
         uint2 source = location - uint2(p.destinationOrigin);
         if (all(source < p.foreground.zw)) {
             active = sourceOver(pixels[p.foreground.x + source.y * p.foreground.y + source.x], active);
         }
-    } else {
+    } else if (!p.flags.w) {
         float2 center = float2(location) + 0.5f;
         float2 dx = p.inverse.xy, dy = p.inverse.zw;
         float2 mapped = center.x * dx + center.y * dy + p.offsetAndTransition.xy;
@@ -135,11 +140,7 @@ kernel void renderMovePreview(device const uchar4 *pixels [[buffer(0)]],
         }
     }
 
-    uint target = id.y * p.region.z + id.x;
-    if (p.canvas.y == 1 && layers[0].y == 255) {
-        output[target] = active;
-        return;
-    }
+    if (p.canvas.y == 1 && layers[0].y == 255) return p.flags.w ? pixels[layers[0].x + pixel] : active;
     float4 backdrop = 0;
     uchar4 bottom = 0;
     for (uint index = 0; index < p.canvas.y; ++index) {
@@ -158,6 +159,40 @@ kernel void renderMovePreview(device const uchar4 *pixels [[buffer(0)]],
                        float4(overlap, 1) * (backdrop.w * alpha);
         }
     }
-    output[target] = backdrop.w > 0 ? toBytes(float4(backdrop.xyz / backdrop.w, backdrop.w)) : bottom;
+    return backdrop.w > 0 ? toBytes(float4(backdrop.xyz / backdrop.w, backdrop.w)) : bottom;
+}
+
+kernel void renderMovePreview(device const uchar4 *pixels [[buffer(0)]],
+                              device const uint4 *layers [[buffer(1)]],
+                              device uchar4 *output [[buffer(2)]],
+                              constant Parameters &p [[buffer(3)]],
+                              uint2 id [[thread_position_in_grid]]) {
+    if (any(id >= p.region.zw)) return;
+    output[id.y * p.region.z + id.x] = compositePixel(pixels, layers, p, p.region.xy + id);
+}
+
+vertex float4 viewportVertex(uint id [[vertex_id]]) {
+    return float4(id == 1 ? 3 : -1, id == 2 ? -3 : 1, 0, 1);
+}
+
+fragment float4 viewportFragment(float4 position [[position]],
+                                 device const uchar4 *pixels [[buffer(0)]],
+                                 device const uint4 *layers [[buffer(1)]],
+                                 constant Parameters &p [[buffer(3)]],
+                                 constant float4 &mapping [[buffer(4)]]) {
+    // Filter the composited pixels, including alpha, before writing premultiplied color.
+    // Four strata per axis bound the work for heavily minified document previews.
+    uint samples = uint(clamp(ceil(max(mapping.z, mapping.w)), 1.0f, 4.0f));
+    float4 color = 0;
+    for (uint y = 0; y < samples; ++y) {
+        for (uint x = 0; x < samples; ++x) {
+            float2 subpixel = (float2(x, y) + 0.5f) / float(samples) - 0.5f;
+            float2 source = mapping.xy + (position.xy + subpixel) * mapping.zw;
+            uint2 point = uint2(clamp(floor(source), float2(0), float2(p.region.zw - 1)));
+            float4 value = float4(compositePixel(pixels, layers, p, point).zyxw) / 255.0f;
+            color += float4(value.xyz * value.w, value.w);
+        }
+    }
+    return color / float(samples * samples);
 }
 """

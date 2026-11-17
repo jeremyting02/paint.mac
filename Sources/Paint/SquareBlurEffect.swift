@@ -5,7 +5,13 @@ enum SquareBlurEffect {
                                         .init("Radius", 0...300, 4),
                                         .init("Gamma Boost", -0.99...2, 0, step: 0.01)
                                      ],
-                                     renderInColorSpace: { source, width, height, colorSpace, _, values, isCancelled in
+                                     preview: { source, width, height, colorSpace, _, values, isCancelled in
+        let radius = Int(values[0])
+        guard radius > 0 else { return source }
+        let transfer = LinearEffectTransfer(colorSpace: colorSpace, sampleExponent: 1 + values[1])
+        return MetalRasterEffects.squareBlur(source, width: width, height: height, radius: radius,
+                                             transfer: transfer, isCancelled: isCancelled)
+    }, renderInColorSpace: { source, width, height, colorSpace, _, values, isCancelled in
         let radius = Int(values[0])
         guard radius > 0 else { return source }
         // Average RGB with an adjusted exponent and undo it after blur. Alpha is averaged separately.

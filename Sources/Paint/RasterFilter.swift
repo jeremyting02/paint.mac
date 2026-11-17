@@ -40,7 +40,10 @@ struct RasterFilter {
     let category: String?
     let controls: [Control]
     let editor: Editor?
-    private let process: (Data, Int, Int, CGColorSpace, Data?, [Double], () -> Bool) -> Data?
+    typealias Renderer = (Data, Int, Int, CGColorSpace, Data?, [Double], () -> Bool) -> Data?
+    private let process: Renderer
+    private let previewProcess: Renderer?
+    var hasPreviewRenderer: Bool { previewProcess != nil }
 
     init(_ title: String, category: String? = nil, _ controls: [Control] = [],
          process: @escaping (Data, Int, Int, [Double]) -> Data?) {
@@ -50,8 +53,13 @@ struct RasterFilter {
     }
 
     init(_ title: String, category: String? = nil, _ controls: [Control] = [], editor: Editor? = nil,
+         preview: ((Data, Int, Int, [Double], () -> Bool) -> Data?)? = nil,
          render: @escaping (Data, Int, Int, [Double], () -> Bool) -> Data?) {
-        self.init(title, category: category, controls, editor: editor) { pixels, width, height, _, values, isCancelled in
+        let previewProcess: Renderer? = preview.map { body in
+            { pixels, width, height, _, _, values, cancelled in body(pixels, width, height, values, cancelled) }
+        }
+        self.init(title, category: category, controls, editor: editor, preview: previewProcess) {
+            pixels, width, height, _, _, values, isCancelled in
             render(pixels, width, height, values, isCancelled)
         }
     }
@@ -64,12 +72,13 @@ struct RasterFilter {
     }
 
     init(_ title: String, category: String?, _ controls: [Control], editor: Editor? = nil,
-         renderInColorSpace: @escaping (Data, Int, Int, CGColorSpace, Data?, [Double], () -> Bool) -> Data?) {
+         preview: Renderer? = nil, renderInColorSpace: @escaping Renderer) {
         self.title = title
         self.category = category
         self.controls = controls
         self.editor = editor
         process = renderInColorSpace
+        previewProcess = preview
     }
 
     struct Input {
@@ -92,11 +101,14 @@ struct RasterFilter {
             }
         }
 
-        func render(_ filter: RasterFilter, values: [Double], isCancelled: () -> Bool = { false }) -> PaintLayer? {
+        func render(_ filter: RasterFilter, values: [Double], preview: Bool = false,
+                    isCancelled: () -> Bool = { false }) -> PaintLayer? {
             guard values.count == filter.controls.count, !isCancelled() else { return nil }
             let settings = zip(filter.controls, values).map { $0.snapped($1) }
-            guard var result = filter.process(pixels, layer.image.width, layer.image.height, layer.workingColorSpace,
-                                              mask, settings, isCancelled),
+            let width = layer.image.width, height = layer.image.height, colorSpace = layer.workingColorSpace
+            let accelerated = preview ? filter.previewProcess?(pixels, width, height, colorSpace, mask, settings, isCancelled) : nil
+            guard !preview || !isCancelled(),
+                  var result = accelerated ?? filter.process(pixels, width, height, colorSpace, mask, settings, isCancelled),
                   result.count == pixels.count, !isCancelled() else { return nil }
             // SelectionOutline supplies a binary mask in top-to-bottom pixel order.
             if let mask {
@@ -120,8 +132,10 @@ struct RasterFilter {
     typealias Pixel = SIMD4<Double>
 
     static func point(_ title: String, category: String? = nil, _ controls: [Control] = [],
+                      accelerate: ((Data, [Double], () -> Bool) -> Data?)? = nil,
                       _ transform: @escaping (Pixel, [Double]) -> Pixel) -> Self {
         Self(title, category: category, controls) { source, _, _, values, isCancelled in
+            if let accelerated = accelerate?(source, values, isCancelled) { return accelerated }
             var result = source
             let completed = result.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
                 for offset in stride(from: 0, to: bytes.count, by: 4) {
@@ -142,6 +156,10 @@ struct RasterFilter {
 
     private static func byte(_ value: Double) -> UInt8 {
         UInt8((min(1, max(0, value)) * 255).rounded())
+    }
+
+    static func channelTable(_ transform: (Double) -> Double) -> [UInt8] {
+        (0...255).map { byte(transform(Double($0) / 255)) }
     }
 
     static func luminance(_ pixel: Pixel) -> Double {

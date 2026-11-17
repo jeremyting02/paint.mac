@@ -318,7 +318,15 @@ final class CanvasView: NSView {
     private var moveDrag: MoveDrag?
     private var moveTilePreview: MoveTilePreview?
     var usesMetalMovePreview = true
+    var usesMetalViewportPreview = true
     var metalMovePreviewDraws: Int { moveTilePreview?.metalDraws ?? 0 }
+    private var metalCanvas: MetalCanvasSurface?
+    private var metalOverlay: MetalCanvasOverlay?
+    private var metalStack: (revision: Int, renderer: MetalMovePreview?)?
+    var cachedMetalComposite: MetalMovePreview? {
+        guard layerPreview == nil, metalStack?.revision == document?.stackRevision else { return nil }
+        return metalStack?.renderer
+    }
     private var cursorTracking: NSTrackingArea?
     private var brushCursor: CGRect? {
         didSet {
@@ -410,6 +418,10 @@ final class CanvasView: NSView {
             if newWindow == nil {
                 // A tab can leave the workspace window without losing its editable preview.
                 resetWindowInteraction()
+                metalCanvas?.clearFrame()
+                metalOverlay?.isHidden = true
+                metalStack = nil
+                moveTilePreview = nil
             } else if newWindow !== window {
                 cancelEditingGesture()
             }
@@ -429,6 +441,7 @@ final class CanvasView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil, let clip = enclosingScrollView?.contentView {
+            MetalMovePreview.prepare()
             clip.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(self, selector: #selector(refreshBrushCursor(_:)),
                                                    name: NSView.boundsDidChangeNotification, object: clip)
@@ -438,6 +451,7 @@ final class CanvasView: NSView {
 
     @objc private func refreshBrushCursor(_ notification: Notification) {
         updateBrushCursor()
+        if metalCanvas?.isHidden == false { needsDisplay = true }
     }
 
     @objc private func windowDidResignKey(_ notification: Notification) {
@@ -1595,13 +1609,52 @@ final class CanvasView: NSView {
         dirtyRect.fill()
         let rect = imageRect
         let visible = rect.intersection(dirtyRect)
-        guard let context = NSGraphicsContext.current?.cgContext,
-              var stack = layerPreview ?? document?.stack else { return }
+        guard let graphics = NSGraphicsContext.current, var stack = layerPreview ?? document?.stack else { return }
+        let context = graphics.cgContext
         let floating = move.flatMap { $0.hasPixelPreview ? $0 : nil }
         let brush = floating == nil && rasterDrawing?.changed == true ? rasterDrawing : nil
-        if floating == nil, let preview = nonRasterPixelPreview { stack.layers[stack.active] = preview }
-        let image = stack.activeLayer.image
-        let showsHandles = showsTransformHandles(on: stack.activeLayer)
+        let preview = floating == nil ? nonRasterPixelPreview : nil
+        if let preview { stack.layers[stack.active] = preview }
+        // AppKit can call draw while rendering the window into a backing surface.
+        let onScreen = window != nil && NSPrintOperation.current == nil
+        let presents = onScreen && usesMetalViewportPreview &&
+            presentMetalCanvas(stack, move: floating, canComposite: brush == nil && preview == nil && layerPreview == nil)
+        if onScreen && !presents {
+            metalCanvas?.clearFrame()
+            metalOverlay?.isHidden = true
+        }
+        defer { if !presents { drawCanvasDecorations(stack.activeLayer, in: context) } }
+        guard !visible.isEmpty else { return }
+
+        context.saveGState()
+        context.clip(to: visible)
+        context.setFillColor(gray: 0.9, alpha: 1)
+        context.fill(rect)
+        context.setFillColor(gray: 0.73, alpha: 1)
+        let square: CGFloat = 12
+        let rows = Int((visible.minY - rect.minY) / square)..<Int(ceil((visible.maxY - rect.minY) / square))
+        let columns = Int((visible.minX - rect.minX) / square)..<Int(ceil((visible.maxX - rect.minX) / square))
+        for row in rows {
+            for column in columns where (row + column).isMultiple(of: 2) {
+                context.fill(CGRect(x: rect.minX + CGFloat(column) * square,
+                                    y: rect.minY + CGFloat(row) * square, width: square, height: square))
+            }
+        }
+        if displayedZoomPercent >= 100 { context.interpolationQuality = .none }
+        if !presents {
+            if let floating, stack.activeLayer.opacity > 0 {
+                drawMovePreview(floating, stack: stack, visible: visible, in: context)
+            } else {
+                drawStack(stack, visible: visible, brush: brush, in: context)
+            }
+        }
+        context.restoreGState()
+    }
+
+    private func drawCanvasDecorations(_ layer: PaintLayer, in context: CGContext) {
+        let rect = imageRect
+        let image = layer.image
+        let showsHandles = showsTransformHandles(on: layer)
         let geometry = moveGeometry(for: image)
         let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
@@ -1623,31 +1676,7 @@ final class CanvasView: NSView {
                 context.restoreGState()
             }
         }
-        guard !visible.isEmpty else { return }
-
-        context.saveGState()
-        context.clip(to: visible)
-        context.setFillColor(gray: 0.9, alpha: 1)
-        context.fill(rect)
-        context.setFillColor(gray: 0.73, alpha: 1)
-        let square: CGFloat = 12
-        let rows = Int((visible.minY - rect.minY) / square)..<Int(ceil((visible.maxY - rect.minY) / square))
-        let columns = Int((visible.minX - rect.minX) / square)..<Int(ceil((visible.maxX - rect.minX) / square))
-        for row in rows {
-            for column in columns where (row + column).isMultiple(of: 2) {
-                context.fill(CGRect(x: rect.minX + CGFloat(column) * square,
-                                    y: rect.minY + CGFloat(row) * square, width: square, height: square))
-            }
-        }
-        if displayedZoomPercent >= 100 {
-            context.interpolationQuality = .none
-        }
-        if let floating, stack.activeLayer.opacity > 0 {
-            drawMovePreview(floating, stack: stack, visible: visible, in: context)
-        } else {
-            drawStack(stack, visible: visible, brush: brush, in: context)
-        }
-        context.restoreGState()
+        guard !rect.isEmpty else { return }
         if showsPixelGrid { drawWorkspaceGrid(in: context) }
         let outline = move?.transformedOutline ?? selectionOutline
         let scale = rect.width / CGFloat(image.width)
@@ -1670,6 +1699,58 @@ final class CanvasView: NSView {
             context.strokePath()
             context.restoreGState()
         }
+    }
+
+    private func presentMetalCanvas(_ stack: LayerStack, move session: MoveSession?, canComposite: Bool) -> Bool {
+        let rect = imageRect.intersection(visibleRect)
+        guard !rect.isEmpty else { return false }
+        let image = stack.activeLayer.image
+        let region = imageRegion(for: rect, width: image.width)
+        let transform = session?.transform ?? .identity
+        let renderer: MetalMovePreview?
+        if let session, usesMetalMovePreview, stack.activeLayer.opacity > 0 {
+            if !stack.needsBlendComposite,
+               session.pixels?.retainedImageOffset(by: transform, copy: session.copy) != nil { return false }
+            if moveTilePreview == nil, let pixels = session.pixels {
+                moveTilePreview = MoveTilePreview(stack: stack, pixels: pixels, residentStack: cachedMetalComposite)
+            }
+            renderer = moveTilePreview?.metalRenderer(in: region, by: transform)
+        } else if session == nil, canComposite, stack.needsBlendComposite,
+                  region.width * region.height >= 65_536, let revision = document?.stackRevision {
+            if metalStack?.revision != revision {
+                metalStack = (revision, MetalMovePreview(stack: stack))
+            }
+            renderer = metalStack?.renderer
+        } else {
+            return false
+        }
+        guard let renderer else { return false }
+        if metalCanvas == nil {
+            let surface = MetalCanvasSurface(frame: rect)
+            surface.wantsLayer = true
+            addSubview(surface)
+            metalCanvas = surface
+            let overlay = MetalCanvasOverlay(frame: visibleRect)
+            overlay.wantsLayer = true
+            overlay.drawDecorations = { [weak self] context in
+                guard let self, let layer = (self.layerPreview ?? self.document?.stack)?.activeLayer else { return }
+                self.drawCanvasDecorations(layer, in: context)
+            }
+            addSubview(overlay, positioned: .above, relativeTo: surface)
+            metalOverlay = overlay
+        }
+        guard let surface = metalCanvas, let overlay = metalOverlay else { return false }
+        let size = CGSize(width: (rect.width * backingScale).rounded(), height: (rect.height * backingScale).rounded())
+        guard size.width >= 1, size.height >= 1 else { return false }
+        let frame = MetalCanvasSurface.Frame(region: region, size: size, transform: transform,
+                                            copy: session?.copy ?? false, sampling: session?.sampling ?? .bicubic)
+        surface.frame = rect
+        surface.isHidden = false
+        guard surface.draw(frame, with: renderer, invalidate: { [weak self] in self?.needsDisplay = true }) else { return false }
+        overlay.frame = visibleRect
+        overlay.isHidden = false
+        overlay.needsDisplay = true
+        return true
     }
 
     private func drawStack(_ stack: LayerStack, visible: CGRect, brush: RasterDrawing? = nil, in context: CGContext) {

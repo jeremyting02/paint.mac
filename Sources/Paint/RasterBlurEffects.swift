@@ -4,34 +4,39 @@ extension RasterFilter {
     static let blurEffects: [Self] = [
         Self("Fragment Blur", category: "Blurs", [
             .init("Fragment Count", 2...50, 4), .init("Distance", 0...100, 8), .init("Rotation", 0...360, 0)
-        ], render: { bytes, width, height, values, cancelled in
+        ], preview: { bytes, width, height, values, cancelled in
+            guard values[1] > 0 else { return bytes }
+            return MetalRasterEffects.blur(.fragment, pixels: bytes, width: width, height: height,
+                                            parameters: [SIMD4(Float(values[0]), 0, 0, 0)] + fragmentOffsets(values).map {
+                SIMD4(Float($0.x), Float($0.y), 0, 0)
+            }, isCancelled: cancelled)
+        }, render: { bytes, width, height, values, cancelled in
             let distance = values[1]
             guard distance > 0 else { return bytes }
-            let phase = values[2] * .pi / 180
-            let count = Int(values[0])
-            let offsets = (0..<count).map { fragment in
-                let angle = phase + Double(fragment) * 2 * .pi / Double(count)
-                return (x: Int((distance * cos(angle)).rounded()), y: Int((distance * sin(angle)).rounded()))
-            }
+            let offsets = fragmentOffsets(values)
             return renderBlur(bytes, width: width, height: height, cancelled: cancelled) { raster, x, y in
                 var sum = raster.at(x, y)
                 for offset in offsets { sum += raster.at(x + offset.x, y + offset.y) }
-                return sum / Double(count + 1)
+                return sum / Double(offsets.count + 1)
             }
         }),
         Self("Radial Blur", category: "Blurs", [
             .init("Angle", 0...360, 15, step: 0.1), .init("Center X", 0...100, 50), .init("Center Y", 0...100, 50),
             .init("Quality", 1...5, 2)
-        ], render: { bytes, width, height, values, cancelled in
+        ], preview: { bytes, width, height, values, cancelled in
             guard values[0] > 0 else { return bytes }
             let originX = Double(width - 1) * values[1] / 100
             let originY = Double(height - 1) * values[2] / 100
-            let steps = 2 * Int(values[3]) * Int(values[3]) + 1
-            let spread = values[0] * .pi / 180
-            let rotations = (0..<steps).map { step in
-                let angle = spread * (Double(step) / Double(steps - 1) - 0.5)
-                return (sine: sin(angle), cosine: cos(angle))
-            }
+            let rotations = radialRotations(values)
+            return MetalRasterEffects.blur(.radial, pixels: bytes, width: width, height: height,
+                                            parameters: [SIMD4(Float(rotations.count), Float(originX), Float(originY), 0)] +
+                                                rotations.map { SIMD4(Float($0.sine), Float($0.cosine), 0, 0) },
+                                            isCancelled: cancelled)
+        }, render: { bytes, width, height, values, cancelled in
+            guard values[0] > 0 else { return bytes }
+            let originX = Double(width - 1) * values[1] / 100
+            let originY = Double(height - 1) * values[2] / 100
+            let rotations = radialRotations(values)
             return renderBlur(bytes, width: width, height: height, cancelled: cancelled) { raster, x, y in
                 let dx = Double(x) - originX, dy = Double(y) - originY
                 var sum = Pixel.zero
@@ -40,18 +45,23 @@ extension RasterFilter {
                     let py = originY + rotation.sine * dx + rotation.cosine * dy
                     sum += raster.interpolated(px, py)
                 }
-                return sum / Double(steps)
+                return sum / Double(rotations.count)
             }
         }),
         Self("Surface Blur", category: "Blurs", [
             .init("Radius", 0...100, 6), .init("Threshold", 0...255, 25)
-        ], render: { bytes, width, height, values, cancelled in
+        ], preview: { bytes, width, height, values, cancelled in
             let radius = Int(values[0]), threshold = values[1] / 255
             guard radius > 0, threshold > 0 else { return bytes }
-            let offsets = neighborhood(radius: radius, density: 4).map { offset in
-                let distanceSquared = Double(offset.x * offset.x + offset.y * offset.y)
-                return (x: offset.x, y: offset.y, weight: exp(-2 * distanceSquared / Double(radius * radius)))
-            }
+            let offsets = surfaceOffsets(radius: radius)
+            return MetalRasterEffects.blur(.surface, pixels: bytes, width: width, height: height,
+                                            parameters: [SIMD4(Float(offsets.count), Float(threshold), 0, 0)] + offsets.map {
+                SIMD4(Float($0.x), Float($0.y), Float($0.weight), 0)
+            }, isCancelled: cancelled)
+        }, render: { bytes, width, height, values, cancelled in
+            let radius = Int(values[0]), threshold = values[1] / 255
+            guard radius > 0, threshold > 0 else { return bytes }
+            let offsets = surfaceOffsets(radius: radius)
             return renderBlur(bytes, width: width, height: height, cancelled: cancelled) { raster, x, y in
                 let center = raster.at(x, y)
                 var sum = Pixel.zero, totalWeight = 0.0
@@ -69,7 +79,13 @@ extension RasterFilter {
         }),
         Self("Median Blur", category: "Blurs", [
             .init("Radius", 0...100, 2), .init("Percentile", 0...100, 50), .init("Quality", 1...5, 3)
-        ], render: { bytes, width, height, values, cancelled in
+        ], preview: { bytes, width, height, values, cancelled in
+            let radius = Int(values[0])
+            guard radius > 0 else { return bytes }
+            let offsets = neighborhood(radius: radius, density: Int(values[2]) + 1)
+            return acceleratedQuantile(bytes, width: width, height: height, offsetSets: [offsets],
+                                       percentile: values[1], cancelled: cancelled)
+        }, render: { bytes, width, height, values, cancelled in
             let radius = Int(values[0])
             guard radius > 0 else { return bytes }
             let offsets = neighborhood(radius: radius, density: Int(values[2]) + 1)
@@ -78,7 +94,14 @@ extension RasterFilter {
         }),
         Self("Sketch Blur", category: "Blurs", [
             .init("Radius", 0...100, 8), .init("Percentile", 0...100, 50), .init("Smoothness", 1...8, 3)
-        ], render: { bytes, width, height, values, cancelled in
+        ], preview: { bytes, width, height, values, cancelled in
+            let radius = Int(values[0])
+            guard radius > 0 else { return bytes }
+            let count = 9 + Int(values[2]) * 6
+            let sets = (0..<8).map { sketchOffsets(radius: radius, count: count, phase: $0) }
+            return acceleratedQuantile(bytes, width: width, height: height, offsetSets: sets,
+                                       percentile: values[1], cancelled: cancelled)
+        }, render: { bytes, width, height, values, cancelled in
             let radius = Int(values[0])
             guard radius > 0 else { return bytes }
             // Vary the sampling pattern by image region so flat areas stay stable while edges look irregular.
@@ -88,6 +111,42 @@ extension RasterFilter {
                                   percentile: values[1], cancelled: cancelled)
         })
     ]
+
+    private static func fragmentOffsets(_ values: [Double]) -> [(x: Int, y: Int)] {
+        let phase = values[2] * .pi / 180, distance = values[1], count = Int(values[0])
+        return (0..<count).map { fragment in
+            let angle = phase + Double(fragment) * 2 * .pi / Double(count)
+            return (Int((distance * cos(angle)).rounded()), Int((distance * sin(angle)).rounded()))
+        }
+    }
+
+    private static func radialRotations(_ values: [Double]) -> [(sine: Double, cosine: Double)] {
+        let steps = 2 * Int(values[3]) * Int(values[3]) + 1
+        let spread = values[0] * .pi / 180
+        return (0..<steps).map { step in
+            let angle = spread * (Double(step) / Double(steps - 1) - 0.5)
+            return (sin(angle), cos(angle))
+        }
+    }
+
+    private static func surfaceOffsets(radius: Int) -> [(x: Int, y: Int, weight: Double)] {
+        neighborhood(radius: radius, density: 4).map { offset in
+            let distanceSquared = Double(offset.x * offset.x + offset.y * offset.y)
+            return (offset.x, offset.y, exp(-2 * distanceSquared / Double(radius * radius)))
+        }
+    }
+
+    private static func acceleratedQuantile(_ bytes: Data, width: Int, height: Int,
+                                            offsetSets: [[(x: Int, y: Int)]], percentile: Double,
+                                            cancelled: () -> Bool) -> Data? {
+        let count = offsetSets[0].count
+        guard count <= 113 else { return nil }
+        let rank = (percentile / 100 * Double(count - 1)).rounded()
+        let offsets = offsetSets.flatMap { $0.map { SIMD4(Float($0.x), Float($0.y), 0, 0) } }
+        return MetalRasterEffects.blur(.quantile, pixels: bytes, width: width, height: height,
+                                       parameters: [SIMD4(Float(count), Float(rank), Float(offsetSets.count), 0)] + offsets,
+                                       isCancelled: cancelled)
+    }
 
     private struct BlurRaster {
         let bytes: UnsafeRawBufferPointer

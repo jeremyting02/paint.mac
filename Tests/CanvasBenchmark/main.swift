@@ -79,6 +79,74 @@ if CommandLine.arguments.contains("--initial") {
     exit(0)
 }
 
+#if METAL_CANVAS_BENCHMARK
+if CommandLine.arguments.contains("--metal-canvas") {
+    setbuf(stdout, nil)
+    guard let name = MetalMovePreview.deviceName else { fatalError("Metal preview is unavailable") }
+    print("Metal device: \(name)")
+    let width = 4096, height = 2048
+    let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+    let viewport = CGRect(x: 0, y: 0, width: 852, height: 426)
+    let bitmap = LayerStack.makeBitmap(width: Int(viewport.width), height: Int(viewport.height))!
+    for count in [1, 4] {
+        let document = makeDocument(width: width, height: height, layerCount: count, patterned: true)
+        let stack = document.stack!
+        let transform = SelectedPixelsTransform(layer: stack.activeLayer, selection: bounds.insetBy(dx: 32, dy: 32))!
+        let move = MetalMovePreview(stack: stack, pixels: transform)!
+        for viewportSized in [false, true] {
+            let samples = (0..<16).map { step in
+                let shift = CGAffineTransform(translationX: CGFloat(-4 * step - 2), y: CGFloat(5 * step + 1))
+                return time {
+                    let image = viewportSized ? move.renderViewport(in: bounds, size: viewport.size, by: shift)
+                        : move.render(in: bounds, by: shift, copy: false, sampling: .bicubic)?.image
+                    precondition(image != nil)
+                    bitmap.draw(image!, in: viewport)
+                }
+            }
+            stats("Fit move / \(count) layers / \(viewportSized ? "viewport Metal" : "full-resolution Metal")", Array(samples.dropFirst()))
+        }
+        if count == 1 { continue }
+        let composed = MetalMovePreview(stack: stack)!
+        for reused in [false, true] {
+            let samples = (0..<12).map { step in
+                time {
+                    let source = reused ? MetalMovePreview(reusing: composed, stack: stack, pixels: transform)
+                        : MetalMovePreview(stack: stack, pixels: transform)
+                    let image = source?.renderViewport(in: bounds, size: viewport.size,
+                                                       by: CGAffineTransform(translationX: -8, y: CGFloat(step + 1)))
+                    precondition(image != nil)
+                    bitmap.draw(image!, in: viewport)
+                }
+            }
+            stats("Fit first move / \(reused ? "reused layers" : "fresh upload")", Array(samples.dropFirst()))
+        }
+        for metal in [false, true] {
+            let samples = (0..<12).map { _ in
+                time {
+                    let image = metal ? MetalMovePreview(stack: stack)?.renderViewport(in: bounds, size: viewport.size)
+                        : stack.blendComposite()?.image
+                    precondition(image != nil)
+                    bitmap.draw(image!, in: viewport)
+                }
+            }
+            stats("Fit first composite / \(count) layers / \(metal ? "Metal" : "CPU")", Array(samples.dropFirst()))
+        }
+        let thumbnail = CGRect(x: 0, y: 0, width: 96, height: 48)
+        for metal in [false, true] {
+            let samples = (0..<12).map { _ in
+                time {
+                    let image = metal ? composed.renderViewport(in: bounds, size: thumbnail.size)! : stack.blendComposite()!.image
+                    bitmap.draw(image, in: thumbnail)
+                }
+            }
+            stats("Thumbnail without a cached composite / \(metal ? "resident Metal stack" : "CPU composite")",
+                  Array(samples.dropFirst()))
+        }
+    }
+    exit(0)
+}
+#endif
+
 #if METAL_MOVE_BENCHMARK
 let translatesSelection = CommandLine.arguments.contains("--move-selection")
 if translatesSelection || CommandLine.arguments.contains("--move-rotation") {

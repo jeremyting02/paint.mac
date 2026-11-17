@@ -57,6 +57,27 @@ struct LinearEffectTransfer {
         return UInt8(clamping: Int((encoded * 255).rounded(.toNearestOrEven)))
     }
 
+    var metalTables: [SIMD4<Float>] {
+        let thresholds: [SIMD3<Double>]
+        switch encoding {
+        case .sRGB:
+            thresholds = (0..<255).map { byte in
+                let value = (Double(byte) + 0.5) / 255
+                let linear = value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+                return SIMD3(repeating: linear)
+            }
+        case let .profile(curve):
+            thresholds = curve.tables.thresholds.map { SIMD3(Double($0.x), Double($0.y), Double($0.z)) }
+        case .identity:
+            thresholds = (0..<255).map { SIMD3(repeating: (Double($0) + 0.5) / 255) }
+        }
+        let exponent = 1 / inverseExponent
+        return decoded.map { SIMD4(Float($0.x), Float($0.y), Float($0.z), 0) } + thresholds.map {
+            SIMD4(Float(pow(max(0, $0.x), exponent)), Float(pow(max(0, $0.y), exponent)),
+                  Float(pow(max(0, $0.z), exponent)), 0)
+        }
+    }
+
     private static let identity = (0...255).map { SIMD3<Double>(repeating: Double($0) / 255) }
     private static let linearSRGB = identity.map { channels in
         let value = channels.x

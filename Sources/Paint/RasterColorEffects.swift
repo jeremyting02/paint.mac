@@ -20,7 +20,7 @@ extension RasterFilter {
     ]
 }
 
-private enum PaletteQuantizer {
+enum PaletteQuantizer {
     private struct Sample {
         var weight = 0
         var sum = SIMD3<Int64>.zero
@@ -78,19 +78,28 @@ private enum PaletteQuantizer {
     }
 
     static func apply(_ source: Data, width: Int, height: Int, count: Int, dither: Double,
-                      isCancelled: () -> Bool) -> Data? {
+                      useMetal: Bool = true, isCancelled: () -> Bool) -> Data? {
+        guard !isCancelled() else { return nil }
+        let metal = useMetal && width * height >= 65_536 ? MetalPaletteQuantizer(source: source, width: width, height: height) : nil
         // Use a bounded histogram with alpha weights so near-transparent samples do not dominate.
-        var histogram = [Sample](repeating: Sample(), count: 32 * 32 * 32)
-        let complete = source.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
-            for offset in stride(from: 0, to: bytes.count, by: 4) where bytes[offset + 3] > 0 {
-                if offset & 0xffff == 0, isCancelled() { return false }
-                let blue = Int(bytes[offset]), green = Int(bytes[offset + 1]), red = Int(bytes[offset + 2])
-                histogram[key(blue, green, red)].add(SIMD3(Int64(blue), Int64(green), Int64(red)),
+        let histogram: [Sample]
+        if let totals = metal?.histogram(isCancelled: isCancelled) {
+            histogram = totals.map { Sample(weight: Int($0.w), sum: SIMD3(Int64($0.x), Int64($0.y), Int64($0.z))) }
+        } else {
+            guard !isCancelled() else { return nil }
+            var bins = [Sample](repeating: Sample(), count: 32 * 32 * 32)
+            let complete = source.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                for offset in stride(from: 0, to: bytes.count, by: 4) where bytes[offset + 3] > 0 {
+                    if offset & 0xffff == 0, isCancelled() { return false }
+                    let blue = Int(bytes[offset]), green = Int(bytes[offset + 1]), red = Int(bytes[offset + 2])
+                    bins[key(blue, green, red)].add(SIMD3(Int64(blue), Int64(green), Int64(red)),
                                                     weight: Int(bytes[offset + 3]))
+                }
+                return true
             }
-            return true
+            guard complete else { return nil }
+            histogram = bins
         }
-        guard complete else { return nil }
         let samples = histogram.filter { $0.weight > 0 }
         guard !samples.isEmpty else { return source }
         var buckets = [Bucket(samples)]
@@ -103,8 +112,20 @@ private enum PaletteQuantizer {
             buckets.append(right)
         }
         let palette = buckets.map { $0.centroid.rounded(.toNearestOrAwayFromZero) }
-        var colorLookUp = [Int](repeating: -1, count: histogram.count)
         let matrix = [-8, 0, -6, 2, 4, -4, 6, -2, -5, 3, -7, 1, 7, -1, 5, -3]
+        if let metal {
+            let lookup = dither == 0 ? histogram.map { bin in
+                UInt32(bin.weight == 0 ? 0 : nearest(to: bin.color, in: palette))
+            } : nil
+            let phases = matrix.flatMap { phase in
+                let bias = Double(phase) * 4 * dither
+                return (0...255).map { UInt8(clamp(Int(Double($0) + bias)) >> 3) }
+            }
+            let packed = palette.map { SIMD4(UInt8($0.x), UInt8($0.y), UInt8($0.z), 0) }
+            if let output = metal.map(palette: packed, lookup: lookup, phases: phases, isCancelled: isCancelled) { return output }
+            if isCancelled() { return nil }
+        }
+        var colorLookUp = [Int](repeating: -1, count: histogram.count)
         var output = source
         let wroteAll = output.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
             for y in 0..<height {

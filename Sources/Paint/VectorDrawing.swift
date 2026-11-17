@@ -211,7 +211,8 @@ enum VectorDrawing {
             .rotated(by: angle).translatedBy(x: -rect.midX, y: -rect.midY)
     }
 
-    func applying(to layer: PaintLayer, selection: SelectionOutline?, style: DrawingStyle) -> PaintLayer? {
+    func applying(to layer: PaintLayer, selection: SelectionOutline?, style: DrawingStyle,
+                  allowsMetal: Bool = true) -> PaintLayer? {
         let width = layer.image.width, height = layer.image.height
         guard let original = layer.straightPixels,
               let overlay = BGRA8.render(width: width, height: height, colorSpace: layer.workingColorSpace, draw: { context in
@@ -221,6 +222,11 @@ enum VectorDrawing {
                   }
                   draw(in: context, style: style)
               }) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        if allowsMetal, let result = MetalRasterTools.composite(overlay, on: original, width: width, rect: rect,
+                                                                 mode: style.blendMode) {
+            return result == original ? nil : layer.withPixels(result)
+        }
         var result = original
         style.blendMode.composite(overlay, onto: &result, opacity: 255)
         return result == original ? nil : layer.withPixels(result)
