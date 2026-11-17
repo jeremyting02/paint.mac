@@ -11,6 +11,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let brush = EditorView.icon("paintbrush", label: "Paintbrush")
     private let eraser = EditorView.icon("eraser", label: "Eraser")
     private let rectangleSelect = EditorView.icon("rectangle.dashed", label: "Rectangle Select")
+    private let ellipseSelect = EditorView.icon("circle.dashed", label: "Ellipse Select")
     private let moveSelectedPixels = EditorView.icon("arrow.up.and.down.and.arrow.left.and.right", label: "Move Selected Pixels")
     private let moveSelection = EditorView.icon("rectangle.dashed.and.paperclip", label: "Move Selection")
     private let applyCrop = EditorView.icon("crop", label: "Crop to Selection")
@@ -35,7 +36,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         layersView = LayersView(document: document)
         super.init(frame: NSRect(x: 0, y: 0, width: 880, height: 640))
 
-        for button in [brush, eraser, rectangleSelect, moveSelectedPixels, moveSelection] {
+        for button in [brush, eraser, rectangleSelect, ellipseSelect, moveSelectedPixels, moveSelection] {
             button.setButtonType(.pushOnPushOff)
             button.target = self
             button.action = #selector(selectTool(_:))
@@ -108,7 +109,9 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
 
         let toolbar = NSStackView(views: [undo, redo, NSTextField(labelWithString: "Size"), size, applyCrop, finishMove])
         toolbar.spacing = 8
-        for button in [brush, eraser, rectangleSelect, moveSelectedPixels, moveSelection] { toolButtons.addArrangedSubview(button) }
+        for button in [brush, eraser, rectangleSelect, ellipseSelect, moveSelectedPixels, moveSelection] {
+            toolButtons.addArrangedSubview(button)
+        }
         toolButtons.distribution = .fillEqually
         toolButtons.spacing = 1
         let swatches = NSStackView(views: swatchColors.enumerated().map { index, swatch in
@@ -268,6 +271,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     @objc private func selectTool(_ sender: NSButton) {
         let tools: [(NSButton, CanvasView.Tool)] = [
             (brush, .brush), (eraser, .eraser), (rectangleSelect, .rectangleSelect),
+            (ellipseSelect, .ellipseSelect),
             (moveSelectedPixels, .moveSelectedPixels), (moveSelection, .moveSelection)
         ]
         for (button, tool) in tools {

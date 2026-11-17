@@ -2,8 +2,9 @@ import AppKit
 
 final class CanvasView: NSView {
     enum Tool {
-        case brush, eraser, rectangleSelect, moveSelectedPixels, moveSelection
+        case brush, eraser, rectangleSelect, ellipseSelect, moveSelectedPixels, moveSelection
 
+        var drawsSelection: Bool { self == .rectangleSelect || self == .ellipseSelect }
         var transformsSelection: Bool { self == .moveSelectedPixels || self == .moveSelection }
     }
 
@@ -121,7 +122,12 @@ final class CanvasView: NSView {
 
     private weak var document: PaintDocument?
     var tool = Tool.brush {
-        willSet { if newValue != tool { finishMove() } }
+        willSet {
+            if newValue != tool {
+                cancelSelectionDrag()
+                finishMove()
+            }
+        }
         didSet {
             needsDisplay = true
             window?.invalidateCursorRects(for: self)
@@ -145,7 +151,7 @@ final class CanvasView: NSView {
 
     private(set) var selectionOutline: SelectionOutline?
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
-    private var selectionDrag: (anchor: CGPoint, before: SelectionOutline?)?
+    private var selectionDrag: (anchor: CGPoint, end: CGPoint, before: SelectionOutline?)?
 
     private var stroke: (bitmap: CGContext, lastPoint: CGPoint, actionName: String, imageSelection: CGRect?)?
     private(set) var move: MoveSession?
@@ -401,6 +407,25 @@ final class CanvasView: NSView {
         guard let drag = selectionDrag else { return }
         selectionDrag = nil
         setSelection(drag.before)
+    }
+
+    private func updateSelectionDrag(in image: CGImage, modifiers: NSEvent.ModifierFlags) {
+        guard let (anchor, end, _) = selectionDrag else { return }
+        let rect = CGRect(x: min(anchor.x, end.x), y: min(anchor.y, end.y),
+                          width: abs(anchor.x - end.x), height: abs(anchor.y - end.y))
+        guard tool == .ellipseSelect else {
+            setSelection(SelectionOutline(rect: rect))
+            return
+        }
+        var bounds = rect
+        if modifiers.contains(.shift) {
+            // The drag endpoints define the diameter, in any direction.
+            let diameter = hypot(rect.width, rect.height)
+            bounds = CGRect(x: rect.midX - diameter / 2, y: rect.midY - diameter / 2,
+                            width: diameter, height: diameter)
+        }
+        let outline = SelectionOutline(path: CGPath(ellipseIn: bounds, transform: nil))
+        setSelection(outline?.clipped(to: canvasBounds(for: image)))
     }
 
     func setSelection(_ outline: SelectionOutline?) {
@@ -741,6 +766,9 @@ final class CanvasView: NSView {
 
     override func flagsChanged(with event: NSEvent) {
         if let point = moveDrag?.lastPoint { updateMoveDrag(at: point, modifiers: event.modifierFlags) }
+        if tool == .ellipseSelect, selectionDrag != nil, let image = document?.image {
+            updateSelectionDrag(in: image, modifiers: event.modifierFlags)
+        }
         super.flagsChanged(with: event)
     }
 
@@ -752,13 +780,14 @@ final class CanvasView: NSView {
         }
         let location = convert(event.locationInWindow, from: nil)
         guard imageRect.contains(location), let image = document?.image else {
-            if tool == .rectangleSelect { document?.deselect(nil) }
+            if tool.drawsSelection { document?.deselect(nil) }
             return
         }
 
         window?.makeFirstResponder(self)
-        if tool == .rectangleSelect {
-            selectionDrag = (pixelEdge(at: location, in: image), selectionOutline)
+        if tool.drawsSelection {
+            let anchor = pixelEdge(at: location, in: image)
+            selectionDrag = (anchor, anchor, selectionOutline)
             setSelection(nil)
             return
         }
@@ -791,11 +820,9 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard !imageRect.isEmpty else { return }
         let location = convert(event.locationInWindow, from: nil)
-        if let start = selectionDrag?.anchor, let image = document?.image {
-            let end = pixelEdge(at: location, in: image)
-            let rect = CGRect(x: min(start.x, end.x), y: min(start.y, end.y),
-                              width: abs(start.x - end.x), height: abs(start.y - end.y))
-            setSelection(SelectionOutline(rect: rect))
+        if selectionDrag != nil, let image = document?.image {
+            selectionDrag?.end = pixelEdge(at: location, in: image)
+            updateSelectionDrag(in: image, modifiers: event.modifierFlags)
             return
         }
         if moveDrag != nil {
@@ -821,7 +848,8 @@ final class CanvasView: NSView {
         if selectionDrag != nil {
             let outline = selectionOutline
             cancelSelectionDrag()
-            document?.commitSelection(outline, actionName: outline == nil ? "Deselect" : "Rectangle Select")
+            let toolName = tool == .ellipseSelect ? "Ellipse Select" : "Rectangle Select"
+            document?.commitSelection(outline, actionName: outline == nil ? "Deselect" : toolName)
             return
         }
         guard let current = stroke else { return }

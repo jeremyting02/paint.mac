@@ -18,7 +18,9 @@ Choose **Paintbrush** or **Eraser** in the floating **Tools** window. Pick a
 paint color in **Colors** and use **Size** above the canvas to set the diameter
 in image pixels. Drag on the canvas to paint or erase.
 
-Choose **Rectangle Select** and drag to select an area. The selection stays
+Choose **Rectangle Select** or **Ellipse Select** and drag to select an area.
+Hold **Shift** with Ellipse Select to draw a circle, using the start and end of
+the drag as opposite points on its edge. The selection stays
 active when you switch tools and limits paintbrush and eraser strokes to that
 area. Press **Escape** to deselect. The status bar shows the selection size and
 its top-left pixel. To crop, choose **Image → Crop to Selection**
@@ -59,8 +61,8 @@ pixel. Hold **Command** and scroll
 to zoom toward or away from the pointer. Hold the middle mouse button and drag
 to pan the canvas with any tool active. Scrolling without Command moves the view.
 
-Use **Command-Z** and **Command-Y** to undo or redo an edit. **Rectangle Select**
-and **Deselect** also appear in **History**.
+Use **Command-Z** and **Command-Y** to undo or redo an edit. **Rectangle Select**,
+**Ellipse Select**, and **Deselect** also appear in **History**.
 Each document keeps its undo history until you close it. Scroll the floating
 **History** window and select an entry to jump to it. In **Layers**, use **+** to insert a transparent
 layer above the selected row, click a row to edit it, and use its checkbox to

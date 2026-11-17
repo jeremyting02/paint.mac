@@ -59,9 +59,11 @@ struct SelectionOutline: Equatable {
     }
 
     func clipboardText(imageHeight: Int) -> String? {
+        // The clipboard format stores polygons. Keep curve approximations within a fraction of a pixel.
+        let polygonPath = path.flattened(threshold: 0.05)
         var polygons: [String] = []
         var vertices: [String] = []
-        path.applyWithBlock { element in
+        polygonPath.applyWithBlock { element in
             switch element.pointee.type {
             case .moveToPoint, .addLineToPoint:
                 let point = element.pointee.points[0]
