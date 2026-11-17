@@ -210,6 +210,7 @@ final class CanvasView: NSView {
             }
         }
         didSet {
+            updateBrushCursor()
             needsDisplay = true
             window?.invalidateCursorRects(for: self)
             selectionDidChange?()
@@ -235,6 +236,7 @@ final class CanvasView: NSView {
     static let brushSizeRange: ClosedRange<CGFloat> = 0.1...4096
     var brushSize: CGFloat = 12 {
         didSet {
+            updateBrushCursor()
             updateDrawingPreview()
             brushSizeDidChange?()
         }
@@ -300,6 +302,16 @@ final class CanvasView: NSView {
     private(set) var move: MoveSession?
     private var moveDrag: MoveDrag?
     private var cursorTracking: NSTrackingArea?
+    private var brushCursor: CGRect? {
+        didSet {
+            guard brushCursor != oldValue else { return }
+            for ring in [oldValue, brushCursor].compactMap({ $0 }) {
+                // Include the outline and antialiasing in the dirty region.
+                let dirtyRect = ring.insetBy(dx: -2, dy: -2).intersection(visibleRect)
+                if !dirtyRect.isEmpty { setNeedsDisplay(dirtyRect) }
+            }
+        }
+    }
     private var panDrag: (location: CGPoint, button: Int)?
     private var holdingSpace = false
     private var zoomScrollDistance: CGFloat = 0
@@ -363,6 +375,7 @@ final class CanvasView: NSView {
             window?.invalidateCursorRects(for: self)
         }
         displayedZoomPercent = zoomPercent ?? scale * backingScale * 100
+        updateBrushCursor()
         zoomDidChange?()
         needsDisplay = true
     }
@@ -375,15 +388,36 @@ final class CanvasView: NSView {
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if let window {
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: window)
+        }
+        if let clip = enclosingScrollView?.contentView {
+            NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: clip)
         }
         if let newWindow {
             NotificationCenter.default.addObserver(self, selector: #selector(windowDidResignKey),
                                                    name: NSWindow.didResignKeyNotification, object: newWindow)
+            NotificationCenter.default.addObserver(self, selector: #selector(refreshBrushCursor(_:)),
+                                                   name: NSWindow.didBecomeKeyNotification, object: newWindow)
         }
+        brushCursor = nil
         panDrag = nil
         holdingSpace = false
         cancelEditingGesture()
         super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil, let clip = enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(self, selector: #selector(refreshBrushCursor(_:)),
+                                                   name: NSView.boundsDidChangeNotification, object: clip)
+        }
+        updateBrushCursor()
+    }
+
+    @objc private func refreshBrushCursor(_ notification: Notification) {
+        updateBrushCursor()
     }
 
     @objc private func windowDidResignKey(_ notification: Notification) {
@@ -394,6 +428,7 @@ final class CanvasView: NSView {
         drawingDrag = nil
         rasterDrawing = nil
         cloneCursor = nil
+        brushCursor = nil
         composite = nil
         needsDisplay = true
         panDrag = nil
@@ -434,7 +469,13 @@ final class CanvasView: NSView {
         else { super.cursorUpdate(with: event) }
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        updateBrushCursor(at: event.locationInWindow)
+        super.mouseEntered(with: event)
+    }
+
     override func mouseMoved(with event: NSEvent) {
+        updateBrushCursor(at: event.locationInWindow)
         let location = convert(event.locationInWindow, from: nil)
         if imageRect.contains(location), let height = document?.image?.height {
             let point = imagePoint(location)
@@ -443,14 +484,31 @@ final class CanvasView: NSView {
             pointerDidMove?(nil)
         }
         if updatePanCursor() { return }
-        if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
-        else if tool.usesFlood { updateFloodCursor(at: convert(event.locationInWindow, from: nil)) }
+        if tool.transformsSelection { updateMoveCursor(at: location) }
+        else if tool.usesFlood { updateFloodCursor(at: location) }
         else { super.mouseMoved(with: event) }
     }
 
     override func mouseExited(with event: NSEvent) {
+        brushCursor = nil
         pointerDidMove?(nil)
         super.mouseExited(with: event)
+    }
+
+    private func updateBrushCursor(at locationInWindow: CGPoint? = nil) {
+        guard tool.usesBrushTip, !holdingSpace, panDrag == nil,
+              let window, window.isKeyWindow, let image = document?.image else {
+            brushCursor = nil
+            return
+        }
+        let center = convert(locationInWindow ?? window.mouseLocationOutsideOfEventStream, from: nil)
+        guard visibleRect.contains(center), imageRect.contains(center) else {
+            brushCursor = nil
+            return
+        }
+        let diameter = brushSize * imageRect.width / CGFloat(image.width)
+        brushCursor = CGRect(x: center.x - diameter / 2, y: center.y - diameter / 2,
+                             width: diameter, height: diameter)
     }
 
     private func updateFloodCursor(at location: CGPoint) {
@@ -547,6 +605,7 @@ final class CanvasView: NSView {
               floodDrag == nil, gradientDrag == nil, drawingDrag == nil, rasterDrawing == nil else { return }
         if event.buttonNumber != 2 { window?.makeFirstResponder(self) }
         panDrag = (event.locationInWindow, event.buttonNumber)
+        brushCursor = nil
         NSCursor.closedHand.set()
         window?.invalidateCursorRects(for: self)
     }
@@ -574,6 +633,7 @@ final class CanvasView: NSView {
         guard panDrag?.button == event.buttonNumber else { return }
         dragPan(with: event)
         panDrag = nil
+        updateBrushCursor(at: event.locationInWindow)
         defer { window?.invalidateCursorRects(for: self) }
         if updatePanCursor() { return }
         let location = convert(event.locationInWindow, from: nil)
@@ -893,6 +953,7 @@ final class CanvasView: NSView {
            event.modifierFlags.intersection([.command, .option]).isEmpty {
             if !holdingSpace {
                 holdingSpace = true
+                brushCursor = nil
                 window?.invalidateCursorRects(for: self)
                 _ = updatePanCursor()
             }
@@ -955,6 +1016,7 @@ final class CanvasView: NSView {
     override func keyUp(with event: NSEvent) {
         if event.charactersIgnoringModifiers == " ", holdingSpace {
             holdingSpace = false
+            updateBrushCursor()
             window?.invalidateCursorRects(for: self)
         } else {
             super.keyUp(with: event)
@@ -963,6 +1025,7 @@ final class CanvasView: NSView {
 
     override func resignFirstResponder() -> Bool {
         holdingSpace = false
+        updateBrushCursor()
         window?.invalidateCursorRects(for: self)
         return super.resignFirstResponder()
     }
@@ -1455,6 +1518,16 @@ final class CanvasView: NSView {
                 let pivot = self.marquee(for: CGRect(origin: geometry.pivot, size: .zero), imageWidth: image.width).origin
                 drawTransformHandles(around: marquee, angle: geometry.angle, pivot: pivot, in: context)
             }
+            if let brushCursor {
+                context.saveGState()
+                context.setStrokeColor(gray: 1, alpha: 1)
+                context.setLineWidth(3)
+                context.strokeEllipse(in: brushCursor)
+                context.setStrokeColor(gray: 0, alpha: 1)
+                context.setLineWidth(1)
+                context.strokeEllipse(in: brushCursor)
+                context.restoreGState()
+            }
         }
         guard !visible.isEmpty else { return }
 
@@ -1622,6 +1695,7 @@ private extension CanvasView {
               let stack = document?.stack, layerPreview == nil else { return }
         let location = convert(event.locationInWindow, from: nil)
         window?.makeFirstResponder(self)
+        updateBrushCursor(at: event.locationInWindow)
         if tool == .zoom {
             stepZoom(secondary ? -1 : 1, at: event.locationInWindow)
             return
@@ -1739,6 +1813,7 @@ private extension CanvasView {
     }
 
     func updateToolGesture(with event: NSEvent) -> Bool {
+        updateBrushCursor(at: event.locationInWindow)
         guard !imageRect.isEmpty else { return false }
         let point = imagePoint(convert(event.locationInWindow, from: nil))
         if let rasterDrawing {
