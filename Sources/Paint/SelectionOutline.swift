@@ -1,6 +1,14 @@
 import CoreGraphics
 import Foundation
 
+struct MoveGeometry: Equatable {
+    var rect: CGRect
+    var pivot: CGPoint
+    var angle: CGFloat = 0
+    var flipX = false
+    var flipY = false
+}
+
 struct SelectionOutline: Equatable {
     enum Mode: String, CaseIterable {
         case replace = "Replace"
@@ -26,10 +34,12 @@ struct SelectionOutline: Equatable {
     }
 
     let path: CGPath
+    let handleGeometry: MoveGeometry?
 
-    init?(path: CGPath) {
+    init?(path: CGPath, handleGeometry: MoveGeometry? = nil) {
         guard !path.isEmpty, !path.boundingBoxOfPath.isEmpty else { return nil }
         self.path = path
+        self.handleGeometry = handleGeometry
     }
 
     init?(rect: CGRect) {
@@ -45,7 +55,7 @@ struct SelectionOutline: Equatable {
 
     func transformed(by transform: CGAffineTransform) -> Self? {
         var transform = transform
-        return path.copy(using: &transform).flatMap(Self.init(path:))
+        return path.copy(using: &transform).flatMap { Self(path: $0) }
     }
 
     func clipped(to rect: CGRect) -> Self? {

@@ -54,7 +54,7 @@ to nudge ten.
 
 The preview stays editable between drags. Each completed transform appears in
 **History**. Press **Return** or **Escape** to commit the transform and deselect.
-Click **Finish** to commit the transform and keep the selection. Undoing
+Click **Finish** to commit the transform and keep the outline and handles in place. Undoing
 **Finish Selection** restores the editable preview. Pixels and selection edges
 past the canvas are clipped on commit.
 

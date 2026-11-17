@@ -129,20 +129,19 @@ struct SelectedPixelsTransform {
         isPaste = true
     }
 
-    static func rotatedBounds(of rect: CGRect, by angle: CGFloat) -> CGRect {
-        if angle == 0 { return rect.integral }
-        let width = abs(cos(angle)) * rect.width + abs(sin(angle)) * rect.height
-        let height = abs(sin(angle)) * rect.width + abs(cos(angle)) * rect.height
-        let bounds = CGRect(x: rect.midX - width / 2, y: rect.midY - height / 2, width: width, height: height)
-        // Avoid expanding exact pixel edges due to trigonometric rounding at right angles.
-        return bounds.insetBy(dx: 1e-9, dy: 1e-9).integral
-    }
-
-    func transformed(to destination: CGRect, rotation: CGFloat = 0, flipX: Bool = false, flipY: Bool = false,
-                     copy: Bool = false) -> PaintLayer? {
-        if !isPaste && destination == selection && rotation == 0 && !flipX && !flipY { return layer }
+    func transformed(by transform: CGAffineTransform, copy: Bool = false) -> PaintLayer? {
+        if !isPaste && transform.isIdentity { return layer }
         let width = layer.image.width
-        let target = Self.rotatedBounds(of: destination, by: rotation).intersection(bounds)
+        let height = CGFloat(layer.image.height)
+        let sourceRect = CGRect(x: selection.minX, y: height - selection.maxY,
+                                width: selection.width, height: selection.height)
+        let transformedRect = sourceRect.applying(transform)
+        let destination = CGRect(x: transformedRect.minX, y: height - transformedRect.maxY,
+                                 width: transformedRect.width, height: transformedRect.height)
+        let translationOnly = transform.a == 1 && transform.b == 0 && transform.c == 0 && transform.d == 1
+        // Avoid expanding exact pixel edges due to trigonometric rounding.
+        let renderBounds = translationOnly ? destination : destination.insetBy(dx: 1e-9, dy: 1e-9)
+        let target = renderBounds.integral.intersection(bounds)
         var pixels = copy ? source : cleared
         if !target.isEmpty {
             let rowBytes = Int(target.width) * 4
@@ -150,7 +149,7 @@ struct SelectedPixelsTransform {
             let foreground: Data
             let foregroundStart: Int
             let foregroundStride: Int
-            if rotation == 0 && !flipX && !flipY && destination == destination.integral && destination.size == selection.size {
+            if translationOnly && destination == destination.integral {
                 let x = Int(target.minX - destination.minX), y = Int(target.minY - destination.minY)
                 if let croppedSource, let pixels = croppedSource.pdnPixels {
                     foreground = pixels
@@ -162,8 +161,7 @@ struct SelectedPixelsTransform {
                     foregroundStart = (Int(selection.minY) + y) * foregroundStride + (Int(selection.minX) + x) * 4
                 }
             } else {
-                guard let rendered = renderPixels(destination: destination, visible: target, rotation: rotation,
-                                                  flipX: flipX, flipY: flipY) else { return nil }
+                guard let rendered = renderPixels(from: sourceRect, visible: target, transform: transform) else { return nil }
                 foreground = rendered
                 foregroundStart = 0
                 foregroundStride = rowBytes
@@ -185,16 +183,14 @@ struct SelectedPixelsTransform {
         return layer.withPixels(pixels)
     }
 
-    private func renderPixels(destination: CGRect, visible: CGRect, rotation: CGFloat, flipX: Bool, flipY: Bool) -> Data? {
+    private func renderPixels(from sourceRect: CGRect, visible: CGRect, transform: CGAffineTransform) -> Data? {
         guard let image = croppedSource?.image ?? layer.image.cropping(to: selection) else { return nil }
         // Rasterize only the on-canvas portion. The drawing context has a bottom-left origin.
         return BGRA8.render(width: Int(visible.width), height: Int(visible.height)) { bitmap in
             bitmap.interpolationQuality = .low
-            bitmap.translateBy(x: destination.midX - visible.minX, y: visible.maxY - destination.midY)
-            bitmap.rotate(by: rotation)
-            bitmap.scaleBy(x: flipX ? -1 : 1, y: flipY ? -1 : 1)
-            bitmap.draw(image, in: CGRect(x: -destination.width / 2, y: -destination.height / 2,
-                                          width: destination.width, height: destination.height))
+            bitmap.translateBy(x: -visible.minX, y: visible.maxY - CGFloat(layer.image.height))
+            bitmap.concatenate(transform)
+            bitmap.draw(image, in: sourceRect)
         }
     }
 }
