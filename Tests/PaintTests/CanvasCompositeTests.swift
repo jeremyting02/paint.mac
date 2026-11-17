@@ -3,6 +3,29 @@ import Testing
 @testable import Paint
 
 struct CanvasCompositeTests {
+    @Test func parallelCompositeMatchesTheRegionalBlendAcrossBlockBoundaries() {
+        let width = 2049, height = 257
+        let count = width * height
+        let modes: [LayerBlendMode] = [.normal, .multiply, .xor, .screen]
+        let sources: [CompositeSource] = modes.enumerated().map { index, mode in
+            var pixels = Data(count: count * 4)
+            pixels.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
+                for pixel in 0..<count {
+                    let offset = pixel * 4
+                    target[offset] = UInt8(truncatingIfNeeded: pixel + index * 31)
+                    target[offset + 1] = UInt8(truncatingIfNeeded: pixel / 2 + index)
+                    target[offset + 2] = UInt8(truncatingIfNeeded: pixel / 9 + index * 53)
+                    target[offset + 3] = pixel.isMultiple(of: 7) ? 0 : UInt8(truncatingIfNeeded: pixel + index)
+                }
+            }
+            return CompositeSource(pixels: pixels, stride: width, offset: 0,
+                                   mode: mode, opacity: UInt8(255 - index * 33))
+        }
+        let expected = RegionComposite.pixels(width: width, height: height, sources: sources)
+        let actual = RegionComposite.fullPixels(count: count, sources: sources)
+        #expect(actual == expected)
+    }
+
     @Test func brushReusesTheCompositeUntilDirtyAndKeepsCommittedPixels() throws {
         var stack = try makeStack()
         let compositor = try #require(CanvasComposite(stack: stack))
@@ -27,6 +50,33 @@ struct CanvasCompositeTests {
         compositor.invalidate(changed)
         let regenerated = try #require(compositor.render(stack: stack))
         #expect(BGRA8.pixels(from: regenerated) == flat)
+    }
+
+    @Test func viewportCompositeFillsNewTilesAndCanSwitchToFitDuringAStroke() throws {
+        var stack = try makeStack()
+        let compositor = try #require(CanvasComposite(stack: stack))
+        let width = stack.activeLayer.image.width
+        let flattened = try #require(stack.blendComposite()?.pixels)
+        for region in [CGRect(x: 20, y: 110, width: 35, height: 20),
+                       CGRect(x: 270, y: 138, width: 15, height: 13)] {
+            let view = try #require(compositor.render(stack: stack, region: region))
+            let bytes = try #require(BGRA8.pixels(from: view))
+            #expect(PixelRegion.read(bytes, width: width, region: region) ==
+                    PixelRegion.read(flattened, width: width, region: region))
+            #expect(compositor.renderedImage == nil)
+        }
+
+        let drawing = try #require(RasterDrawing(layer: stack.activeLayer, operation: .pencil(DrawingColor(.red)),
+                                                 diameter: 1, selection: nil))
+        drawing.append(CGPoint(x: 26, y: 31))
+        let changed = drawing.takeDirtyBounds()
+        compositor.invalidate(changed)
+        let preview = try #require(compositor.render(stack: stack, region: changed, activePixels: drawing.pixels(in:)))
+        let fit = try #require(compositor.render(stack: stack, activePixels: drawing.pixels(in:)))
+        stack.layers[stack.active] = try #require(drawing.preview)
+        #expect(BGRA8.pixels(from: fit) == stack.blendComposite()?.pixels)
+        #expect(compositor.renderedImage === fit)
+        #expect(preview !== fit)
     }
 
     @MainActor @Test(arguments: [100.0, 73.0, 14.0], [false, true])

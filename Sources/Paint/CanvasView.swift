@@ -1642,7 +1642,7 @@ final class CanvasView: NSView {
         if let floating, stack.activeLayer.opacity > 0 {
             drawMovePreview(floating, stack: stack, visible: visible, in: context)
         } else {
-            drawStack(stack, brush: brush, in: context)
+            drawStack(stack, visible: visible, brush: brush, in: context)
         }
         context.restoreGState()
         if showsPixelGrid { drawWorkspaceGrid(in: context) }
@@ -1669,13 +1669,18 @@ final class CanvasView: NSView {
         }
     }
 
-    private func drawStack(_ stack: LayerStack, brush: RasterDrawing? = nil, in context: CGContext) {
+    private func drawStack(_ stack: LayerStack, visible: CGRect, brush: RasterDrawing? = nil, in context: CGContext) {
         guard stack.needsBlendComposite || brush != nil else {
             stack.draw(in: context, rect: imageRect)
             return
         }
         if composite == nil { composite = CanvasComposite(stack: stack) }
-        if let image = composite?.render(stack: stack, activePixels: brush.map { $0.pixels(in:) }) {
+        // At actual pixels and higher zooms the draw uses nearest sampling. At lower zooms
+        // provide the full composite so Core Graphics can sample across the entire image.
+        let region = displayedZoomPercent >= 100
+            ? imageRegion(for: visible, width: stack.activeLayer.image.width).insetBy(dx: -1, dy: -1)
+            : nil
+        if let image = composite?.render(stack: stack, region: region, activePixels: brush.map { $0.pixels(in:) }) {
             context.draw(image, in: imageRect)
         } else {
             var fallback = stack
@@ -1727,7 +1732,7 @@ final class CanvasView: NSView {
         let tiles = moveTilePreview.tiles(in: dirtyImage, by: session.transform, copy: session.copy,
                                          sampling: session.sampling)
         if tiles.isEmpty {
-            drawStack(stack, in: context)
+            drawStack(stack, visible: visible, in: context)
             return
         }
         let cores = tiles.map { tileClip($0.core, in: context, image: image) }
@@ -1736,7 +1741,7 @@ final class CanvasView: NSView {
         context.addRect(imageRect.insetBy(dx: -2, dy: -2))
         context.addRects(cores)
         context.clip(using: .evenOdd)
-        drawStack(stack, in: context)
+        drawStack(stack, visible: visible, in: context)
         context.restoreGState()
         for (tile, core) in zip(tiles, cores) {
             drawTile(tile.image, padded: tile.padded, clip: core, in: context, image: image)

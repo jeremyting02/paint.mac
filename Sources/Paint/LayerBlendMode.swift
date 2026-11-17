@@ -95,9 +95,11 @@ enum LayerBlendMode: Int, CaseIterable {
         let layerAlpha = Float(opacity) / 255
         for index in target.indices {
             let offset = (firstPixel + index) * 4
-            let alpha = Float(source[offset + 3]) / 255 * layerAlpha
+            let bytes = source.loadUnaligned(fromByteOffset: offset, as: SIMD4<UInt8>.self)
+            var color = SIMD4<Float>(bytes) / 255
+            let alpha = color.w * layerAlpha
             if alpha == 0 { continue }
-            let color = SIMD4(Float(source[offset]), Float(source[offset + 1]), Float(source[offset + 2]), 255) / 255
+            color.w = 1
             let backdrop = target[index]
             let foreground = color * alpha
             if self == .normal || backdrop.w == 0 {

@@ -267,6 +267,8 @@ Run `swift test` with a Swift toolchain that includes Swift Testing. Run
 Run `sh Tests/canvas-benchmark.sh` for optimized, synthetic brush and undo
 benchmarks. Pass a Git ref to measure it alongside the current checkout,
 for example `sh Tests/canvas-benchmark.sh b5d7445`.
+Use `sh Tests/canvas-benchmark.sh --initial e3439f8` to compare repeated
+first draws of the same 4,096 × 2,048 eight-layer document.
 The [5.2 parity checklist](docs/PARITY_5_2.md) records coverage and differences.
 The [reference fixture instructions](Tests/reference-pixels/README.md) show
 how to generate and compare Paint.NET PNGs using the installed Wine build.

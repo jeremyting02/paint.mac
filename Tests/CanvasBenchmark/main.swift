@@ -29,6 +29,47 @@ func physicalFootprint() -> Double? {
     return status == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : nil
 }
 
+func makeDocument(width: Int, height: Int, layerCount: Int) -> PaintDocument {
+    let document = PaintDocument.newImage(width: width, height: height, resolution: resolution)!
+    var stack = document.stack!
+    stack.layers = (0..<layerCount).map { index in
+        let bytes = Data(repeating: UInt8(120 + index), count: width * height * 4)
+        return PaintLayer(name: "Layer", image: BGRA8.image(from: bytes, width: width, height: height)!,
+                          pdnPixels: bytes)
+    }
+    stack.active = layerCount - 1
+    document.applyEdit(replacingStack: stack, actionName: "Setup")
+    return document
+}
+
+if CommandLine.arguments.contains("--initial") {
+    let document = makeDocument(width: 4096, height: 2048, layerCount: 8)
+    let zooms: [CGFloat?] = [100, nil]
+    var samples = [[Double](), [Double]()]
+    for trial in 0..<11 {
+        for index in zooms.indices {
+            autoreleasepool {
+                let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: 900, height: 600))
+                let canvas = CanvasView(document: document)
+                scroll.documentView = canvas
+                canvas.setZoom(zooms[index])
+                let viewport = canvas.visibleRect
+                let output = LayerStack.makeBitmap(width: 900, height: 600)!
+                output.translateBy(x: -viewport.minX, y: -viewport.minY)
+                NSGraphicsContext.current = NSGraphicsContext(cgContext: output, flipped: false)
+                defer { NSGraphicsContext.current = nil }
+                let duration = time { canvas.draw(viewport) }
+                if trial > 0 { samples[index].append(duration) }
+            }
+        }
+    }
+    for index in zooms.indices {
+        let zoom = zooms[index] == nil ? "fit" : "100%"
+        stats("4096x2048 / 8 layers / \(zoom) / initial draw", samples[index])
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--history") {
     let document = PaintDocument.newImage(width: 2048, height: 2048, resolution: resolution)!
     document.undoManager = UndoManager()
@@ -66,16 +107,7 @@ if CommandLine.arguments.contains("--history") {
 }
 
 for (width, height, count) in [(2048, 1024, 4), (4096, 2048, 2), (4096, 2048, 8)] {
-    let document = PaintDocument.newImage(width: width, height: height, resolution: resolution)!
-    var stack = document.stack!
-    let layers = (0..<count).map { index in
-        let bytes = Data(repeating: UInt8(120 + index), count: width * height * 4)
-        return PaintLayer(name: "Layer", image: BGRA8.image(from: bytes, width: width, height: height)!,
-                          pdnPixels: bytes)
-    }
-    stack.layers = layers
-    stack.active = count - 1
-    document.applyEdit(replacingStack: stack, actionName: "Setup")
+    let document = makeDocument(width: width, height: height, layerCount: count)
     let retainedStack = document.stack!
     stats("\(width)x\(height) / \(count) layers / full composite",
           (0..<7).map { _ in time { precondition(retainedStack.blendComposite() != nil) } })

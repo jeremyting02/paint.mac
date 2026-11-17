@@ -238,33 +238,13 @@ struct LayerStack {
     func blendComposite() -> (image: CGImage, pixels: Data)? {
         let image = activeLayer.image
         let pixelCount = image.width * image.height
-        var sources: [(pixels: Data, mode: LayerBlendMode, opacity: UInt8)] = []
+        var sources: [CompositeSource] = []
         for layer in layers where layer.isVisible && layer.opacity > 0 {
             guard let bytes = layer.straightPixels, bytes.count == pixelCount * 4 else { return nil }
-            sources.append((bytes, layer.blendMode, layer.opacity))
+            sources.append(CompositeSource(pixels: bytes, stride: image.width, offset: 0,
+                                           mode: layer.blendMode, opacity: layer.opacity))
         }
-        // Transparent results retain the bottom visible layer's RGB, including at zero alpha.
-        var pixels = sources.first?.pixels ?? Data(count: pixelCount * 4)
-        if !sources.isEmpty {
-            // Reuse a bounded working buffer even when the document fills the canvas limit.
-            let blockSize = min(pixelCount, 4096)
-            var block = [SIMD4<Float>](repeating: .zero, count: blockSize)
-            pixels.withUnsafeMutableBytes { output in
-                block.withUnsafeMutableBufferPointer { buffer in
-                    for first in stride(from: 0, to: pixelCount, by: blockSize) {
-                        let count = min(blockSize, pixelCount - first)
-                        let target = UnsafeMutableBufferPointer(start: buffer.baseAddress, count: count)
-                        for index in target.indices { target[index] = .zero }
-                        for source in sources {
-                            source.pixels.withUnsafeBytes {
-                                source.mode.composite($0, startingAt: first, onto: target, opacity: source.opacity)
-                            }
-                        }
-                        LayerBlendMode.storeComposite(UnsafeBufferPointer(target), in: output, startingAt: first)
-                    }
-                }
-            }
-        }
+        let pixels = RegionComposite.fullPixels(count: pixelCount, sources: sources)
         guard let flat = BGRA8.image(from: pixels, width: image.width, height: image.height, colorSpace: workingColorSpace)
         else { return nil }
         return (flat, pixels)
