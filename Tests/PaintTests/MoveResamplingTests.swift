@@ -150,7 +150,7 @@ struct MoveResamplingTests {
         }
     }
 
-    @MainActor @Test func moveCommitsFinalPointerAndKeepsEditableHistoryWithoutDrawing() throws {
+    @MainActor @Test func moveTruncatesDragAndCommitsFinalPointerWithoutDrawing() throws {
         _ = NSApplication.shared
         let source = try makeLayer(width: 96, height: 80, points: [
             (25, 35, [23, 71, 191, 166]), (30, 41, [193, 67, 13, 221])
@@ -176,10 +176,19 @@ struct MoveResamplingTests {
                                                  timestamp: 0, windowNumber: window.windowNumber, context: nil,
                                                  eventNumber: 0, clickCount: 1, pressure: 1))
         }
+        let originalHistory = document.historyEntries
         canvas.mouseDown(with: try event(.leftMouseDown, dx: 0, dy: 0))
-        canvas.mouseDragged(with: try event(.leftMouseDragged, dx: 4, dy: 2))
-        canvas.mouseUp(with: try event(.leftMouseUp, dx: 9.25, dy: -3.5))
-        let transform = CGAffineTransform(translationX: 9.25, y: -3.5)
+        canvas.mouseDragged(with: try event(.leftMouseDragged, dx: 0.75, dy: -0.75))
+        #expect(canvas.move?.hasPixelPreview == false)
+        canvas.mouseUp(with: try event(.leftMouseUp, dx: 0.75, dy: -0.75))
+        #expect(canvas.move == nil)
+        #expect(document.historyEntries == originalHistory)
+
+        canvas.mouseDown(with: try event(.leftMouseDown, dx: 0, dy: 0))
+        canvas.mouseDragged(with: try event(.leftMouseDragged, dx: 4.75, dy: -2.75))
+        #expect(canvas.move?.transform == CGAffineTransform(translationX: 4, y: -2))
+        canvas.mouseUp(with: try event(.leftMouseUp, dx: 9.75, dy: -3.75))
+        let transform = CGAffineTransform(translationX: 9, y: -3)
         let pixels = try #require(SelectedPixelsTransform(layer: source,
                                                            selection: CGRect(x: 16, y: 24, width: 40, height: 24)))
         let expected = try #require(pixels.transformed(by: transform)?.straightPixels)

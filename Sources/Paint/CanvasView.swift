@@ -1158,7 +1158,8 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         case .move:
-            let offset = tool == .moveSelectedPixels ? delta : CGPoint(x: delta.x.rounded(), y: delta.y.rounded())
+            let rounding: FloatingPointRoundingRule = tool == .moveSelectedPixels ? .towardZero : .toNearestOrAwayFromZero
+            let offset = CGPoint(x: delta.x.rounded(rounding), y: delta.y.rounded(rounding))
             geometry = translated(geometry, by: offset)
             actionName = "Move Selected Pixels"
         case .resize(let handle):
