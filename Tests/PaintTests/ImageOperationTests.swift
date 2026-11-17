@@ -107,7 +107,7 @@ import Testing
         }
     }
 
-    @Test func testDocumentImageCommandsUndoAndRedoAsSingleEdits() throws {
+    @Test func testDocumentImageCommandsUndoAndRedoAsSingleEdits() async throws {
         let layer = try makeLayer([1, 2, 3, 4, 5, 6], width: 3)
         let document = PaintDocument()
         try document.read(from: PDNFile.write(LayerStack(layers: [layer], active: 0)), ofType: "Paint.NET Project")
@@ -116,6 +116,7 @@ import Testing
         #expect(document.historyEntries == ["Open Image", "Rotate 90° Clockwise"])
         #expect(try document.stack.map { try markers($0.activeLayer) } == [4, 1, 5, 2, 6, 3])
         document.performResize(width: 3, height: 4, canvasOnly: true, anchor: .topLeft)
+        try await waitForDocumentJob(document)
         #expect(document.image?.width == 3)
         document.undoStroke(nil)
         #expect(document.image?.width == 2)

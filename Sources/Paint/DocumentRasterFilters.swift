@@ -4,7 +4,7 @@ extension PaintDocument {
     private static var lastEffect: (filter: RasterFilter, values: [Double])?
 
     var canFilterActiveLayer: Bool {
-        stack?.activeLayer.isVisible == true && windowForSheet?.attachedSheet == nil
+        !hasBackgroundJob && stack?.activeLayer.isVisible == true && windowForSheet?.attachedSheet == nil
     }
 
     @objc func applyAdjustment(_ sender: NSMenuItem) {
@@ -23,9 +23,25 @@ extension PaintDocument {
     }
 
     @objc func repeatEffect(_ sender: Any?) {
-        guard canFilterActiveLayer, let last = Self.lastEffect,
-              let input = filterInput() else { return }
-        applyFilter(last.filter, input: input, values: last.values)
+        guard canFilterActiveLayer, let last = Self.lastEffect else { return }
+        editor?.canvas.finishSelection()
+        guard let stack, stack.activeLayer.isVisible else { return }
+        let layer = stack.activeLayer
+        let layerIndex = stack.active
+        let selection = editor?.canvas.selectionOutline
+        let revision = stackRevision
+        runDocumentJob(title: "Applying \(last.filter.title)…") {
+            guard let input = RasterFilter.Input(layer: layer, selection: selection, layerIndex: layerIndex),
+                  let output = input.render(last.filter, values: last.values) else {
+                throw CocoaError(.fileReadUnknown, userInfo: [
+                    NSLocalizedDescriptionKey: "Could not apply \(last.filter.title)."
+                ])
+            }
+            return (input: input, layer: output)
+        } commit: { document, result in
+            guard document.canCommitDocumentJob(revision: revision, selection: selection) else { return }
+            document.commitFilter(last.filter, input: result.input, layer: result.layer, values: last.values)
+        }
     }
 
     func filterInput() -> RasterFilter.Input? {

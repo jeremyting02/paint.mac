@@ -55,7 +55,7 @@ extension PaintDocument {
     }
 
     private func showImageSizeOptions(canvasOnly: Bool) {
-        guard let image, let window = windowForSheet, window.attachedSheet == nil else { return }
+        guard !hasBackgroundJob, let image, let window = windowForSheet, window.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.messageText = canvasOnly ? "Canvas Size" : "Resize"
         alert.addButton(withTitle: "OK")
@@ -79,33 +79,43 @@ extension PaintDocument {
     func performResize(width: Int, height: Int, canvasOnly: Bool = false, anchor: CanvasAnchor = .center,
                        fill: UInt32 = 0, sampling: ImageResampler.Mode = .bicubic, linearLight: Bool = false,
                        resolution: ImageResolution? = nil) {
-        guard let image else { return }
+        guard !hasBackgroundJob, let image else { return }
         let sizeChanged = image.width != width || image.height != height
         let newResolution = resolution.flatMap { $0 == (stack?.resolution ?? .standard) ? nil : $0 }
         guard sizeChanged || newResolution != nil else { return }
         editor?.canvas.finishSelection()
-        guard var next = stack else { return }
-        let previous = next
+        guard let previous = stack else { return }
         let outline = editor?.canvas.selectionOutline
-        do {
-            var transform = CGAffineTransform.identity
-            if sizeChanged && canvasOnly {
+        if !sizeChanged {
+            guard let newResolution else { return }
+            var next = previous
+            next.metadata = newResolution.updating(next.metadata)
+            applyEdit(replacingStack: next, actionName: "Set Resolution", selectionChange: (outline, outline))
+            return
+        }
+
+        let revision = stackRevision
+        let oldWidth = image.width, oldHeight = image.height
+        let action = canvasOnly ? "Canvas Size" : "Resize"
+        runDocumentJob(title: canvasOnly ? "Changing Canvas Size…" : "Resizing Image…") {
+            var next: LayerStack
+            let transform: CGAffineTransform
+            if canvasOnly {
                 next = try previous.resizedCanvas(width: width, height: height, anchor: anchor, fill: fill)
-                let delta = anchor.offset(widthDelta: width - image.width, heightDelta: height - image.height)
-                transform = CGAffineTransform(translationX: CGFloat(delta.x), y: CGFloat(height - image.height - delta.y))
-            } else if sizeChanged {
+                let delta = anchor.offset(widthDelta: width - oldWidth, heightDelta: height - oldHeight)
+                transform = CGAffineTransform(translationX: CGFloat(delta.x), y: CGFloat(height - oldHeight - delta.y))
+            } else {
                 next = try previous.resizedImage(width: width, height: height, sampling: sampling, linearLight: linearLight)
-                transform = CGAffineTransform(scaleX: CGFloat(width) / CGFloat(image.width),
-                                              y: CGFloat(height) / CGFloat(image.height))
+                transform = CGAffineTransform(scaleX: CGFloat(width) / CGFloat(oldWidth),
+                                              y: CGFloat(height) / CGFloat(oldHeight))
             }
             if let newResolution { next.metadata = newResolution.updating(next.metadata) }
             let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-            let transformed = sizeChanged ? outline?.transformed(by: transform)?.clipped(to: bounds) : outline
-            let action = sizeChanged ? (canvasOnly ? "Canvas Size" : "Resize") : "Set Resolution"
-            applyEdit(replacingStack: next, actionName: action,
-                      selectionChange: (outline, transformed))
-        } catch {
-            presentError(error)
+            return (stack: next, selection: outline?.transformed(by: transform)?.clipped(to: bounds))
+        } commit: { document, result in
+            guard document.canCommitDocumentJob(revision: revision, selection: outline) else { return }
+            document.applyEdit(replacingStack: result.stack, actionName: action,
+                               selectionChange: (outline, result.selection))
         }
     }
 }

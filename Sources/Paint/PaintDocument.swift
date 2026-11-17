@@ -15,7 +15,10 @@ final class PaintDocument: NSDocument {
     private static let projectType = "Paint.NET Project"
     private static let projectContentType = UTType(importedAs: "com.paintdotnet.pdn")
     private static let pixelClipboardTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .init(UTType.jpeg.identifier)]
-    private(set) var stack: LayerStack?
+    private(set) var stack: LayerStack? { didSet { stackRevision &+= 1 } }
+    private(set) var stackRevision = 0
+    private var activeJob: DocumentJob?
+    var hasBackgroundJob: Bool { activeJob != nil }
     var image: CGImage? { stack?.activeLayer.image }
     private(set) var editor: EditorView?
     private(set) var historyEntries = ["New Image"]
@@ -467,6 +470,7 @@ final class PaintDocument: NSDocument {
     @objc func exportImage(_ sender: Any?) { showExportPanel() }
 
     private func showExportPanel(fixedFormat: RasterFormat? = nil) {
+        guard !hasBackgroundJob else { return }
         editor?.canvas.finishSelection()
         guard let window = windowForSheet, window.attachedSheet == nil, let stack else { return }
         let panel = NSSavePanel()
@@ -476,13 +480,44 @@ final class PaintDocument: NSDocument {
         let options = ExportOptions(panel: panel, formats: fixedFormat.map { [$0] } ?? RasterFormat.writable)
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
-            do {
-                let data = try PaintFiles.rasterData(stack, as: options.format, quality: options.quality)
-                try data.write(to: url, options: .atomic)
-            } catch {
-                self?.presentError(error)
-            }
+            self?.export(stack, to: url, as: options.format, quality: options.quality)
         }
+    }
+
+    func export(_ snapshot: LayerStack, to url: URL, as format: RasterFormat, quality: Double) {
+        runDocumentJob(title: "Exporting…") {
+            let data = try PaintFiles.rasterData(snapshot, as: format, quality: quality)
+            try data.write(to: url, options: .atomic)
+        } commit: { _, _ in }
+    }
+
+    func runDocumentJob<Value>(title: String, work: @escaping () throws -> Value,
+                               commit: @escaping (PaintDocument, Value) -> Void) {
+        guard activeJob == nil else { return }
+        let job = DocumentJob(title: title, window: windowForSheet)
+        activeJob = job
+        job.run(work) { [weak self, weak job] result in
+            guard let self, let job, activeJob === job else { return }
+            job.dismiss()
+            activeJob = nil
+            switch result {
+            case .success(let value): commit(self, value)
+            case .failure(let error): presentError(error)
+            }
+            for request in job.closeRequests { request() }
+        }
+    }
+
+    func canCommitDocumentJob(revision: Int, selection: SelectionOutline?) -> Bool {
+        let canvas = editor?.canvas
+        guard stackRevision == revision, canvas?.selectionOutline == selection,
+              canvas?.hasLiveEditChange != true, canvas?.hasPendingPixelEdit != true else {
+            presentError(CocoaError(.fileReadUnknown, userInfo: [
+                NSLocalizedDescriptionKey: "The document changed while the operation was running."
+            ]))
+            return false
+        }
+        return true
     }
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
@@ -515,7 +550,7 @@ final class PaintDocument: NSDocument {
         case #selector(imageCommand(_:)), #selector(flipLayerHorizontal(_:)), #selector(flipLayerVertical(_:)),
              #selector(rotateLayer180(_:)),
              #selector(exportImage(_:)), #selector(exportPNG(_:)):
-            return stack != nil && windowForSheet?.attachedSheet == nil
+            return !hasBackgroundJob && stack != nil && windowForSheet?.attachedSheet == nil
         case #selector(pasteSelection(_:)):
             guard editor != nil, let text = NSPasteboard.general.string(forType: .string) else { return false }
             return clipboardOutline(from: text) != nil
@@ -586,6 +621,12 @@ final class PaintDocument: NSDocument {
 
     override func canClose(withDelegate delegate: Any, shouldClose shouldCloseSelector: Selector?,
                            contextInfo: UnsafeMutableRawPointer?) {
+        if let activeJob {
+            activeJob.closeRequests.append { [weak self] in
+                self?.canClose(withDelegate: delegate, shouldClose: shouldCloseSelector, contextInfo: contextInfo)
+            }
+            return
+        }
         editor?.canvas.finishSelection()
         super.canClose(withDelegate: delegate, shouldClose: shouldCloseSelector, contextInfo: contextInfo)
     }
@@ -649,6 +690,8 @@ final class PaintDocument: NSDocument {
     }
 
     override func close() {
+        activeJob?.dismiss()
+        activeJob = nil
         WorkspaceDocuments.shared.remove(self)
         super.close()
     }

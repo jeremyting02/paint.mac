@@ -24,6 +24,9 @@ encoders, including PNG and JPEG. Bitmap support includes TIFF, BMP, GIF, HEIC,
 AVIF, WebP, JPEG XL, DDS, and TGA where macOS provides a decoder. Multiframe
 GIF and TIFF files open as a single image. The checkerboard marks transparent areas.
 
+Resize, Canvas Size, Repeat Last Effect, and Export show progress while the
+work runs in the background. Editing resumes when the progress sheet closes.
+
 Use **Image → Resize** to resample every layer by pixel dimensions or by
 percentage. **Canvas Size** crops or expands the layers from the chosen anchor
 and can fill new space on the bottom layer. Both dialogs show the print size and
@@ -269,6 +272,8 @@ benchmarks. Pass a Git ref to measure it alongside the current checkout,
 for example `sh Tests/canvas-benchmark.sh b5d7445`.
 Use `sh Tests/canvas-benchmark.sh --initial e3439f8` to compare repeated
 first draws of the same 4,096 × 2,048 eight-layer document.
+Run `sh Tests/document-jobs-benchmark.sh dc4ea64` to compare main-run-loop
+responsiveness during resize, Repeat Effect, and PNG export on that document.
 Use `sh Tests/canvas-benchmark.sh --move` to measure Move Pixels gesture setup
 and drag redraws for translation and rotation at 100% and Fit to Window.
 The [5.2 parity checklist](docs/PARITY_5_2.md) records coverage and differences.
