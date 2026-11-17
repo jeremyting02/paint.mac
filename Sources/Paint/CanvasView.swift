@@ -27,8 +27,8 @@ final class CanvasView: NSView {
 
     private struct WandSelection {
         let source: PaintLayer
-        let x: Int
-        let y: Int
+        var x: Int
+        var y: Int
         let flood: MagicWand.Flood
         let mode: SelectionOutline.Mode
         let before: SelectionOutline?
@@ -148,6 +148,8 @@ final class CanvasView: NSView {
         }
         return NSCursor(image: image, hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2))
     }()
+    private static let wandHandleIcon = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right",
+                                                 accessibilityDescription: "Move Magic Wand click point")
 
     private weak var document: PaintDocument?
     var tool = Tool.brush {
@@ -182,6 +184,7 @@ final class CanvasView: NSView {
     var selectionMode: SelectionOutline.Mode = .replace
     var magicWand = MagicWand()
     private var wandSelection: WandSelection?
+    private var wandDrag: (anchor: CGPoint, x: Int, y: Int)?
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionDrag: SelectionDrag?
 
@@ -276,6 +279,7 @@ final class CanvasView: NSView {
     @objc private func windowDidResignKey(_ notification: Notification) {
         completeMoveDrag()
         cancelSelectionDrag()
+        wandDrag = nil
         guard panLocation != nil else { return }
         panLocation = nil
         window?.invalidateCursorRects(for: self)
@@ -307,12 +311,20 @@ final class CanvasView: NSView {
 
     override func cursorUpdate(with event: NSEvent) {
         if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
+        else if tool == .magicWand { updateWandCursor(at: convert(event.locationInWindow, from: nil)) }
         else { super.cursorUpdate(with: event) }
     }
 
     override func mouseMoved(with event: NSEvent) {
         if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
+        else if tool == .magicWand { updateWandCursor(at: convert(event.locationInWindow, from: nil)) }
         else { super.mouseMoved(with: event) }
+    }
+
+    private func updateWandCursor(at location: CGPoint) {
+        if wandDrag != nil || panLocation != nil { NSCursor.closedHand.set() }
+        else if wandHandle?.frame.contains(location) == true { NSCursor.openHand.set() }
+        else { (imageRect.contains(location) ? NSCursor.crosshair : .arrow).set() }
     }
 
     private func updateMoveCursor(at location: CGPoint) {
@@ -347,7 +359,7 @@ final class CanvasView: NSView {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, panLocation == nil,
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, wandDrag == nil, panLocation == nil,
               let scrollView = enclosingScrollView else { return }
 
         let steps: Int
@@ -384,7 +396,7 @@ final class CanvasView: NSView {
             super.otherMouseDown(with: event)
             return
         }
-        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil else { return }
+        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, wandDrag == nil else { return }
         panLocation = event.locationInWindow
         NSCursor.closedHand.set()
         window?.invalidateCursorRects(for: self)
@@ -415,6 +427,8 @@ final class CanvasView: NSView {
         let location = convert(event.locationInWindow, from: nil)
         if tool.transformsSelection && visibleRect.contains(location) {
             updateMoveCursor(at: location)
+        } else if tool == .magicWand && visibleRect.contains(location) {
+            updateWandCursor(at: location)
         } else if visibleRect.contains(location) && imageRect.contains(location) {
             NSCursor.crosshair.set()
         } else {
@@ -520,6 +534,7 @@ final class CanvasView: NSView {
     func cancelEditingGesture() {
         stroke = nil
         cancelSelectionDrag()
+        wandDrag = nil
         if let wandSelection {
             self.wandSelection = nil
             setSelection(wandSelection.before)
@@ -832,6 +847,12 @@ final class CanvasView: NSView {
             return
         }
         let location = convert(event.locationInWindow, from: nil)
+        if let edit = wandSelection, wandHandle?.frame.contains(location) == true {
+            window?.makeFirstResponder(self)
+            wandDrag = (imagePoint(location), edit.x, edit.y)
+            updateWandCursor(at: location)
+            return
+        }
         guard imageRect.contains(location), let image = document?.image else {
             if tool.drawsSelection { document?.deselect(nil) }
             return
@@ -888,6 +909,7 @@ final class CanvasView: NSView {
         wandSelection = WandSelection(source: source, x: x, y: y, flood: global ? .global : magicWand.flood,
                                       mode: selectionMode, before: selectionOutline)
         updateWandSelection()
+        needsDisplay = true
         selectionDidChange?()
     }
 
@@ -908,7 +930,9 @@ final class CanvasView: NSView {
     func finishWandSelection() {
         guard let edit = wandSelection else { return }
         let result = selectionOutline
+        wandDrag = nil
         wandSelection = nil
+        needsDisplay = true
         setSelection(edit.before)
         let name = edit.mode == .replace ? "Magic Wand" : "Magic Wand (\(edit.mode.rawValue))"
         document?.commitSelection(result, actionName: name)
@@ -918,6 +942,19 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard !imageRect.isEmpty else { return }
         let location = convert(event.locationInWindow, from: nil)
+        if let drag = wandDrag, var edit = wandSelection {
+            let delta = imagePoint(location) - drag.anchor
+            let x = min(max(0, drag.x + Int(delta.x.rounded())), edit.source.image.width - 1)
+            let y = min(max(0, drag.y - Int(delta.y.rounded())), edit.source.image.height - 1)
+            if edit.x != x || edit.y != y {
+                edit.x = x
+                edit.y = y
+                wandSelection = edit
+                updateWandSelection()
+                needsDisplay = true
+            }
+            return
+        }
         if var drag = selectionDrag, let image = document?.image {
             let point = imagePoint(location)
             let end = drag.lassoPath == nil ? pixelEdge(at: location, in: image)
@@ -950,6 +987,11 @@ final class CanvasView: NSView {
             return
         }
         mouseDragged(with: event)
+        if wandDrag != nil {
+            wandDrag = nil
+            updateWandCursor(at: convert(event.locationInWindow, from: nil))
+            return
+        }
         if let drag = selectionDrag, let name = tool.selectionName {
             let outline = selectionOutline
             cancelSelectionDrag()
@@ -980,6 +1022,7 @@ final class CanvasView: NSView {
         let geometry = moveGeometry(for: image)
         let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
+            if let handle = wandHandle { drawWandHandle(at: handle.seed, frame: handle.frame, in: context) }
             if showsHandles && !marquee.isEmpty {
                 let pivot = self.marquee(for: CGRect(origin: geometry.pivot, size: .zero), imageWidth: image.width).origin
                 drawTransformHandles(around: marquee, angle: geometry.angle, pivot: pivot, in: context)
@@ -1037,6 +1080,39 @@ final class CanvasView: NSView {
             context.strokePath()
             context.restoreGState()
         }
+    }
+
+    private var wandHandle: (seed: CGPoint, frame: CGRect)? {
+        guard tool == .magicWand, let edit = wandSelection, !imageRect.isEmpty else { return nil }
+        let pixel = CGPoint(x: CGFloat(edit.x) + 0.5, y: CGFloat(edit.source.image.height - edit.y) - 0.5)
+        let seed = marquee(for: CGRect(origin: pixel, size: .zero), imageWidth: edit.source.image.width).origin
+        let viewport = visibleRect
+        guard viewport.contains(seed) else { return nil }
+        let halfSize: CGFloat = 9
+        let offset: CGFloat = 22
+        let x = seed.x + (seed.x + offset + halfSize <= viewport.maxX ? offset : -offset)
+        let y = seed.y + (seed.y + offset + halfSize <= viewport.maxY ? offset : -offset)
+        return (seed, CGRect(x: x - halfSize, y: y - halfSize, width: 2 * halfSize, height: 2 * halfSize))
+    }
+
+    private func drawWandHandle(at seed: CGPoint, frame: CGRect, in context: CGContext) {
+        context.saveGState()
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setFillColor(NSColor.black.cgColor)
+        context.setLineWidth(1)
+        context.move(to: seed)
+        context.addLine(to: frame.center)
+        context.strokePath()
+        let dot = CGRect(x: seed.x - 2, y: seed.y - 2, width: 4, height: 4)
+        context.fill(dot)
+        context.setStrokeColor(NSColor.white.cgColor)
+        context.stroke(dot)
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(frame)
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.stroke(frame)
+        Self.wandHandleIcon?.draw(in: frame.insetBy(dx: 3, dy: 3))
+        context.restoreGState()
     }
 
     private func rotateDrawing(around marquee: CGRect, by angle: CGFloat, in context: CGContext) {

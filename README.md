@@ -24,10 +24,11 @@ the drag as opposite points on its edge. With **Lasso Select**, drag a freehand
 outline. The tool closes it with a straight line back to the start.
 
 Choose **Magic Wand** and click a pixel to select similar colors. Adjust
-**Tolerance** before or after clicking. Each adjustment uses the original click
-and the selection that existed before it. Click **Finish** to keep the updated
-selection as one undo step. Clicking another pixel or switching tools also
-finishes the current wand selection.
+**Tolerance** before or after clicking. Drag the four-arrow handle to move the
+sample point. The preview applies the current tolerance and the mode chosen
+when you clicked to the selection that existed before the click. Click
+**Finish** to keep the updated selection as one undo step. Clicking another
+pixel or switching tools also finishes the current wand selection.
 
 At 0% tolerance, only exact matches are selected, with fully transparent pixels
 treated as equal. Higher values allow more variation.
