@@ -58,12 +58,20 @@ enum RasterFormat: String, CaseIterable {
     }
 
     var isLossy: Bool { self == .jpeg || self == .heic || self == .avif || self == .webp || self == .jpegXL }
+
+    var preservesColorProfile: Bool {
+        switch self {
+        case .png, .jpeg, .tiff, .heic, .heif, .webp, .avif, .jpegXL: return true
+        case .bmp, .gif, .dds, .tga: return false
+        }
+    }
 }
 
 enum PaintFiles {
     struct Raster {
         let image: CGImage
         let resolution: ImageResolution?
+        let colorProfile: RGBColorProfile?
     }
 
     static func readClipboardImage(_ data: Data) -> CGImage? { try? readRaster(data) }
@@ -125,7 +133,19 @@ enum PaintFiles {
         } else {
             nil
         }
-        return Raster(image: image, resolution: (5...8).contains(orientation) ? resolution?.transposed : resolution)
+        let profile = RGBColorProfile.usefulProfile(for: image.colorSpace)
+        let raster: CGImage
+        if profile == nil, image.colorSpace?.name != CGColorSpace.sRGB {
+            // PDN stores RGB pixels. Normalize the appearance of sources without a usable RGB profile.
+            guard let pixels = BGRA8.pixels(from: image),
+                  let converted = BGRA8.image(from: pixels, width: image.width, height: image.height)
+            else { throw corrupt }
+            raster = converted
+        } else {
+            raster = image
+        }
+        return Raster(image: raster, resolution: (5...8).contains(orientation) ? resolution?.transposed : resolution,
+                      colorProfile: profile)
     }
 
     static func pngData(_ image: CGImage) throws -> Data { try rasterData(image, as: .png) }
@@ -149,7 +169,9 @@ enum PaintFiles {
         let output: CGImage
         if format == .jpeg || format == .bmp {
             // These output formats use an opaque matte for transparent pixels.
-            guard let bitmap = LayerStack.makeBitmap(width: image.width, height: image.height) else {
+            let outputSpace = format.preservesColorProfile && image.colorSpace?.model == .rgb
+                ? image.colorSpace ?? BGRA8.sRGB : BGRA8.sRGB
+            guard let bitmap = LayerStack.makeBitmap(width: image.width, height: image.height, colorSpace: outputSpace) else {
                 throw CocoaError(.fileWriteUnknown)
             }
             let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
@@ -158,6 +180,12 @@ enum PaintFiles {
             bitmap.draw(image, in: bounds)
             guard let flattened = bitmap.makeImage() else { throw CocoaError(.fileWriteUnknown) }
             output = flattened
+        } else if !format.preservesColorProfile, image.colorSpace?.model == .rgb,
+                  image.colorSpace?.name != CGColorSpace.sRGB {
+            guard let pixels = BGRA8.pixels(from: image),
+                  let converted = BGRA8.image(from: pixels, width: image.width, height: image.height)
+            else { throw failure }
+            output = converted
         } else {
             output = image
         }

@@ -33,10 +33,20 @@ selection is active, only pixels inside it change. These edits can be undone.
 
 Choose **Paintbrush** or **Eraser** in **Tools** and use **Size (px)** to enter
 a diameter, including decimal values. Press **[** or **]** to adjust by one
-pixel, or hold **Control** to adjust by five. Toggle **Antialias** for softer
-stroke edges. Paintbrush uses the primary color with the left button and the
-secondary color with the right button. Eraser uses the opacity of the
-corresponding color to determine how much to erase.
+pixel, or hold **Control** to adjust by five. Paintbrush, Eraser, Clone Stamp,
+and Recolor share **Hardness**, **Spacing**, **Smooth Path**, and **Antialias**
+controls. Lower the hardness for a softer edge, or raise the spacing to leave
+gaps between tips. Hardness has an effect when antialiasing is enabled.
+**Pen Pressure** appears when a tablet supplies pressure events and controls
+whether pressure changes the tip size. Use **Smooth Selection** or
+**Pixelated Selection** to control how a drawing stroke meets a selection.
+
+Paintbrush uses the primary color with the left button and the secondary
+color with the right button. A patterned fill uses both colors, anchored to
+the top-left of the canvas. Eraser uses the selected color's opacity and can
+erase through the same patterns. Paintbrush, Pencil, and Clone Stamp offer
+layer-style blend modes and **Overwrite**, which replaces pixels even when
+the chosen paint color is transparent.
 
 Use **Pencil** for single-pixel strokes. **Color Picker** samples the active
 layer or the visible image and can average a square around the pointer. Left
@@ -109,7 +119,8 @@ the selection size and its top-left pixel. To crop, choose **Image → Crop to S
 Choose **Move Pixels** in **Tools** or press **M**. The tool acts on the
 selection or, if there is none, the entire active layer. Drag where the pointer
 shows a hand to move. Drag just outside the outline or use a right-button drag
-to rotate. Drag the crosshair in the circle to reposition the rotation pivot.
+to rotate. The rotate cursor has a white outline for visibility on dark areas.
+Drag the crosshair in the circle to reposition the rotation pivot.
 Hold **Shift** while rotating to snap to 15° steps.
 
 Drag a corner or edge handle to resize. Hold **Shift** to preserve proportions,
@@ -185,12 +196,23 @@ visibility, opacity (0–255), and blend mode. The canvas previews the changes,
 and **OK** applies them as one undo step.
 
 Paint.NET 5.2 projects retain their layer names, order, visibility, opacity,
-blend modes, and pixel data. Reopened projects select the top layer. Projects
-that use embedded color profiles or an unsupported pixel layout show an error
-when opened.
+blend modes, pixels, and embedded RGB ICC profiles. Reopened projects select
+the top layer. Malformed profiles and unsupported pixel layouts produce an
+error.
+
+Use **Image → Color Profile** to assign or convert the whole document.
+**Assign** keeps RGB values and changes how they appear. **Convert** computes
+new RGB values to preserve appearance within the target gamut. Both actions
+can be undone. Choose a built-in or display profile, import an RGB ICC/ICM
+file, or export the current profile. Bitmap imports without a usable RGB
+profile are converted to the default sRGB working space. PNG, JPEG, and TIFF
+exports use the document profile.
 
 Use **Adjustments** for tonal and color edits and **Effects** for the built-in
 filters. They operate on the active visible layer and honor the selection.
+**Posterize** links the red, green, and blue levels by default and lets you set
+the alpha levels separately. **Pixelate** offers independent Scale Down and
+Scale Up settings.
 Configurable filters preview changes as you adjust their values. **Apply**
 adds a single history entry and **Cancel** discards the preview. **Effects →
 Repeat Last Effect** reuses the most recently applied effect settings.

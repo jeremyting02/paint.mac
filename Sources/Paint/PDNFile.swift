@@ -33,9 +33,8 @@ enum PDNFile {
         let items = try graph.array(list["ArrayList+_items"])
         guard items.count >= count else { throw PDNError.invalid }
         let documentMetadata = try metadata(document["userMetadataItems"], in: graph)
-        if documentMetadata.contains(where: { $0.key.hasPrefix("$exif.") && $0.value.hasPrefix("<exif id=\"34675\"") }) {
-            throw PDNError.unsupported("embedded color profile")
-        }
+        let profile = try RGBColorProfile.read(from: documentMetadata)
+        let colorSpace = profile?.colorSpace ?? BGRA8.sRGB
 
         var surfaces: [Int: Int] = [:]
         let layers = try items.prefix(count).map { item in
@@ -84,12 +83,13 @@ enum PDNFile {
         guard reader.remaining == 0 else { throw PDNError.invalid }
         let images = try layers.map { layer in
             guard let pixels = buffers[layer.block],
-                  let image = BGRA8.image(from: pixels, width: width, height: height) else { throw PDNError.invalid }
+                  let image = BGRA8.image(from: pixels, width: width, height: height, colorSpace: colorSpace)
+            else { throw PDNError.invalid }
             return PaintLayer(name: layer.name, image: image, isVisible: layer.visible,
                               isBackground: layer.background, opacity: layer.alpha, blendMode: layer.blendMode,
                               metadata: layer.metadata, pdnPixels: pixels)
         }
-        return LayerStack(layers: images, active: images.count - 1, metadata: documentMetadata)
+        return LayerStack(layers: images, active: images.count - 1, metadata: documentMetadata, colorProfile: profile)
     }
 
     private static func metadata(_ value: PDNRecords.Value?, in graph: PDNRecords) throws -> [PDNMetadata] {
@@ -152,7 +152,9 @@ enum PDNFile {
         let width = stack.activeLayer.image.width
         let height = stack.activeLayer.image.height
         guard stack.layers.count <= LayerStack.layerCapacity(width: width, height: height) else { throw PDNError.tooLarge }
-        var writer = PDNWriter(width: width, height: height, stack: stack)
+        var document = stack
+        if let profile = document.colorProfile { document.metadata = profile.embedding(in: document.metadata) }
+        var writer = PDNWriter(width: width, height: height, stack: document)
         guard writer.data.count <= graphLimit else { throw PDNError.unsupported("oversized project metadata") }
         for layer in stack.layers {
             guard let pixels = layer.straightPixels else { throw CocoaError(.fileWriteUnknown) }

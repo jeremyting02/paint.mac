@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 struct ImageResampler {
@@ -25,16 +26,27 @@ struct ImageResampler {
     private let vertical: [[Tap]]
     private let mode: Mode
     private let linearLight: Bool
+    private let profileTransfer: RasterTransferCurve?
 
-    init(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int, mode: Mode, linearLight: Bool) {
+    init(sourceWidth: Int, sourceHeight: Int, width: Int, height: Int, mode: Mode, linearLight: Bool,
+         samplingRatio: SIMD2<Float>? = nil, widenKernel: Bool = true, colorSpace: CGColorSpace? = nil) {
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
         self.width = width
         self.height = height
         self.mode = mode
-        self.linearLight = linearLight
-        horizontal = Self.taps(from: sourceWidth, to: width, mode: mode)
-        vertical = Self.taps(from: sourceHeight, to: height, mode: mode)
+        if linearLight, mode != .nearest, let colorSpace, colorSpace != BGRA8.sRGB {
+            profileTransfer = RasterTransferCurve(colorSpace: colorSpace)
+            // Some LUT-based ICC profiles have no linearized counterpart.
+            self.linearLight = profileTransfer != nil
+        } else {
+            profileTransfer = nil
+            self.linearLight = linearLight
+        }
+        horizontal = Self.taps(from: sourceWidth, to: width, mode: mode, ratio: samplingRatio?.x,
+                               widenKernel: widenKernel)
+        vertical = Self.taps(from: sourceHeight, to: height, mode: mode, ratio: samplingRatio?.y,
+                             widenKernel: widenKernel)
     }
 
     func resample(_ pixels: Data) -> Data {
@@ -63,7 +75,8 @@ struct ImageResampler {
                         var value = SIMD4<Float>.zero
                         for tap in horizontalFirst ? horizontal[x] : vertical[y] {
                             let index = horizontalFirst ? y * sourceWidth + tap.index : tap.index * sourceWidth + x
-                            value += Self.readPixel(source, offset: index * 4, colors: table) * tap.weight
+                            value += Self.readPixel(source, offset: index * 4, colors: table,
+                                                    transfer: profileTransfer) * tap.weight
                         }
                         middle[y * middleWidth + x] = value
                     }
@@ -81,7 +94,11 @@ struct ImageResampler {
                         guard alpha > 0 else { continue }
                         for channel in 0..<3 {
                             let unpremultiplied = min(1, max(0, value[channel] / value.w))
-                            target[offset + channel] = Self.byte(linearLight ? Self.encodeSRGB(unpremultiplied) : unpremultiplied)
+                            if let profileTransfer {
+                                target[offset + channel] = profileTransfer.encodedByte(for: unpremultiplied, channel: channel)
+                            } else {
+                                target[offset + channel] = Self.byte(linearLight ? Self.encodeSRGB(unpremultiplied) : unpremultiplied)
+                            }
                         }
                     }
                 }
@@ -90,8 +107,14 @@ struct ImageResampler {
         return result
     }
 
-    private static func readPixel(_ data: UnsafeRawBufferPointer, offset: Int, colors: [Float]) -> SIMD4<Float> {
+    private static func readPixel(_ data: UnsafeRawBufferPointer, offset: Int, colors: [Float],
+                                  transfer: RasterTransferCurve?) -> SIMD4<Float> {
         let alpha = Float(data[offset + 3]) / 255
+        if let transfer {
+            return SIMD4(transfer.linearValue(of: data[offset], channel: 0) * alpha,
+                         transfer.linearValue(of: data[offset + 1], channel: 1) * alpha,
+                         transfer.linearValue(of: data[offset + 2], channel: 2) * alpha, alpha)
+        }
         return SIMD4(colors[Int(data[offset])] * alpha, colors[Int(data[offset + 1])] * alpha,
                      colors[Int(data[offset + 2])] * alpha, alpha)
     }
@@ -107,9 +130,10 @@ struct ImageResampler {
         value <= 0.0031308 ? value * 12.92 : 1.055 * pow(value, 1 / 2.4) - 0.055
     }
 
-    private static func taps(from source: Int, to target: Int, mode: Mode) -> [[Tap]] {
-        if source == target { return (0..<source).map { [Tap(index: $0, weight: 1)] } }
-        let ratio = Float(source) / Float(target)
+    private static func taps(from source: Int, to target: Int, mode: Mode, ratio explicitRatio: Float?,
+                             widenKernel: Bool) -> [[Tap]] {
+        let ratio = explicitRatio ?? Float(source) / Float(target)
+        if source == target && ratio == 1 { return (0..<source).map { [Tap(index: $0, weight: 1)] } }
         let kernel: Mode = mode == .adaptiveSharp ? (ratio > 1 ? .lanczos : .bicubic) : mode
         return (0..<target).map { index in
             let edge = Float(index) * ratio
@@ -119,12 +143,13 @@ struct ImageResampler {
             }
             if kernel == .fant && ratio > 1 {
                 let end = Float(index + 1) * ratio
-                return (Int(edge)..<min(source, Int(ceil(end)))).map { pixel in
+                let last = explicitRatio == nil ? min(source, Int(ceil(end))) : Int(ceil(end))
+                return (Int(edge)..<last).map { pixel in
                     let overlap = min(end, Float(pixel + 1)) - max(edge, Float(pixel))
-                    return Tap(index: pixel, weight: overlap / ratio)
+                    return Tap(index: min(source - 1, pixel), weight: overlap / ratio)
                 }
             }
-            let scale = kernel == .bilinearLowQuality ? 1 : max(ratio, 1)
+            let scale = widenKernel && kernel != .bilinearLowQuality ? max(ratio, 1) : 1
             let radius: Float
             switch kernel {
             case .lanczos: radius = 3

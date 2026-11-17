@@ -13,16 +13,32 @@ struct PaintNETPixelReferenceTests {
     static let captureDirectory = ProcessInfo.processInfo.environment["PAINTNET_REFERENCE_DIR"]
         .map { URL(fileURLWithPath: $0, isDirectory: true) }
 
-    @Test(arguments: [
-        ("Black and White", "black-and-white"), ("Invert Colors", "invert-colors")
-    ])
-    func matchesPaintNET52Pixels(adjustment: String, output: String) throws {
-        let source = try Self.loadPNG(Self.fixtureDirectory.appendingPathComponent("input.png"))
-        let filter = try #require(RasterFilter.adjustments.first { $0.title == adjustment })
-        let input = try #require(RasterFilter.Input(layer: PaintLayer(name: "Input", image: source), selection: nil))
-        let rendered = try #require(input.render(filter, values: filter.controls.map(\.initial)))
+    struct Capture: Sendable {
+        let filter: String
+        let output: String
+        let values: [Double]?
 
-        let referenceURL = try #require(Self.referenceFile(output + ".png"))
+        init(_ filter: String, _ output: String, values: [Double]? = nil) {
+            self.filter = filter
+            self.output = output
+            self.values = values
+        }
+    }
+
+    @Test(arguments: [
+        Capture("Black and White", "black-and-white"),
+        Capture("Invert Colors", "invert-colors"),
+        Capture("Posterize", "posterize-4", values: [4, 4, 4, 4]),
+        Capture("Pixelate", "pixelate-4", values: [4, 2, 2]),
+        Capture("Square Blur", "square-blur-2", values: [2])
+    ])
+    func matchesPaintNET52Pixels(_ capture: Capture) throws {
+        let source = try Self.loadPNG(Self.fixtureDirectory.appendingPathComponent("input.png"))
+        let filter = try #require((RasterFilter.adjustments + RasterFilter.effects).first { $0.title == capture.filter })
+        let input = try #require(RasterFilter.Input(layer: PaintLayer(name: "Input", image: source), selection: nil))
+        let rendered = try #require(input.render(filter, values: capture.values ?? filter.controls.map(\.initial)))
+
+        let referenceURL = try #require(Self.referenceFile(capture.output + ".png"))
         let referenceSource = try #require(CGImageSourceCreateWithURL(referenceURL as CFURL, nil))
         let reference = try #require(CGImageSourceCreateImageAtIndex(referenceSource, 0, nil))
         try #require(rendered.image.width == reference.width && rendered.image.height == reference.height)

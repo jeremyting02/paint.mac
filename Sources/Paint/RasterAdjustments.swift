@@ -38,15 +38,7 @@ extension RasterFilter {
         point("Invert Alpha") { pixel, _ in Pixel(pixel.x, pixel.y, pixel.z, 1 - pixel.w) },
         point("Invert Colors") { pixel, _ in Pixel(1 - pixel.x, 1 - pixel.y, 1 - pixel.z, pixel.w) },
         LevelSettings().filter(),
-        point("Posterize", [.init("Red Levels", 2...64, 16), .init("Green Levels", 2...64, 16),
-                            .init("Blue Levels", 2...64, 16)]) { pixel, values in
-            var output = pixel
-            for channel in 0..<3 {
-                let steps = values[channel] - 1
-                output[channel] = (pixel[channel] * steps).rounded() / steps
-            }
-            return output
-        },
+        posterize,
         coreImage("Sepia", [.init("Intensity", 0...100, 100)]) { image, values in
             image.applyingFilter("CISepiaTone", parameters: [kCIInputIntensityKey: values[0] / 100])
         },
@@ -58,4 +50,29 @@ extension RasterFilter {
             ])
         }
     ]
+
+    private static let posterize = Self("Posterize", [
+        .init("Red Levels", 2...64, 16), .init("Green Levels", 2...64, 16), .init("Blue Levels", 2...64, 16),
+        .init("Alpha Levels", 2...256, 256)
+    ], editor: .posterize) { source, _, _, values, isCancelled in
+        let tables = [values[2], values[1], values[0], values[3]].map { levels in
+            let count = Int(levels)
+            return (0...255).map { byte in
+                // The encoded input is divided into equal-width buckets, including alpha.
+                let bucket = byte * count / 256
+                return UInt8((bucket * 255 + (count - 1) / 2) / (count - 1))
+            }
+        }
+        var result = source
+        let completed = result.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            for offset in stride(from: 0, to: bytes.count, by: 4) {
+                if offset & 0xffff == 0, isCancelled() { return false }
+                for channel in 0..<4 {
+                    bytes[offset + channel] = tables[channel][Int(bytes[offset + channel])]
+                }
+            }
+            return true
+        }
+        return completed ? result : nil
+    }
 }

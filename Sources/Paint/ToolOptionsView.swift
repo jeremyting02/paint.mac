@@ -7,6 +7,15 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     private let rectangleHeight = NSTextField()
     private let rectangleUnit = NSPopUpButton()
     private let brushAntialias = NSButton(checkboxWithTitle: "Antialias", target: nil, action: nil)
+    private let hardnessLabel = NSTextField(labelWithString: "Hardness %")
+    private let hardness = NSTextField()
+    private let spacingLabel = NSTextField(labelWithString: "Spacing %")
+    private let brushSpacing = NSTextField()
+    private let brushSmoothing = NSButton(checkboxWithTitle: "Smooth Path", target: nil, action: nil)
+    private let brushPressure = NSButton(checkboxWithTitle: "Pen Pressure", target: nil, action: nil)
+    private let brushPattern = NSPopUpButton()
+    private let brushBlend = NSPopUpButton()
+    private let brushClipping = NSPopUpButton()
     private let sampleSource = NSPopUpButton()
     private let sampleSize = NSPopUpButton()
     private let after = NSPopUpButton()
@@ -55,6 +64,11 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         configure(gradientRepeat, "Gradient Repetition", GradientOptions.Repeat.allCases.map(\.rawValue))
         configure(gradientMode, "Gradient Mode", ["Color", "Transparency"])
         configure(gradientBlend, "Gradient Blend Mode", LayerBlendMode.allCases.map(\.title))
+        configure(brushPattern, "Brush Fill", BrushOptions.Pattern.allCases.map(\.rawValue))
+        configure(brushBlend, "Brush Blend Mode", BrushOptions.Blend.choices.map(\.title))
+        configure(brushClipping, "Brush Selection Clipping", ["Smooth Selection", "Pixelated Selection"])
+        configureBrushPercent(hardness, label: "Brush hardness percent", range: 0...100)
+        configureBrushPercent(brushSpacing, label: "Brush spacing percent", range: 1...300)
         tolerance.target = self
         tolerance.action = #selector(change(_:))
         tolerance.isContinuous = true
@@ -71,12 +85,11 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         configure(fontSize, "Font Size", fontSizes.map { "\($0) px" })
         fontSize.selectItem(withTitle: "16 px")
         configure(textAlignment, "Text Alignment", TextAlignment.allCases.map(\.rawValue))
-        for button in [brushAntialias, smoothing, bold, italic] {
+        for button in [brushAntialias, brushSmoothing, brushPressure, smoothing, bold, italic] {
             button.target = self
             button.action = #selector(change(_:))
         }
         smoothing.state = .on
-        brushAntialias.state = canvas.brushAntialiased ? .on : .off
         text.delegate = self
         text.target = self
         text.action = #selector(finishText(_:))
@@ -84,7 +97,9 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         text.setAccessibilityLabel("Text to draw")
         text.widthAnchor.constraint(equalToConstant: 128).isActive = true
         font.widthAnchor.constraint(lessThanOrEqualToConstant: 140).isActive = true
-        for view in [rectangleSizing, rectangleWidth, rectangleHeight, rectangleUnit, brushAntialias,
+        for view in [rectangleSizing, rectangleWidth, rectangleHeight, rectangleUnit, brushPressure,
+                     hardnessLabel, hardness, spacingLabel, brushSpacing, brushSmoothing,
+                     brushPattern, brushAntialias, brushBlend, brushClipping,
                      sampleSource, sampleSize, after, gradientShape, gradientRepeat, gradientMode, gradientBlend,
                      toleranceLabel, tolerance, shape, fill, cornerRadius, curve, linePattern, vectorBlend,
                      smoothing, text, font, fontSize, textAlignment, bold, italic] as [NSView] {
@@ -102,8 +117,25 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     func update() {
         guard let canvas else { return }
         let tool = canvas.tool
-        let brushTool = tool == .brush || tool == .eraser
-        brushAntialias.isHidden = !brushTool
+        let tip = tool.usesBrushTip
+        let options = canvas.brushOptions
+        for control in [hardnessLabel, hardness, spacingLabel, brushSpacing, brushSmoothing, brushAntialias] as [NSView] {
+            control.isHidden = !tip
+        }
+        hardness.integerValue = options.hardness
+        hardness.isEnabled = options.antialiased
+        hardnessLabel.textColor = options.antialiased ? .labelColor : .disabledControlTextColor
+        brushSpacing.integerValue = options.spacing
+        brushPressure.isHidden = !tip || !canvas.hasSeenTablet
+        brushSmoothing.state = options.smoothed ? .on : .off
+        brushPressure.state = options.pressureSensitive ? .on : .off
+        brushAntialias.state = options.antialiased ? .on : .off
+        brushPattern.isHidden = tool != .brush && tool != .eraser
+        brushPattern.selectItem(withTitle: options.pattern.rawValue)
+        brushBlend.isHidden = tool != .brush && tool != .pencil && tool != .cloneStamp
+        brushBlend.selectItem(withTitle: options.blend.title)
+        brushClipping.isHidden = !tool.usesRasterDrawing
+        brushClipping.selectItem(at: options.antialiasedSelection ? 0 : 1)
         rectangleSizing.isHidden = tool != .rectangleSelect
         let rectangleDimensionsVisible = tool == .rectangleSelect && canvas.rectangleSelection.sizing != .anySize
         rectangleWidth.isHidden = !rectangleDimensionsVisible
@@ -127,7 +159,7 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         smoothing.isHidden = !tool.usesVectorDrawing
         for view in [text, font, fontSize, textAlignment, bold, italic] as [NSView] { view.isHidden = tool != .text }
         text.isEnabled = canvas.hasPendingDrawing
-        isHidden = !brushTool && tool != .colorPicker && tool != .recolor && tool != .gradient &&
+        isHidden = !tool.usesRasterDrawing && tool != .colorPicker && tool != .gradient &&
             tool != .rectangleSelect && !tool.usesVectorDrawing
     }
 
@@ -187,10 +219,40 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         menu.action = #selector(change(_:))
     }
 
+    private func configureBrushPercent(_ field: NSTextField, label: String, range: ClosedRange<Int>) {
+        let formatter = NumberFormatter()
+        formatter.allowsFloats = false
+        formatter.minimum = NSNumber(value: range.lowerBound)
+        formatter.maximum = NSNumber(value: range.upperBound)
+        field.formatter = formatter
+        field.alignment = .right
+        field.setAccessibilityLabel(label)
+        field.toolTip = label
+        field.widthAnchor.constraint(equalToConstant: 45).isActive = true
+        field.target = self
+        field.action = #selector(change(_:))
+    }
+
     @objc private func change(_ sender: NSControl) {
         guard let canvas else { return }
         if sender === brushAntialias {
-            canvas.brushAntialiased = brushAntialias.state == .on
+            canvas.brushOptions.antialiased = brushAntialias.state == .on
+            update()
+        } else if sender === hardness || sender === brushSpacing {
+            canvas.brushOptions.hardness = min(100, max(0, hardness.integerValue))
+            canvas.brushOptions.spacing = min(300, max(1, brushSpacing.integerValue))
+            update()
+            window?.makeFirstResponder(canvas)
+        } else if sender === brushPressure {
+            canvas.brushOptions.pressureSensitive = brushPressure.state == .on
+        } else if sender === brushSmoothing {
+            canvas.brushOptions.smoothed = brushSmoothing.state == .on
+        } else if sender === brushPattern {
+            canvas.brushOptions.pattern = BrushOptions.Pattern.allCases[brushPattern.indexOfSelectedItem]
+        } else if sender === brushBlend {
+            canvas.brushOptions.blend = BrushOptions.Blend.choices[brushBlend.indexOfSelectedItem]
+        } else if sender === brushClipping {
+            canvas.brushOptions.antialiasedSelection = brushClipping.indexOfSelectedItem == 0
         } else if sender === rectangleSizing {
             canvas.rectangleSelection.sizing = RectangleSelection.Sizing.allCases[rectangleSizing.indexOfSelectedItem]
             refreshRectangleDimensions()

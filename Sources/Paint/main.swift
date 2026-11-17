@@ -79,6 +79,7 @@ for (index, command) in ImageCommand.allCases.enumerated() {
 imageMenu.addItem(.separator())
 let flatten = imageMenu.addItem(withTitle: "Flatten", action: #selector(PaintDocument.flattenLayers(_:)), keyEquivalent: "f")
 flatten.keyEquivalentModifierMask = [.command, .shift]
+imageMenu.addItem(withTitle: "Color Profile…", action: #selector(PaintDocument.showColorProfile(_:)), keyEquivalent: "")
 imageItem.submenu = imageMenu
 
 let layerItem = menu.addItem(withTitle: "Layer", action: nil, keyEquivalent: "")

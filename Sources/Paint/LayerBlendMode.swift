@@ -1,3 +1,4 @@
+import Accelerate
 import CoreGraphics
 import Foundation
 
@@ -70,31 +71,63 @@ enum LayerBlendMode: Int, CaseIterable {
 }
 
 enum BGRA8 {
-    private static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
     private static let byteOrder = CGBitmapInfo.byteOrder32Little.rawValue
+    private static let straightFormat = CGBitmapInfo(rawValue: byteOrder | CGImageAlphaInfo.first.rawValue)
 
-    static func image(from pixels: Data, width: Int, height: Int) -> CGImage? {
-        guard let provider = CGDataProvider(data: pixels as CFData) else { return nil }
+    static func image(from pixels: Data, width: Int, height: Int, colorSpace: CGColorSpace = sRGB) -> CGImage? {
+        guard width > 0, height > 0, pixels.count.isMultiple(of: 4),
+              (pixels.count / 4).isMultiple(of: width), pixels.count / 4 / width == height,
+              let provider = CGDataProvider(data: pixels as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
                        bytesPerRow: width * 4, space: colorSpace,
-                       bitmapInfo: CGBitmapInfo(rawValue: byteOrder | CGImageAlphaInfo.first.rawValue),
+                       bitmapInfo: straightFormat,
                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 
-    static func pixels(from image: CGImage) -> Data? {
-        if let straight = straightProviderPixels(from: image) { return straight }
-        return rasterizedPixels(from: image)
+    static func pixels(from image: CGImage, in colorSpace: CGColorSpace = sRGB) -> Data? {
+        if let source = image.colorSpace, source.model == .rgb,
+           let straight = straightProviderPixels(from: image) {
+            return converted(straight, width: image.width, height: image.height, from: source, to: colorSpace)
+                ?? rasterizedPixels(from: image, in: colorSpace)
+        }
+        return rasterizedPixels(from: image, in: colorSpace)
     }
 
-    static func rasterizedPixels(from image: CGImage) -> Data? {
-        render(width: image.width, height: image.height) { context in
+    static func rasterizedPixels(from image: CGImage, in colorSpace: CGColorSpace = sRGB) -> Data? {
+        render(width: image.width, height: image.height, colorSpace: colorSpace) { context in
             context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         }
     }
 
+    static func converted(_ pixels: Data, width: Int, height: Int,
+                          from source: CGColorSpace, to destination: CGColorSpace) -> Data? {
+        guard width > 0, height > 0, pixels.count.isMultiple(of: 4),
+              (pixels.count / 4).isMultiple(of: width), pixels.count / 4 / width == height else { return nil }
+        if source == destination { return pixels }
+        func format(for colorSpace: CGColorSpace) -> vImage_CGImageFormat {
+            vImage_CGImageFormat(bitsPerComponent: 8, bitsPerPixel: 32, colorSpace: .passUnretained(colorSpace),
+                                 bitmapInfo: straightFormat, version: 0, decode: nil, renderingIntent: .relativeColorimetric)
+        }
+        var inputFormat = format(for: source)
+        var outputFormat = format(for: destination)
+        guard let converter = vImageConverter_CreateWithCGImageFormat(&inputFormat, &outputFormat, nil, 0, nil)?
+            .takeRetainedValue() else { return nil }
+        var result = Data(count: pixels.count)
+        let status = pixels.withUnsafeBytes { (input: UnsafeRawBufferPointer) in
+            result.withUnsafeMutableBytes { (output: UnsafeMutableRawBufferPointer) in
+                var src = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: input.baseAddress),
+                                        height: UInt(height), width: UInt(width), rowBytes: width * 4)
+                var dst = vImage_Buffer(data: output.baseAddress, height: UInt(height), width: UInt(width), rowBytes: width * 4)
+                return vImageConvert_AnyToAny(converter, &src, &dst, nil, 0)
+            }
+        }
+        // vImage reads the unassociated channels directly, even if alpha is zero.
+        return status == kvImageNoError ? result : nil
+    }
+
     private static func straightProviderPixels(from image: CGImage) -> Data? {
-        guard image.bitsPerComponent == 8, image.bitsPerPixel == 32, image.decode == nil,
-              image.colorSpace?.name == CGColorSpace.sRGB else { return nil }
+        guard image.bitsPerComponent == 8, image.bitsPerPixel == 32, image.decode == nil else { return nil }
         let order = image.bitmapInfo.intersection(.byteOrderMask)
         let bgra = image.alphaInfo == .first && order == .byteOrder32Little
         let rgba = image.alphaInfo == .last && (order == .byteOrderDefault || order == .byteOrder32Big)
@@ -130,7 +163,8 @@ enum BGRA8 {
         return pixels
     }
 
-    static func render(width: Int, height: Int, opaque: Bool = false, draw: (CGContext) -> Void) -> Data? {
+    static func render(width: Int, height: Int, opaque: Bool = false, colorSpace: CGColorSpace = sRGB,
+                       draw: (CGContext) -> Void) -> Data? {
         let bytesPerRow = width * 4
         var pixels = Data(count: bytesPerRow * height)
         let converted = pixels.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in

@@ -45,7 +45,7 @@ extension PaintDocument {
         guard let layer = stack?.activeLayer, layer.isVisible, let outline = canvas.selectionOutline,
               let clipped = outline.clipped(to: CGRect(x: 0, y: 0, width: layer.image.width, height: layer.image.height))
         else { return }
-        let color = DrawingColor(canvas.brushColor)
+        let color = DrawingColor(canvas.brushColor, in: layer.workingColorSpace)
         guard let result = layer.filling(clipped, blue: color.blue, green: color.green, red: color.red,
                                          alpha: color.alpha) else { return }
         commitPaintLayer(result, actionName: "Fill Selection")

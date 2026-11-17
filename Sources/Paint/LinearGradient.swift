@@ -50,7 +50,7 @@ struct LinearGradient {
         }
         let colors = reversed ? [secondary, primary] : [primary, secondary]
         guard start != end, let original = layer.straightPixels,
-              let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+              let gradient = CGGradient(colorsSpace: layer.workingColorSpace,
                                         colors: colors as CFArray, locations: nil) else { return nil }
         let width = layer.image.width, height = layer.image.height
         let canvas = CGRect(x: 0, y: 0, width: width, height: height)
@@ -60,7 +60,8 @@ struct LinearGradient {
         let length = hypot(end.x - start.x, end.y - start.y)
         // Keep normal compositing for subpixel lines, since Core Graphics may skip a nearly coincident gradient.
         let replacesLayer = selection == nil && primary.alpha == 1 && secondary.alpha == 1 && length >= 1
-        let rendered = BGRA8.render(width: Int(region.width), height: rows, opaque: replacesLayer) { context in
+        let rendered = BGRA8.render(width: Int(region.width), height: rows, opaque: replacesLayer,
+                                    colorSpace: layer.workingColorSpace) { context in
             context.translateBy(x: -region.minX, y: -region.minY)
             if let selection {
                 context.addPath(selection.path)
@@ -96,8 +97,8 @@ struct LinearGradient {
         let dx = end.x - start.x, dy = end.y - start.y
         let lengthSquared = dx * dx + dy * dy
         let width = layer.image.width, height = layer.image.height
+        let colorSpace = layer.workingColorSpace
         guard lengthSquared > 0, let original = layer.straightPixels,
-              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let a = primary.converted(to: colorSpace, intent: .defaultIntent, options: nil)?.components,
               let b = secondary.converted(to: colorSpace, intent: .defaultIntent, options: nil)?.components,
               a.count >= 4, b.count >= 4 else { return nil }

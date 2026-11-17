@@ -38,36 +38,6 @@ final class PaintDocument: NSDocument {
         editor?.refreshImage()
     }
 
-    func replaceImage(with replacement: CGImage, actionName: String, in rect: CGRect) {
-        guard var next = stack, let image,
-              replacement.width == image.width, replacement.height == image.height else { return }
-        let rect = rect.integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
-        guard var pixels = next.activeLayer.straightPixels, !rect.isEmpty,
-              let region = replacement.cropping(to: rect),
-              let originalRegion = image.cropping(to: rect),
-              // Quantize both sides the same way to distinguish changes made by the brush.
-              let edited = BGRA8.rasterizedPixels(from: region),
-              let original = BGRA8.rasterizedPixels(from: originalRegion),
-              edited != original else { return }
-        let origin = Int(rect.minY) * replacement.width + Int(rect.minX)
-        pixels.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
-            edited.withUnsafeBytes { (after: UnsafeRawBufferPointer) in
-                original.withUnsafeBytes { (before: UnsafeRawBufferPointer) in
-                    for pixel in 0..<(edited.count / 4) {
-                        let source = pixel * 4
-                        let updated = after.loadUnaligned(fromByteOffset: source, as: UInt32.self)
-                        guard updated != before.loadUnaligned(fromByteOffset: source, as: UInt32.self) else { continue }
-                        let offset = origin + pixel / region.width * replacement.width + pixel % region.width
-                        destination.storeBytes(of: updated, toByteOffset: offset * 4, as: UInt32.self)
-                    }
-                }
-            }
-        }
-        guard let editedLayer = next.activeLayer.withPixels(pixels) else { return }
-        next.layers[next.active] = editedLayer
-        applyEdit(replacingStack: next, actionName: actionName)
-    }
-
     @objc func cropSelection(_ sender: Any?) {
         guard let canvas = editor?.canvas, let rect = canvas.cropRect, let outline = canvas.selectionOutline else { return }
         canvas.finishLiveEdit()
@@ -190,7 +160,9 @@ final class PaintDocument: NSDocument {
     }
 
     static func makePastedImage(from pasted: CGImage) -> PaintDocument? {
-        guard let blank = LayerStack.blank(width: pasted.width, height: pasted.height) else { return nil }
+        let profile = RGBColorProfile.usefulProfile(for: pasted.colorSpace)
+        guard let blank = LayerStack.blank(width: pasted.width, height: pasted.height, colorProfile: profile)
+        else { return nil }
         let document = PaintDocument()
         document.fileType = Self.projectType
         document.stack = blank
@@ -502,6 +474,7 @@ final class PaintDocument: NSDocument {
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
         case #selector(applyAdjustment(_:)), #selector(applyEffect(_:)): return canFilterActiveLayer
+        case #selector(showColorProfile(_:)): return stack != nil && windowForSheet?.attachedSheet == nil
         case #selector(rotateZoomLayer(_:)): return canFilterActiveLayer
         case #selector(repeatEffect(_:)): return validateRepeatEffect(item as? NSMenuItem)
         case #selector(selectAllPixels(_:)): return editor != nil && image != nil
@@ -609,7 +582,8 @@ final class PaintDocument: NSDocument {
             let format = typeName == "PNG Image" ? .png : RasterFormat(rawValue: typeName)
             let raster = try PaintFiles.decodeRaster(data, expected: format)
             let layer = PaintLayer(name: "Background", image: raster.image, isBackground: true)
-            stack = LayerStack(layers: [layer], active: 0, metadata: raster.resolution?.updating([]) ?? [])
+            stack = LayerStack(layers: [layer], active: 0, metadata: raster.resolution?.updating([]) ?? [],
+                               colorProfile: raster.colorProfile)
         } else {
             throw CocoaError(.fileReadUnknown)
         }

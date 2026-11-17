@@ -3,7 +3,7 @@ import CoreImage
 
 struct RasterFilter {
     enum Editor {
-        case curves, levels
+        case curves, levels, posterize
     }
 
     struct Control {
@@ -40,7 +40,7 @@ struct RasterFilter {
     let category: String?
     let controls: [Control]
     let editor: Editor?
-    private let process: (Data, Int, Int, Data?, [Double], () -> Bool) -> Data?
+    private let process: (Data, Int, Int, CGColorSpace, Data?, [Double], () -> Bool) -> Data?
 
     init(_ title: String, category: String? = nil, _ controls: [Control] = [],
          process: @escaping (Data, Int, Int, [Double]) -> Data?) {
@@ -58,11 +58,18 @@ struct RasterFilter {
 
     init(_ title: String, category: String? = nil, _ controls: [Control] = [], editor: Editor? = nil,
          renderSelected: @escaping (Data, Int, Int, Data?, [Double], () -> Bool) -> Data?) {
+        self.init(title, category: category, controls, editor: editor) { pixels, width, height, _, mask, values, cancelled in
+            renderSelected(pixels, width, height, mask, values, cancelled)
+        }
+    }
+
+    init(_ title: String, category: String?, _ controls: [Control], editor: Editor? = nil,
+         renderInColorSpace: @escaping (Data, Int, Int, CGColorSpace, Data?, [Double], () -> Bool) -> Data?) {
         self.title = title
         self.category = category
         self.controls = controls
         self.editor = editor
-        process = renderSelected
+        process = renderInColorSpace
     }
 
     struct Input {
@@ -88,7 +95,8 @@ struct RasterFilter {
         func render(_ filter: RasterFilter, values: [Double], isCancelled: () -> Bool = { false }) -> PaintLayer? {
             guard values.count == filter.controls.count, !isCancelled() else { return nil }
             let settings = zip(filter.controls, values).map { $0.snapped($1) }
-            guard var result = filter.process(pixels, layer.image.width, layer.image.height, mask, settings, isCancelled),
+            guard var result = filter.process(pixels, layer.image.width, layer.image.height, layer.workingColorSpace,
+                                              mask, settings, isCancelled),
                   result.count == pixels.count, !isCancelled() else { return nil }
             // SelectionOutline supplies a binary mask in top-to-bottom pixel order.
             if let mask {
@@ -142,12 +150,11 @@ struct RasterFilter {
 
     private static let context = CIContext(options: [.cacheIntermediates: false])
     private static let softwareContext = CIContext(options: [.cacheIntermediates: false, .useSoftwareRenderer: true])
-    private static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-
     static func coreImage(_ title: String, category: String? = nil, _ controls: [Control] = [],
                           _ transform: @escaping (CIImage, [Double]) -> CIImage) -> Self {
-        Self(title, category: category, controls) { pixels, width, height, values in
-            guard let image = BGRA8.image(from: pixels, width: width, height: height) else { return nil }
+        Self(title, category: category, controls) { pixels, width, height, colorSpace, _, values, _ in
+            guard let image = BGRA8.image(from: pixels, width: width, height: height, colorSpace: colorSpace)
+            else { return nil }
             let input = CIImage(cgImage: image)
             let output = transform(input, values)
             if output === input { return pixels }
@@ -155,7 +162,7 @@ struct RasterFilter {
             guard let rendered = context.createCGImage(output, from: extent, format: .RGBA8, colorSpace: colorSpace)
                 ?? softwareContext.createCGImage(output, from: extent, format: .RGBA8, colorSpace: colorSpace)
             else { return nil }
-            return BGRA8.pixels(from: rendered)
+            return BGRA8.pixels(from: rendered, in: colorSpace)
         }
     }
 }

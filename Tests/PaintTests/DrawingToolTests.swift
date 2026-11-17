@@ -39,8 +39,9 @@ struct DrawingToolTests {
                                                operation: .clone(source: source, offset: CGPoint(x: -1, y: 0),
                                                                  opacity: 255),
                                                diameter: 1, selection: nil))
-        stroke.append(CGPoint(x: 1, y: 0))
-        stroke.append(CGPoint(x: 3, y: 0))
+        stroke.append(CGPoint(x: 1.5, y: 0.5))
+        stroke.append(CGPoint(x: 3.5, y: 0.5))
+        stroke.finish()
         let pixels = try #require(stroke.preview?.straightPixels)
         #expect(Array(pixels) == [0, 0, 255, 255, 0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255])
     }
@@ -51,8 +52,9 @@ struct DrawingToolTests {
                                                operation: .recolor(from: DrawingColor(.red), to: DrawingColor(.blue),
                                                                    tolerance: 0),
                                                diameter: 1, selection: nil))
-        stroke.append(.zero)
-        stroke.append(CGPoint(x: 1, y: 0))
+        stroke.append(CGPoint(x: 0.5, y: 0.5))
+        stroke.append(CGPoint(x: 1.5, y: 0.5))
+        stroke.finish()
         #expect(stroke.preview?.straightPixels == Data([255, 0, 0, 128, 0, 255, 0, 255]))
     }
 

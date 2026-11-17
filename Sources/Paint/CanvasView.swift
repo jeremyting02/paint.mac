@@ -1,7 +1,7 @@
 import AppKit
 
 final class CanvasView: NSView {
-    enum Tool {
+    enum Tool: Hashable {
         case brush, eraser, paintBucket, gradient, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection
         case pencil, colorPicker, cloneStamp, recolor, text, lineCurve, shapes, zoom, pan
 
@@ -17,10 +17,10 @@ final class CanvasView: NSView {
         var drawsSelection: Bool { selectionName != nil }
         var usesFlood: Bool { self == .magicWand || self == .paintBucket }
         var transformsSelection: Bool { self == .moveSelectedPixels || self == .moveSelection }
-        var usesRasterDrawing: Bool { self == .pencil || self == .cloneStamp || self == .recolor }
+        var usesBrushTip: Bool { self == .brush || self == .eraser || self == .cloneStamp || self == .recolor }
+        var usesRasterDrawing: Bool { self == .pencil || usesBrushTip }
         var usesVectorDrawing: Bool { self == .lineCurve || self == .shapes || self == .text }
-        var usesBrushSize: Bool { self == .brush || self == .eraser || self == .cloneStamp || self == .recolor ||
-            self == .lineCurve || self == .shapes }
+        var usesBrushSize: Bool { usesBrushTip || self == .lineCurve || self == .shapes }
     }
 
     private struct SelectionDrag {
@@ -171,10 +171,28 @@ final class CanvasView: NSView {
         8000, 10000
     ]
     private static let rotationCursor: NSCursor = {
-        guard let image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Rotate Selected Pixels") else {
-            return .crosshair
+        let size = NSSize(width: 20, height: 20)
+        let center = CGPoint(x: 10, y: 10)
+        let image = NSImage(size: size, flipped: false) { _ in
+            let arrow = NSBezierPath()
+            arrow.appendArc(withCenter: center, radius: 6, startAngle: -50, endAngle: 0, clockwise: true)
+            arrow.move(to: CGPoint(x: 12.5, y: 13.5))
+            arrow.line(to: CGPoint(x: 16, y: 10))
+            arrow.line(to: CGPoint(x: 17.5, y: 14.5))
+            arrow.lineCapStyle = .round
+            arrow.lineJoinStyle = .round
+
+            // The white outline stays visible over dark pixels and the black stroke over light ones.
+            NSColor.white.setStroke()
+            arrow.lineWidth = 4
+            arrow.stroke()
+            NSColor.black.setStroke()
+            arrow.lineWidth = 2
+            arrow.stroke()
+            return true
         }
-        return NSCursor(image: image, hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2))
+        image.accessibilityDescription = "Rotate Selection"
+        return NSCursor(image: image, hotSpot: center)
     }()
     private static let floodHandleIcon = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right",
                                                  accessibilityDescription: "Move flood tool click point")
@@ -184,7 +202,6 @@ final class CanvasView: NSView {
         willSet {
             if newValue != tool {
                 cancelSelectionDrag()
-                stroke = nil
                 rasterDrawing = nil
                 cloneCursor = nil
                 composite = nil
@@ -223,7 +240,16 @@ final class CanvasView: NSView {
         }
     }
     var brushSizeDidChange: (() -> Void)?
-    var brushAntialiased = true
+    private var perToolBrushOptions: [Tool: BrushOptions] = [:]
+    var brushOptions: BrushOptions {
+        get { perToolBrushOptions[tool] ?? BrushOptions() }
+        set { perToolBrushOptions[tool] = newValue }
+    }
+    var brushAntialiased: Bool {
+        get { brushOptions.antialiased }
+        set { brushOptions.antialiased = newValue }
+    }
+    private(set) var hasSeenTablet = false
     var drawingStyle = DrawingStyle() { didSet { updateDrawingPreview() } }
     var gradientOptions = GradientOptions() { didSet { invalidateGradientPreview() } }
     var pickerSampling: FloodSettings.Sampling = .layer
@@ -263,28 +289,14 @@ final class CanvasView: NSView {
     private enum DrawingDragMode { case create, handle(Int), move, rotate }
     private var drawingDrag: (anchor: CGPoint, mode: DrawingDragMode, initial: VectorDrawing)?
     private var rasterDrawing: RasterDrawing?
+    private var drawingWithSecondaryButton = false
+    private var lastTabletPressure: CGFloat?
     private var cloneSource: (point: CGPoint, layer: Int)?
     private var cloneOffset: CGPoint?
     private var cloneCursor: CGPoint?
     var selection: CGRect { selectionOutline?.bounds.integral ?? .zero }
     private var selectionDrag: SelectionDrag?
 
-    private struct BrushStroke {
-        let bitmap: CGContext
-        let eraser: EraserStroke?
-        let imageSelection: CGRect?
-        let rightButton: Bool
-        let outset: CGFloat
-        var lastPoint: CGPoint
-        var affectedBounds: CGRect
-
-        mutating func extend(to point: CGPoint) {
-            affectedBounds = affectedBounds.union(CGRect(x: point.x - outset, y: point.y - outset,
-                                                        width: outset * 2, height: outset * 2))
-            lastPoint = point
-        }
-    }
-    private var stroke: BrushStroke?
     private(set) var move: MoveSession?
     private var moveDrag: MoveDrag?
     private var cursorTracking: NSTrackingArea?
@@ -479,7 +491,7 @@ final class CanvasView: NSView {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, stroke == nil, selectionDrag == nil, moveDrag == nil, floodDrag == nil,
+        guard !imageRect.isEmpty, selectionDrag == nil, moveDrag == nil, floodDrag == nil,
               gradientDrag == nil, drawingDrag == nil, rasterDrawing == nil, panDrag == nil else { return }
 
         let steps: Int
@@ -531,7 +543,7 @@ final class CanvasView: NSView {
     }
 
     private func beginPan(with event: NSEvent) {
-        guard !imageRect.isEmpty, panDrag == nil, stroke == nil, selectionDrag == nil, moveDrag == nil,
+        guard !imageRect.isEmpty, panDrag == nil, selectionDrag == nil, moveDrag == nil,
               floodDrag == nil, gradientDrag == nil, drawingDrag == nil, rasterDrawing == nil else { return }
         if event.buttonNumber != 2 { window?.makeFirstResponder(self) }
         panDrag = (event.locationInWindow, event.buttonNumber)
@@ -697,7 +709,7 @@ final class CanvasView: NSView {
     private var pixelPreview: PaintLayer? {
         renderGradientPreviewIfNeeded()
         return move?.preview ?? fillPreview ?? gradientEdit?.preview ?? drawingDraft?.preview
-            ?? rasterDrawing?.preview ?? stroke?.eraser?.preview
+            ?? rasterDrawing?.preview
     }
     var copyableLayer: PaintLayer? { pixelPreview ?? document?.stack?.activeLayer }
     var canCopyPixels: Bool {
@@ -740,7 +752,6 @@ final class CanvasView: NSView {
     }
 
     func cancelEditingGesture() {
-        stroke = nil
         rasterDrawing = nil
         cloneCursor = nil
         drawingDraft = nil
@@ -1117,7 +1128,7 @@ final class CanvasView: NSView {
         }
         else if tool.usesRasterDrawing || tool.usesVectorDrawing || tool == .colorPicker || tool == .zoom {
             beginToolGesture(with: event, secondary: true)
-        } else if tool == .brush || tool == .eraser { beginBrush(with: event, secondary: true) }
+        }
         else { super.rightMouseDown(with: event) }
     }
 
@@ -1127,7 +1138,6 @@ final class CanvasView: NSView {
         else if tool == .gradient { dragGradient(with: event, rightButton: true) }
         else if dragSelection(with: event, rightButton: true) { return }
         else if updateToolGesture(with: event) { return }
-        else if stroke != nil { updateBrush(with: event, rightButton: true) }
         else { super.rightMouseDragged(with: event) }
     }
 
@@ -1137,7 +1147,6 @@ final class CanvasView: NSView {
         else if tool == .gradient { endGradientDrag(with: event, rightButton: true) }
         else if finishSelectionDrag(with: event, rightButton: true) { return }
         else if endToolGesture(with: event) { return }
-        else if stroke != nil { endBrush(with: event, rightButton: true) }
         else { super.rightMouseUp(with: event) }
     }
 
@@ -1147,6 +1156,17 @@ final class CanvasView: NSView {
             updateSelectionDrag(in: image, modifiers: event.modifierFlags)
         }
         super.flagsChanged(with: event)
+    }
+
+    override func tabletProximity(with event: NSEvent) {
+        if event.isEnteringProximity { noticeTablet() }
+        super.tabletProximity(with: event)
+    }
+
+    private func noticeTablet() {
+        guard !hasSeenTablet else { return }
+        hasSeenTablet = true
+        selectionDidChange?()
     }
 
     private func beginGradient(with event: NSEvent, rightButton: Bool) {
@@ -1280,58 +1300,6 @@ final class CanvasView: NSView {
             beginSelectionDrag(at: location, in: image, modifiers: event.modifierFlags, rightButton: false)
             return
         }
-        beginBrush(with: event, secondary: false)
-    }
-
-    private func beginBrush(with event: NSEvent, secondary: Bool) {
-        let location = convert(event.locationInWindow, from: nil)
-        guard panDrag == nil, stroke == nil, imageRect.contains(location), let layer = document?.stack?.activeLayer else { return }
-        let image = layer.image
-        window?.makeFirstResponder(self)
-        guard layer.isVisible else {
-            NSSound.beep()
-            return
-        }
-        let brushColor = secondary ? secondaryColor : self.brushColor
-        let bitmap: CGContext
-        let eraser: EraserStroke?
-        if tool == .eraser {
-            guard let alphaBrush = EraserStroke(layer: layer, opacity: DrawingColor(brushColor).alpha, diameter: brushSize)
-            else { return }
-            eraser = alphaBrush
-            bitmap = alphaBrush.coverage
-            bitmap.setFillColor(gray: 1, alpha: 1)
-            bitmap.setStrokeColor(gray: 1, alpha: 1)
-        } else {
-            guard let context = LayerStack.makeBitmap(width: image.width, height: image.height) else { return }
-            eraser = nil
-            bitmap = context
-            bitmap.setBlendMode(.copy)
-            bitmap.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-            bitmap.setBlendMode(.normal)
-            let color = (brushColor.usingColorSpace(.sRGB) ?? .black).cgColor
-            bitmap.setFillColor(color)
-            bitmap.setStrokeColor(color)
-        }
-        if let selectionOutline {
-            bitmap.addPath(selectionOutline.path)
-            bitmap.clip(using: .evenOdd)
-        }
-        bitmap.setShouldAntialias(brushAntialiased)
-        bitmap.setLineCap(.round)
-        bitmap.setLineWidth(brushSize)
-
-        let point = imagePoint(location)
-        bitmap.fillEllipse(in: CGRect(x: point.x - brushSize / 2, y: point.y - brushSize / 2,
-                                     width: brushSize, height: brushSize))
-        let outset = brushSize / 2 + 1
-        stroke = BrushStroke(bitmap: bitmap, eraser: eraser, imageSelection: imageSelection,
-                             rightButton: secondary, outset: outset, lastPoint: point,
-                             affectedBounds: CGRect(x: point.x - outset, y: point.y - outset,
-                                                    width: outset * 2, height: outset * 2))
-        eraser?.changed(from: point, to: point)
-        composite = nil
-        needsDisplay = true
     }
 
     private func beginFloodEdit(at point: CGPoint, modifiers: NSEvent.ModifierFlags, secondary: Bool = false) {
@@ -1386,7 +1354,7 @@ final class CanvasView: NSView {
             setSelection(mode.applying(outline, to: before))
         case .fill(let layer, let mask):
             let outline = settings.select(in: edit.source, x: edit.x, y: edit.y, within: mask)
-            let color = DrawingColor(edit.secondary ? secondaryColor : brushColor)
+            let color = DrawingColor(edit.secondary ? secondaryColor : brushColor, in: layer.workingColorSpace)
             fillPreview = outline.flatMap {
                 layer.filling($0, blue: color.blue, green: color.green, red: color.red, alpha: color.alpha)
             }
@@ -1443,21 +1411,6 @@ final class CanvasView: NSView {
             updateMoveDrag(with: event, rightButton: false)
             return
         }
-        updateBrush(with: event, rightButton: false)
-    }
-
-    private func updateBrush(with event: NSEvent, rightButton: Bool) {
-        guard let current = stroke, current.rightButton == rightButton else { return }
-        let location = convert(event.locationInWindow, from: nil)
-        let point = imagePoint(location)
-        guard point != current.lastPoint else { return }
-        current.bitmap.move(to: current.lastPoint)
-        current.bitmap.addLine(to: point)
-        current.bitmap.strokePath()
-        current.eraser?.changed(from: current.lastPoint, to: point)
-        stroke?.extend(to: point)
-        composite = nil
-        needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1478,23 +1431,6 @@ final class CanvasView: NSView {
             updateFloodCursor(at: convert(event.locationInWindow, from: nil))
             return
         }
-        endBrush(with: event, rightButton: false)
-    }
-
-    private func endBrush(with event: NSEvent, rightButton: Bool) {
-        guard let current = stroke, current.rightButton == rightButton else { return }
-        updateBrush(with: event, rightButton: rightButton)
-        let bounds = stroke?.affectedBounds ?? current.affectedBounds
-        stroke = nil
-        composite = nil
-        if let eraser = current.eraser {
-            if let preview = eraser.preview { document?.commitPaintLayer(preview, actionName: "Eraser") }
-        } else if let image = current.bitmap.makeImage() {
-            let raster = topLeftRect(bounds, imageHeight: image.height).integral
-            let target = current.imageSelection ?? canvasBounds(for: image)
-            document?.replaceImage(with: image, actionName: "Paintbrush", in: raster.intersection(target))
-        }
-        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1539,16 +1475,11 @@ final class CanvasView: NSView {
         if displayedZoomPercent >= 100 {
             context.interpolationQuality = .none
         }
-        let strokeImage = stroke?.eraser == nil ? stroke?.bitmap.makeImage() : nil
         if stack.needsBlendComposite {
-            if let strokeImage {
-                if let image = stack.blendComposite(preview: strokeImage)?.image { context.draw(image, in: rect) }
-            } else {
-                if composite == nil { composite = stack.blendComposite()?.image }
-                if let composite { context.draw(composite, in: rect) }
-            }
+            if composite == nil { composite = stack.blendComposite()?.image }
+            if let composite { context.draw(composite, in: rect) }
         } else {
-            stack.draw(in: context, rect: rect, preview: strokeImage)
+            stack.draw(in: context, rect: rect)
         }
         context.restoreGState()
         if showsPixelGrid { drawWorkspaceGrid(in: context) }
@@ -1734,7 +1665,7 @@ private extension CanvasView {
         }
         guard stack.activeLayer.isVisible else { NSSound.beep(); return }
         if tool.usesRasterDrawing {
-            beginRasterDrawing(on: stack, at: point, secondary: secondary, modifiers: event.modifierFlags)
+            beginRasterDrawing(on: stack, at: point, secondary: secondary, event: event)
         } else {
             finishDrawing()
             let geometry: VectorDrawing
@@ -1752,42 +1683,67 @@ private extension CanvasView {
         }
     }
 
-    func beginRasterDrawing(on stack: LayerStack, at point: CGPoint, secondary: Bool,
-                            modifiers: NSEvent.ModifierFlags) {
-        let primary = DrawingColor(secondary ? secondaryColor : brushColor)
-        let alternate = DrawingColor(secondary ? brushColor : secondaryColor)
+    private func beginRasterDrawing(on stack: LayerStack, at point: CGPoint, secondary: Bool, event: NSEvent) {
+        let layer = stack.activeLayer
+        let primary = DrawingColor(secondary ? secondaryColor : brushColor, in: layer.workingColorSpace)
+        let alternate = DrawingColor(secondary ? brushColor : secondaryColor, in: layer.workingColorSpace)
         let operation: RasterDrawing.Operation
         switch tool {
+        case .brush: operation = .paint(primary: primary, secondary: alternate)
+        case .eraser: operation = .erase(opacity: primary.alpha)
         case .pencil: operation = .pencil(primary)
         case .recolor: operation = .recolor(from: alternate, to: primary, tolerance: recolorTolerance)
         case .cloneStamp:
             let pixel = CGPoint(x: floor(point.x), y: floor(point.y))
-            if modifiers.contains(.control) || modifiers.contains(.option) {
+            if event.modifierFlags.contains(.control) || event.modifierFlags.contains(.option) {
                 cloneSource = (pixel, stack.active)
                 cloneOffset = nil
                 needsDisplay = true
                 return
             }
-            guard let source = cloneSource, stack.layers.indices.contains(source.layer),
-                  let pixels = stack.layers[source.layer].straightPixels else { NSSound.beep(); return }
+            guard let source = cloneSource, stack.layers.indices.contains(source.layer) else { NSSound.beep(); return }
+            let sourceLayer = stack.layers[source.layer]
+            guard let raw = sourceLayer.straightPixels,
+                  let pixels = BGRA8.converted(raw, width: sourceLayer.image.width, height: sourceLayer.image.height,
+                                               from: sourceLayer.workingColorSpace, to: layer.workingColorSpace)
+            else { NSSound.beep(); return }
             let offset = cloneOffset ?? source.point - pixel
             cloneOffset = offset
             cloneCursor = pixel + offset
             operation = .clone(source: pixels, offset: offset, opacity: primary.alpha)
         default: return
         }
-        rasterDrawing = RasterDrawing(layer: stack.activeLayer, operation: operation, diameter: brushSize,
-                                      selection: selectionOutline)
-        rasterDrawing?.append(point)
+        drawingWithSecondaryButton = secondary
+        lastTabletPressure = nil
+        rasterDrawing = RasterDrawing(layer: layer, operation: operation, diameter: brushSize,
+                                      selection: selectionOutline, options: brushOptions)
+        rasterDrawing?.append(point, pressure: pressure(for: event))
         composite = nil
         needsDisplay = true
+    }
+
+    private func pressure(for event: NSEvent) -> CGFloat {
+        if event.subtype == .tabletPoint {
+            noticeTablet()
+            // On a lift event the tablet can report zero even though the last contact had pressure.
+            let lifted = event.type == .leftMouseUp || event.type == .rightMouseUp
+            if !lifted || event.pressure > 0 {
+                lastTabletPressure = CGFloat(event.pressure)
+            }
+        }
+        return lastTabletPressure ?? 1
+    }
+
+    private func matchesDrawingButton(_ event: NSEvent) -> Bool {
+        drawingWithSecondaryButton == (event.type == .rightMouseDragged || event.type == .rightMouseUp)
     }
 
     func updateToolGesture(with event: NSEvent) -> Bool {
         guard !imageRect.isEmpty else { return false }
         let point = imagePoint(convert(event.locationInWindow, from: nil))
         if let rasterDrawing {
-            rasterDrawing.append(point)
+            guard matchesDrawingButton(event) else { return true }
+            rasterDrawing.append(point, pressure: pressure(for: event))
             if tool == .cloneStamp, let cloneOffset { cloneCursor = point + cloneOffset }
             composite = nil
             needsDisplay = true
@@ -1864,14 +1820,15 @@ private extension CanvasView {
     }
 
     func endToolGesture(with event: NSEvent) -> Bool {
+        if rasterDrawing != nil && !matchesDrawingButton(event) { return true }
         guard updateToolGesture(with: event) else { return false }
         if let rasterDrawing {
+            rasterDrawing.finish()
             let preview = rasterDrawing.preview
             self.rasterDrawing = nil
             cloneCursor = nil
             composite = nil
-            let name = tool == .pencil ? "Pencil" : tool == .cloneStamp ? "Clone Stamp" : "Recolor"
-            if let preview { document?.commitPaintLayer(preview, actionName: name) }
+            if let preview { document?.commitPaintLayer(preview, actionName: rasterDrawing.title) }
         }
         drawingDrag = nil
         needsDisplay = true

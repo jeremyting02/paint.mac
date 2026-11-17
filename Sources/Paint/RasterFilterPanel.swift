@@ -33,11 +33,13 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
     private let filter: RasterFilter
     private let input: RasterFilter.Input
     private let specializedControls: (any TonalAdjustmentControls)?
+    private let linkChannels: NSButton?
     private let apply = NSButton(title: "Apply", target: nil, action: nil)
     private let status = NSTextField(labelWithString: "")
     private var fields: [Field] = []
     private var renderRequest: Operation?
     private var revision = 0
+    private var lastEditedRGBChannel = 0
     private(set) var result: PaintLayer?
     var preview: ((PaintLayer?) -> Void)?
     var values: [Double] { fields.map(\.value) }
@@ -53,10 +55,15 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
         case .levels:
             specializedControls = LevelsControls(input: input)
             size = NSSize(width: 560, height: 340)
+        case .posterize:
+            specializedControls = nil
+            size = NSSize(width: 440, height: 134 + 34 * filter.controls.count)
         case nil:
             specializedControls = nil
             size = NSSize(width: 440, height: 100 + 34 * filter.controls.count)
         }
+        linkChannels = filter.editor == .posterize
+            ? NSButton(checkboxWithTitle: "Linked", target: nil, action: nil) : nil
         super.init(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
         title = filter.title
         let form = NSStackView()
@@ -104,6 +111,12 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
                 row.widthAnchor.constraint(equalTo: form.widthAnchor, constant: -32),
                 label.widthAnchor.constraint(equalToConstant: 130)
             ])
+        }
+        if let linkChannels {
+            linkChannels.state = .on
+            linkChannels.target = self
+            linkChannels.action = #selector(changeLink(_:))
+            form.addArrangedSubview(linkChannels)
         }
         let reset = NSButton(title: "Reset", target: self, action: #selector(resetValues(_:)))
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(closeSheet(_:)))
@@ -156,6 +169,7 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
               case let .numeric(slider, _) = fields[field.tag],
               let rawValue = Double(field.stringValue), rawValue.isFinite else { return }
         slider.doubleValue = filter.controls[field.tag].snapped(rawValue)
+        updateLinkedChannels(from: field.tag)
         updatePreview()
     }
 
@@ -168,13 +182,31 @@ final class RasterFilterPanel: NSPanel, NSTextFieldDelegate {
     @objc private func change(_ slider: NSSlider) {
         guard fields.indices.contains(slider.tag) else { return }
         fields[slider.tag].setValue(filter.controls[slider.tag].snapped(slider.doubleValue))
+        updateLinkedChannels(from: slider.tag)
         updatePreview()
     }
 
     @objc private func changeChoice(_ sender: NSPopUpButton) { updatePreview() }
 
+    @objc private func changeLink(_ sender: NSButton) {
+        updateLinkedChannels(from: lastEditedRGBChannel)
+        updatePreview()
+    }
+
+    private func updateLinkedChannels(from index: Int) {
+        guard let linkChannels, (0..<3).contains(index) else { return }
+        lastEditedRGBChannel = index
+        guard linkChannels.state == .on else { return }
+        let level = fields[index].value
+        for channel in 0..<3 where channel != index {
+            fields[channel].setValue(level)
+        }
+    }
+
     @objc private func resetValues(_ sender: Any?) {
         specializedControls?.reset()
+        linkChannels?.state = .on
+        lastEditedRGBChannel = 0
         for (index, control) in filter.controls.enumerated() {
             fields[index].setValue(control.initial)
         }

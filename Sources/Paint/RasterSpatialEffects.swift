@@ -20,13 +20,7 @@ extension RasterFilter {
             return image.clampedToExtent().applyingFilter(values[0] > 0 ? "CIMorphologyMaximum" : "CIMorphologyMinimum",
                                                          parameters: [kCIInputRadiusKey: abs(values[0])])
         },
-        coreImage("Pixelate", category: "Distort", [.init("Cell Size", 1...200, 8)]) { image, values in
-            if values[0] == 1 { return image }
-            let size = values[0]
-            return image.clampedToExtent().applyingFilter("CIPixellate", parameters: [
-                kCIInputScaleKey: size, kCIInputCenterKey: CIVector(x: size / 2, y: image.extent.maxY - size / 2)
-            ])
-        },
+        PixelateEffect.filter,
         coreImage("Spherize", category: "Distort", [.init("Radius", 1...100, 60),
                                                    .init("Refraction", 1...3, 1.5, step: 0.01)]) { image, values in
             image.applyingFilter("CIGlassLozenge", parameters: [
@@ -82,9 +76,7 @@ extension RasterFilter {
                 "inputNoiseLevel": values[0] / 100, "inputSharpness": values[1] / 100
             ])
         },
-        coreImage("Square Blur", category: "Blurs", [.init("Radius", 0...100, 4)]) { image, values in
-            image.clampedToExtent().applyingFilter("CIBoxBlur", parameters: [kCIInputRadiusKey: values[0]])
-        },
+        SquareBlurEffect.filter,
         coreImage("Bokeh Blur", category: "Blurs", [.init("Radius", 0...100, 8),
                                                    .init("Highlight Threshold", 0...100, 80)]) { image, values in
             image.clampedToExtent().applyingFilter("CIBokehBlur", parameters: [

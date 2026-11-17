@@ -70,7 +70,8 @@ extension PaintDocument {
             guard response == .alertFirstButtonReturn, let self, let size = options.size,
                   let resolution = options.resolution else { return }
             self.performResize(width: size.width, height: size.height, canvasOnly: canvasOnly,
-                               anchor: options.anchor, fill: options.fillWord(canvas: self.editor?.canvas),
+                               anchor: options.anchor, fill: options.fillWord(canvas: self.editor?.canvas,
+                                                                             colorSpace: self.stack?.workingColorSpace),
                                sampling: options.sampling, linearLight: options.linearLight, resolution: resolution)
         }
     }
@@ -244,7 +245,7 @@ private final class ImageSizeOptions: NSObject, NSTextFieldDelegate {
         return ImageResolution(horizontal: horizontal, vertical: vertical)
     }
 
-    func fillWord(canvas: CanvasView?) -> UInt32 {
+    func fillWord(canvas: CanvasView?, colorSpace: CGColorSpace?) -> UInt32 {
         let color: NSColor
         switch fillChoice.indexOfSelectedItem {
         case 1: color = canvas?.brushColor ?? .black
@@ -253,10 +254,9 @@ private final class ImageSizeOptions: NSObject, NSTextFieldDelegate {
         case 4: color = .black
         default: return 0
         }
-        guard let srgb = color.usingColorSpace(.sRGB) else { return 0 }
-        func byte(_ channel: CGFloat) -> UInt32 { UInt32((min(1, max(0, channel)) * 255).rounded()) }
-        return byte(srgb.blueComponent) | (byte(srgb.greenComponent) << 8) |
-               (byte(srgb.redComponent) << 16) | (byte(srgb.alphaComponent) << 24)
+        let drawingColor = DrawingColor(color, in: colorSpace)
+        return UInt32(drawingColor.blue) | (UInt32(drawingColor.green) << 8) |
+               (UInt32(drawingColor.red) << 16) | (UInt32(drawingColor.alpha) << 24)
     }
 
     @objc private func changeOptions() {

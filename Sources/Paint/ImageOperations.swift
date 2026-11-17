@@ -109,7 +109,7 @@ extension LayerStack {
         let oldWidth = activeLayer.image.width, oldHeight = activeLayer.image.height
         guard width != oldWidth || height != oldHeight else { return self }
         let resampler = ImageResampler(sourceWidth: oldWidth, sourceHeight: oldHeight, width: width, height: height,
-                                       mode: sampling, linearLight: linearLight)
+                                       mode: sampling, linearLight: linearLight, colorSpace: activeLayer.workingColorSpace)
         var result = self
         result.layers = try layers.map { layer in
             guard let source = layer.straightPixels else { throw CocoaError(.fileReadUnknown) }
@@ -121,7 +121,8 @@ extension LayerStack {
 
 private extension PaintLayer {
     func replacingRaster(_ pixels: Data, width: Int, height: Int) throws -> Self {
-        guard let image = BGRA8.image(from: pixels, width: width, height: height) else { throw CocoaError(.fileReadUnknown) }
+        guard let image = BGRA8.image(from: pixels, width: width, height: height, colorSpace: workingColorSpace)
+        else { throw CocoaError(.fileReadUnknown) }
         var layer = self
         layer.image = image
         layer.pdnPixels = pixels

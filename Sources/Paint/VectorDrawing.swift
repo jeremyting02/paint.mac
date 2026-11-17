@@ -214,7 +214,7 @@ enum VectorDrawing {
     func applying(to layer: PaintLayer, selection: SelectionOutline?, style: DrawingStyle) -> PaintLayer? {
         let width = layer.image.width, height = layer.image.height
         guard let original = layer.straightPixels,
-              let overlay = BGRA8.render(width: width, height: height, draw: { context in
+              let overlay = BGRA8.render(width: width, height: height, colorSpace: layer.workingColorSpace, draw: { context in
                   if let selection {
                       context.addPath(selection.path)
                       context.clip(using: .evenOdd)

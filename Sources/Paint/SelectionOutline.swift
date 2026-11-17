@@ -65,7 +65,7 @@ struct SelectionOutline: Equatable {
     }
 
     // One byte per pixel in image row order, using the same coordinate conversion as cropping.
-    func mask(in region: CGRect, imageHeight: Int) -> Data? {
+    func mask(in region: CGRect, imageHeight: Int, antialiased: Bool = false) -> Data? {
         let width = Int(region.width), height = Int(region.height)
         var bytes = Data(count: width * height)
         let rendered = bytes.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) in
@@ -73,7 +73,8 @@ struct SelectionOutline: Equatable {
                                          bitsPerComponent: 8, bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(),
                                          bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
             bitmap.translateBy(x: -region.minX, y: region.maxY - CGFloat(imageHeight))
-            bitmap.setAllowsAntialiasing(false)
+            bitmap.setAllowsAntialiasing(antialiased)
+            bitmap.setShouldAntialias(antialiased)
             bitmap.setFillColor(gray: 1, alpha: 1)
             bitmap.addPath(path)
             bitmap.fillPath(using: .evenOdd)

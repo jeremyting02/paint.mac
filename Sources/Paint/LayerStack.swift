@@ -11,14 +11,35 @@ struct PaintLayer {
     var metadata: [PDNMetadata] = []
     var pdnPixels: Data?
 
-    var straightPixels: Data? { pdnPixels ?? BGRA8.pixels(from: image) }
+    var workingColorSpace: CGColorSpace {
+        if let colorSpace = image.colorSpace, colorSpace.model == .rgb { return colorSpace }
+        return BGRA8.sRGB
+    }
+
+    var straightPixels: Data? { pdnPixels ?? BGRA8.pixels(from: image, in: workingColorSpace) }
 
     func withPixels(_ pixels: Data) -> PaintLayer? {
-        guard let image = BGRA8.image(from: pixels, width: image.width, height: image.height) else { return nil }
+        replacingPixels(pixels, colorSpace: workingColorSpace)
+    }
+
+    private func replacingPixels(_ pixels: Data, colorSpace: CGColorSpace) -> PaintLayer? {
+        guard let image = BGRA8.image(from: pixels, width: image.width, height: image.height, colorSpace: colorSpace)
+        else { return nil }
         var updated = self
         updated.image = image
         updated.pdnPixels = pixels
         return updated
+    }
+
+    func applyingColorSpace(_ colorSpace: CGColorSpace, converting: Bool) -> PaintLayer? {
+        if workingColorSpace == colorSpace, image.colorSpace == colorSpace { return self }
+        guard let source = straightPixels else { return nil }
+        let data = if converting {
+            BGRA8.converted(source, width: image.width, height: image.height, from: workingColorSpace, to: colorSpace)
+        } else {
+            Optional(source)
+        }
+        return data.flatMap { replacingPixels($0, colorSpace: colorSpace) }
     }
 
     func clearing(_ region: CGRect, mask: Data?, from source: Data) -> Data {
@@ -52,7 +73,7 @@ struct PaintLayer {
             let sourceStart = source.startIndex + row * stride
             pixels.replaceSubrange(start..<(start + stride), with: source[sourceStart..<(sourceStart + stride)])
         }
-        guard let padded = BGRA8.image(from: pixels, width: width, height: height) else {
+        guard let padded = BGRA8.image(from: pixels, width: width, height: height, colorSpace: workingColorSpace) else {
             throw CocoaError(.fileReadUnknown)
         }
         image = padded
@@ -80,7 +101,8 @@ struct PaintLayer {
                     target.storeBytes(of: UInt32(0), toByteOffset: index * 4, as: UInt32.self)
                 }
             }
-            guard let masked = BGRA8.image(from: pixels, width: cropped.width, height: cropped.height) else { return false }
+            guard let masked = BGRA8.image(from: pixels, width: cropped.width, height: cropped.height,
+                                           colorSpace: workingColorSpace) else { return false }
             image = masked
             pdnPixels = pixels
         }
@@ -118,13 +140,16 @@ struct SelectedPixelsTransform {
     }
 
     init?(layer: PaintLayer, pastedImage: CGImage, at destination: CGRect) {
-        guard let source = layer.straightPixels, let foreground = BGRA8.pixels(from: pastedImage) else { return nil }
+        guard let source = layer.straightPixels,
+              let foreground = BGRA8.pixels(from: pastedImage, in: layer.workingColorSpace),
+              let transferred = BGRA8.image(from: foreground, width: pastedImage.width, height: pastedImage.height,
+                                             colorSpace: layer.workingColorSpace) else { return nil }
         self.layer = layer
         self.source = source
         cleared = source
         selection = destination
         bounds = CGRect(x: 0, y: 0, width: layer.image.width, height: layer.image.height)
-        croppedSource = PaintLayer(name: layer.name, image: pastedImage, pdnPixels: foreground)
+        croppedSource = PaintLayer(name: layer.name, image: transferred, pdnPixels: foreground)
         isPaste = true
     }
 
@@ -185,7 +210,8 @@ struct SelectedPixelsTransform {
     private func renderPixels(from sourceRect: CGRect, visible: CGRect, transform: CGAffineTransform) -> Data? {
         guard let image = croppedSource?.image ?? layer.image.cropping(to: selection) else { return nil }
         // Rasterize only the on-canvas portion. The drawing context has a bottom-left origin.
-        return BGRA8.render(width: Int(visible.width), height: Int(visible.height)) { bitmap in
+        return BGRA8.render(width: Int(visible.width), height: Int(visible.height),
+                            colorSpace: layer.workingColorSpace) { bitmap in
             bitmap.interpolationQuality = .low
             bitmap.translateBy(x: -visible.minX, y: visible.maxY - CGFloat(layer.image.height))
             bitmap.concatenate(transform)
@@ -209,27 +235,34 @@ struct LayerStack {
     var layers: [PaintLayer] // Bottom to top.
     var active: Int
     var metadata: [PDNMetadata] = []
+    var colorProfile: RGBColorProfile?
 
     var activeLayer: PaintLayer { layers[active] }
+    var workingColorSpace: CGColorSpace { colorProfile?.colorSpace ?? BGRA8.sRGB }
     var remainingLayerCapacity: Int {
         Self.layerCapacity(width: activeLayer.image.width, height: activeLayer.image.height) - layers.count
     }
     var canDuplicate: Bool { remainingLayerCapacity > 0 }
     var canMergeDown: Bool { active > 0 }
     var needsBlendComposite: Bool {
-        layers.lazy.filter { $0.isVisible && $0.opacity > 0 }.dropFirst().contains { $0.blendMode != .normal }
+        let overlapping = layers.lazy.filter { $0.isVisible && $0.opacity > 0 }.dropFirst()
+        // Tagged images must blend in the document's space before conversion to the display.
+        return overlapping.contains { colorProfile != nil || $0.blendMode != .normal }
     }
 
-    static func blank(width: Int, height: Int) -> Self? {
+    static func blank(width: Int, height: Int, colorProfile: RGBColorProfile? = nil) -> Self? {
         guard supportsCanvas(width: width, height: height),
-              let image = makeBitmap(width: width, height: height)?.makeImage() else { return nil }
-        return Self(layers: [PaintLayer(name: "Background", image: image, isBackground: true)], active: 0)
+              let image = makeBitmap(width: width, height: height,
+                                     colorSpace: colorProfile?.colorSpace ?? BGRA8.sRGB)?.makeImage() else { return nil }
+        return Self(layers: [PaintLayer(name: "Background", image: image, isBackground: true)], active: 0,
+                    colorProfile: colorProfile)
     }
 
     mutating func insertBlankLayer() throws {
         guard canDuplicate else { throw PDNError.tooLarge }
         let dimensions = activeLayer.image
-        guard let image = Self.makeBitmap(width: dimensions.width, height: dimensions.height)?.makeImage()
+        guard let image = Self.makeBitmap(width: dimensions.width, height: dimensions.height,
+                                          colorSpace: workingColorSpace)?.makeImage()
         else { throw CocoaError(.fileReadUnknown) }
         let names = Set(layers.map(\.name))
         var number = 1
@@ -256,16 +289,13 @@ struct LayerStack {
     mutating func mergeActiveLayerDown() -> Bool {
         guard canMergeDown else { return false }
         let upper = activeLayer
-        var lower = layers[active - 1]
+        let lower = layers[active - 1]
         // Paint.NET applies the upper layer's settings to the pixels and keeps the lower layer's properties.
         if upper.opacity > 0 {
             guard let source = upper.straightPixels, var pixels = lower.straightPixels else { return false }
             upper.blendMode.composite(source, onto: &pixels, opacity: upper.opacity)
-            guard let image = BGRA8.image(from: pixels, width: lower.image.width, height: lower.image.height)
-            else { return false }
-            lower.image = image
-            lower.pdnPixels = pixels
-            layers[active - 1] = lower
+            guard let merged = lower.withPixels(pixels) else { return false }
+            layers[active - 1] = merged
         }
         layers.remove(at: active)
         active -= 1
@@ -280,8 +310,18 @@ struct LayerStack {
         guard combined.count <= Self.layerCapacity(width: width, height: height) else {
             throw PDNError.tooLarge
         }
-        layers = try combined.map { layer in
-            var padded = layer
+        let destination = workingColorSpace
+        let existingCount = layers.count
+        layers = try combined.enumerated().map { index, layer in
+            var padded: PaintLayer
+            if index < existingCount {
+                padded = layer
+            } else {
+                guard let converted = layer.applyingColorSpace(destination, converting: true) else {
+                    throw PDNError.unsupported("the imported layer's color profile")
+                }
+                padded = converted
+            }
             try padded.padCanvas(width: width, height: height)
             return padded
         }
@@ -307,7 +347,8 @@ struct LayerStack {
             return PaintLayer(name: "Background", image: composite.image, isBackground: true, pdnPixels: composite.pixels)
         }
         let image = activeLayer.image
-        guard let bitmap = Self.makeBitmap(width: image.width, height: image.height) else { return nil }
+        guard let bitmap = Self.makeBitmap(width: image.width, height: image.height,
+                                           colorSpace: workingColorSpace) else { return nil }
         draw(in: bitmap, rect: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         guard let flat = bitmap.makeImage() else { return nil }
         return PaintLayer(name: "Background", image: flat, isBackground: true)
@@ -318,17 +359,31 @@ struct LayerStack {
         var pixels = Data(count: image.width * image.height * 4)
         for (index, layer) in layers.enumerated() where layer.isVisible && layer.opacity > 0 {
             let source = index == active ? preview : nil
-            let sourcePixels = if let source { BGRA8.pixels(from: source) } else { layer.straightPixels }
+            let sourcePixels = if let source { BGRA8.pixels(from: source, in: workingColorSpace) } else { layer.straightPixels }
             guard let bytes = sourcePixels else { return nil }
             layer.blendMode.composite(bytes, onto: &pixels, opacity: layer.opacity)
         }
-        guard let flat = BGRA8.image(from: pixels, width: image.width, height: image.height) else { return nil }
+        guard let flat = BGRA8.image(from: pixels, width: image.width, height: image.height, colorSpace: workingColorSpace)
+        else { return nil }
         return (flat, pixels)
     }
 
-    static func makeBitmap(width: Int, height: Int) -> CGContext? {
+    func applyingColorProfile(_ profile: RGBColorProfile, converting: Bool) throws -> Self {
+        var result = self
+        result.layers = try layers.map { layer in
+            guard let output = layer.applyingColorSpace(profile.colorSpace, converting: converting) else {
+                throw PDNError.unsupported("the selected color profile cannot be applied to this image")
+            }
+            return output
+        }
+        result.colorProfile = profile
+        result.metadata = profile.embedding(in: metadata)
+        return result
+    }
+
+    static func makeBitmap(width: Int, height: Int, colorSpace: CGColorSpace = BGRA8.sRGB) -> CGContext? {
         CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  space: colorSpace,
                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     }
 }
