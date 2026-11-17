@@ -226,6 +226,58 @@ struct WorkspaceTests {
         #expect(second.textField?.stringValue == "Rectangle Select (Intersect)")
     }
 
+    @Test func clickingCurrentHistoryRowStepsBackAndClickingItAgainReappliesIt() throws {
+        final class OwnerWindow: NSWindow {
+            override var isMainWindow: Bool { true }
+            override var occlusionState: NSWindow.OcclusionState { .visible }
+        }
+        _ = NSApplication.shared
+        let owner = OwnerWindow(contentRect: CGRect(x: 100, y: 120, width: 640, height: 460),
+                                styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        owner.isReleasedWhenClosed = false
+        defer { owner.close() }
+        owner.orderFront(nil)
+        let document = try #require(PaintDocument.newImage(width: 3, height: 3, resolution: .standard))
+        document.makeWindowControllers()
+        let editor = try #require(document.editor)
+        editor.installPanels(on: owner)
+        editor.setWorkspaceActive(true)
+        let history = try #require(owner.childWindows?.first(where: { $0.title == "History" }))
+        let content = try #require(history.contentView?.subviews.first as? NSStackView)
+        let scroll = try #require(content.arrangedSubviews.first as? NSScrollView)
+        let table = try #require(scroll.documentView as? NSTableView)
+        document.addLayer()
+        document.addLayer()
+        #expect(table.selectedRow == 2)
+
+        func clickHistoryRow(_ index: Int, clickCount: Int = 1) throws {
+            let row = table.rect(ofRow: index)
+            let location = table.convert(CGPoint(x: row.minX + 4, y: row.midY), to: nil)
+            let click = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
+                                           timestamp: 0, windowNumber: history.windowNumber, context: nil,
+                                           eventNumber: 0, clickCount: clickCount, pressure: 1)
+            table.mouseDown(with: try #require(click))
+        }
+        try clickHistoryRow(2)
+        #expect(table.selectedRow == 1)
+        #expect(document.stack?.layers.count == 2)
+        #expect(editor.tableView(table, rowViewForRow: 2)?.backgroundColor == .quaternaryLabelColor)
+        let undone = editor.tableView(table, viewFor: nil, row: 2) as? NSTableCellView
+        #expect(undone?.textField?.textColor == .secondaryLabelColor)
+
+        try clickHistoryRow(2, clickCount: 2)
+        #expect(document.historyPosition == 2)
+        #expect(document.stack?.layers.count == 3)
+        #expect(editor.tableView(table, rowViewForRow: 2)?.backgroundColor == .clear)
+        let reapplied = editor.tableView(table, viewFor: nil, row: 2) as? NSTableCellView
+        #expect(reapplied?.textField?.textColor == .labelColor)
+
+        try clickHistoryRow(0)
+        try clickHistoryRow(0, clickCount: 2)
+        #expect(document.historyPosition == 0)
+        #expect(document.stack?.layers.count == 1)
+    }
+
     @Test func layerDragMapsTopFirstRowsToBottomFirstIndices() {
         #expect(LayersView.dropDestination(from: 3, above: 0, count: 4) == 3)
         #expect(LayersView.dropDestination(from: 0, above: 4, count: 4) == 0)

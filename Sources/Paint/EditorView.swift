@@ -22,7 +22,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     private var verticalRuler: WorkspaceRuler?
     var showsRulers: Bool { scrollView.rulersVisible }
     var showsGrid: Bool { canvas.showsPixelGrid }
-    private let brush = EditorView.icon("paintbrush", label: "Paintbrush")
+    private let brush = EditorView.icon("paintbrush.pointed", label: "Paintbrush")
     private let eraser = EditorView.icon("eraser", label: "Eraser")
     private let paintBucket = EditorView.icon(EditorView.bucketImage, label: "Paint Bucket")
     private let gradient = EditorView.icon("circle.lefthalf.filled", label: "Gradient")
@@ -36,7 +36,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     private let pan = EditorView.icon("hand.raised", label: "Pan")
     private let pencil = EditorView.icon("pencil", label: "Pencil")
     private let picker = EditorView.icon("eyedropper", label: "Color Picker")
-    private let stamp = EditorView.icon("paintbrush.pointed", label: "Clone Stamp")
+    private let stamp = EditorView.icon(EditorView.stampImage, label: "Clone Stamp")
     private let recolor = EditorView.icon("paintbrush.pointed.fill", label: "Recolor")
     private let text = EditorView.icon("textformat", label: "Text")
     private let line = EditorView.icon("line.diagonal", label: "Line / Curve")
@@ -54,7 +54,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     private let floodControls = NSStackView()
     private let floodToleranceValue = NSTextField(labelWithString: "")
     private let historyScroll = NSScrollView()
-    private let historyTable = NSTableView()
+    private let historyTable = HistoryTableView()
     private let historyUndo = EditorView.icon("arrow.uturn.backward", label: "Undo")
     private let historyRedo = EditorView.icon("arrow.uturn.forward", label: "Redo")
     private var updatingHistory = false
@@ -94,6 +94,9 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         historyTable.setAccessibilityLabel("History")
         historyTable.dataSource = self
         historyTable.delegate = self
+        historyTable.revisitRow = { [weak document] row in
+            document?.goToHistoryEntry(row - 1)
+        }
         historyScroll.documentView = historyTable
         historyScroll.hasVerticalScroller = true
         historyScroll.autohidesScrollers = true
@@ -422,6 +425,13 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
 
     func numberOfRows(in tableView: NSTableView) -> Int { document?.historyEntries.count ?? 0 }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        guard let document else { return nil }
+        let view = NSTableRowView()
+        view.backgroundColor = row > document.historyPosition ? .quaternaryLabelColor : .clear
+        return view
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let document else { return nil }
         let identifier = NSUserInterfaceItemIdentifier("History Entry")
@@ -430,6 +440,9 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         cell.identifier = identifier
         cell.textField?.stringValue = action
         cell.imageView?.image = historyIcon(for: action)
+        let color: NSColor = row > document.historyPosition ? .secondaryLabelColor : .labelColor
+        cell.textField?.textColor = color
+        cell.imageView?.contentTintColor = color
         return cell
     }
 
@@ -661,6 +674,26 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         return button
     }
 
+    private static let stampImage: NSImage = {
+        let image = NSImage(size: CGSize(width: 17, height: 17), flipped: false) { _ in
+            NSColor.black.setFill()
+            let handle = NSBezierPath()
+            handle.move(to: CGPoint(x: 3, y: 6))
+            handle.curve(to: CGPoint(x: 5.5, y: 12.5),
+                         controlPoint1: CGPoint(x: 6.5, y: 7.5), controlPoint2: CGPoint(x: 5.5, y: 10))
+            handle.curve(to: CGPoint(x: 11.5, y: 12.5),
+                         controlPoint1: CGPoint(x: 5.5, y: 16.5), controlPoint2: CGPoint(x: 11.5, y: 16.5))
+            handle.curve(to: CGPoint(x: 14, y: 6),
+                         controlPoint1: CGPoint(x: 11.5, y: 10), controlPoint2: CGPoint(x: 10.5, y: 7.5))
+            handle.close()
+            handle.fill()
+            NSBezierPath(roundedRect: CGRect(x: 1.5, y: 2, width: 14, height: 4.5), xRadius: 1, yRadius: 1).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
     private static let bucketImage: NSImage = {
         let image = NSImage(size: CGSize(width: 17, height: 17), flipped: false) { _ in
             NSColor.black.set()
@@ -682,6 +715,25 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         image.isTemplate = true
         return image
     }()
+}
+
+private final class HistoryTableView: NSTableView {
+    var revisitRow: ((Int) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        guard row >= 0, !event.modifierFlags.contains(.control) else {
+            super.mouseDown(with: event)
+            return
+        }
+        window?.makeFirstResponder(self)
+        // Treat each press as a history click, including a rapid second click on the same row.
+        if row != selectedRow {
+            selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        } else if row > 0 {
+            revisitRow?(row)
+        }
+    }
 }
 
 private final class HistoryCell: NSTableCellView {

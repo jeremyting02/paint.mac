@@ -177,6 +177,8 @@ Use **Command-Z** and **Command-Y** to undo or redo an edit. Selection changes
 also appear in **History**.
 Each document keeps its undo history until you close it. The **History**
 window shows tool and action icons. Select an entry to jump to it.
+Click the current entry again to step back one action. Click that same entry
+to reapply it. Undone entries appear dimmed on a shaded background.
 In **Layers**, use **+** to insert a transparent layer above the selected row,
 click a row to edit it, and use its checkbox to
 hide or show it. Drag a row to reorder the stack. The arrows move the selected
