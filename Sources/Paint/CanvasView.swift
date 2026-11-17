@@ -885,6 +885,7 @@ final class CanvasView: NSView {
     var rotationDegrees: CGFloat? { move.map { $0.geometry.angle * 180 / .pi } }
 
     func restoreMove(_ session: MoveSession?) {
+        let hadPixelPreview = move?.preview != nil
         move = nil
         if let session {
             let transformTool: Tool = session.pixels == nil ? .moveSelection : .moveSelectedPixels
@@ -895,7 +896,7 @@ final class CanvasView: NSView {
             if session.pixels != nil { moveSampling = session.sampling }
         }
         move = session
-        composite = nil
+        if hadPixelPreview || session?.preview != nil { composite = nil }
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
         selectionDidChange?()
@@ -1163,6 +1164,7 @@ final class CanvasView: NSView {
 
     private func updateMove(with geometry: MoveGeometry, actionName: String, copy: Bool) {
         guard var session = move else { return }
+        let hadPixelPreview = session.preview != nil
         let keepSource = session.copy || copy
         guard session.geometry != geometry || session.copy != keepSource else { return }
         session.geometry = geometry
@@ -1176,7 +1178,8 @@ final class CanvasView: NSView {
         session.copy = keepSource
         session.actionName = tool == .moveSelection ? "Transform Selection" : actionName
         move = session
-        composite = nil
+        // Outline transforms only change the overlay. Pixel previews change the composite.
+        if hadPixelPreview || session.preview != nil { composite = nil }
         needsDisplay = true
         selectionDidChange?()
     }
