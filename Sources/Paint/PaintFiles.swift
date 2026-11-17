@@ -150,6 +150,11 @@ enum PaintFiles {
 
     static func pngData(_ image: CGImage) throws -> Data { try rasterData(image, as: .png) }
 
+    static func rasterData(_ stack: LayerStack, as format: RasterFormat, quality: Double = 0.9) throws -> Data {
+        guard let image = stack.flattenedLayer()?.image else { throw CocoaError(.fileWriteUnknown) }
+        return try rasterData(image, as: format, quality: quality, resolution: stack.resolution)
+    }
+
     static func rasterData(_ image: CGImage, as format: RasterFormat, quality: Double = 0.9,
                            resolution: ImageResolution? = nil) throws -> Data {
         let bytes = NSMutableData()

@@ -68,6 +68,65 @@ enum LayerBlendMode: Int, CaseIterable {
             target[i + 3] = UInt8((total + 32512) / 65025)
         }
     }
+
+    private func blend(_ background: Float, _ source: Float) -> Float {
+        switch self {
+        case .normal: return source
+        case .multiply: return background * source
+        case .additive: return min(1, background + source)
+        case .colorBurn: return source == 0 ? 0 : max(0, 1 - (1 - background) / source)
+        case .colorDodge: return source == 1 ? 1 : min(1, background / (1 - source))
+        case .reflect: return source == 1 ? 1 : min(1, background * background / (1 - source))
+        case .glow: return Self.reflect.blend(source, background)
+        case .overlay:
+            return background < 0.5 ? 2 * background * source : 1 - 2 * (1 - background) * (1 - source)
+        case .difference: return abs(background - source)
+        case .negation: return 1 - abs(1 - background - source)
+        case .lighten: return max(background, source)
+        case .darken: return min(background, source)
+        case .screen: return background + source - background * source
+        case .xor: return Float(Self.byte(background) ^ Self.byte(source)) / 255
+        }
+    }
+
+    // The stack keeps premultiplied BGRA in floating point until all visible layers are combined.
+    func composite(_ source: UnsafeRawBufferPointer, startingAt firstPixel: Int,
+                   onto target: UnsafeMutableBufferPointer<SIMD4<Float>>, opacity: UInt8) {
+        let layerAlpha = Float(opacity) / 255
+        for index in target.indices {
+            let offset = (firstPixel + index) * 4
+            let alpha = Float(source[offset + 3]) / 255 * layerAlpha
+            if alpha == 0 { continue }
+            let color = SIMD4(Float(source[offset]), Float(source[offset + 1]), Float(source[offset + 2]), 255) / 255
+            let backdrop = target[index]
+            let foreground = color * alpha
+            if self == .normal || backdrop.w == 0 {
+                target[index] = foreground + backdrop * (1 - alpha)
+            } else {
+                let straight = backdrop / backdrop.w
+                let overlap = SIMD4(blend(straight.x, color.x), blend(straight.y, color.y),
+                                    blend(straight.z, color.z), 1)
+                target[index] = backdrop * (1 - alpha) + foreground * (1 - backdrop.w) +
+                    overlap * (backdrop.w * alpha)
+            }
+        }
+    }
+
+    static func storeComposite(_ source: UnsafeBufferPointer<SIMD4<Float>>,
+                               in pixels: UnsafeMutableRawBufferPointer, startingAt firstPixel: Int) {
+        for (index, pixel) in source.enumerated() where pixel.w > 0 {
+            let offset = (firstPixel + index) * 4
+            let straight = pixel / pixel.w
+            pixels[offset] = byte(straight.x)
+            pixels[offset + 1] = byte(straight.y)
+            pixels[offset + 2] = byte(straight.z)
+            pixels[offset + 3] = byte(pixel.w)
+        }
+    }
+
+    private static func byte(_ component: Float) -> UInt8 {
+        UInt8(min(255, max(0, (component * 255).rounded(.toNearestOrEven))))
+    }
 }
 
 enum BGRA8 {

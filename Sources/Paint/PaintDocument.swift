@@ -463,9 +463,7 @@ final class PaintDocument: NSDocument {
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             do {
-                guard let image = stack.flattenedLayer()?.image else { throw CocoaError(.fileWriteUnknown) }
-                let data = try PaintFiles.rasterData(image, as: options.format, quality: options.quality,
-                                                     resolution: stack.resolution)
+                let data = try PaintFiles.rasterData(stack, as: options.format, quality: options.quality)
                 try data.write(to: url, options: .atomic)
             } catch {
                 self?.presentError(error)

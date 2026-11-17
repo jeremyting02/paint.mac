@@ -12,7 +12,7 @@ Run the Mac checks described in the [README](../README.md).
 | Drawing | Brush, pencil, eraser, bucket, seven gradient geometries, color picker, clone stamp, recolor, text, editable line/curve and shape previews, shape presets. Brush-family controls include hardness, spacing, path smoothing, pen-pressure size and selection-edge quality. Paintbrush and Eraser have eight fills. | Compare tip falloff, smoothing, fill patterns, shape rasterization, gradients and live tablet behavior. Text is entered through the toolbar and rendered by Core Text. |
 | Selections | Rectangle with fixed size or ratio and physical units, ellipse, lasso, magic wand, all five combination modes, invert, select all, erase, fill, clipboard outline combining, and transform handles | Compare antialiased edges, fixed-size anchoring, rotation pivot, resampling and modifiers against 5.2. |
 | Documents | New Image with size and DPI, crop, resize, resampling, anchored canvas size, DPI editing, flips, 90° and 180° rotations, clipboard paste variants, flattened copy | Compare resampler output, clipboard behavior against the reference app, and large-document responsiveness. |
-| Layers | Add, delete, select, visibility, opacity and blend modes, reorder, import, duplicate, merge, flatten, layer flips, 180° rotation, and Rotate / Zoom | Compare blended pixels with the 5.2 floating-point compositor and compare perspective and resampling. Document storage limits are 128 layers, 256 MiB of raw layer pixels, and at most 4096 pixels per side and 8,388,608 pixels per canvas. |
+| Layers | Add, delete, select, visibility, opacity and blend modes, floating-point stack compositing, reorder, import, duplicate, merge, flatten, layer flips, 180° rotation, and Rotate / Zoom | Compare compositions in additional ICC profiles and compare Rotate / Zoom perspective and resampling. Document storage limits are 128 layers, 256 MiB of raw layer pixels, and at most 4096 pixels per side and 8,388,608 pixels per canvas. |
 | Adjustments | Auto-Level, Black and White, Brightness / Contrast, Curves, Exposure, Highlights / Shadows, Hue / Saturation, Invert Alpha, Invert Colors, Levels, Posterize, Sepia, Temperature and Tint. Curves uses editable luminosity and RGB curves. Levels shows input and output histograms and supports per-channel ranges and gamma. | Compare reference formulas, spline interpolation, auto-level thresholds, parameter ranges and defaults. |
 | Effects | 5.2 catalog across Artistic, Blurs, Color, Distort, Noise, Object, Photo, Render and Stylize, with selection clipping, preview, cancel, apply and repeat | Compare each filter against reference pixels and capture expected tolerances. The Mac algorithms, parameter dialogs and defaults can differ from Paint.NET. |
 | Files | Layered PDN, flat bitmap import and export, EXIF orientation, PDN resolution metadata, bitmap DPI where supported, RGB ICC preservation and assignment or conversion, native Image I/O capabilities detected at runtime | Add fixtures for older PDN variants and advanced export options. Non-RGB bitmap inputs normalize to sRGB. Non-RGB profiles in PDN and JPEG XR remain unsupported. Gamma-correct resize uses encoded sampling when an ICC profile has no linearized color space. |
@@ -25,6 +25,10 @@ with four-pixel cells, and Square Blur at radius two with default gamma and
 radius four with Gamma Boost −0.50, +0.50, and +1. The edited layers and their
 PNG exports match, including RGB bytes at alpha zero. Other options and
 effects need separate captures.
+
+The sRGB stack fixtures match all 256 pixels per mode for each of the 14 blend
+modes, including RGB at alpha zero. The tests compare the composite, exported
+PNG, and Copy Flattened, including a rectangular clipboard crop.
 
 An 8-pixel opaque Paintbrush dab with antialiasing off matches every byte
 in its 17 × 17 reference region. Hard and soft antialiased dabs are captured

@@ -17,7 +17,9 @@ clipboard. Use **File → Open** for a Paint.NET project or bitmap image.
 New and opened images appear as thumbnail tabs in the current editor window.
 **Save** and **Save As** write `.pdn` projects.
 Saving an opened bitmap creates a separate project. **File → Export** writes a
-flat copy of the visible layers. Its format menu offers the installed macOS
+flat copy of the visible layers. The canvas, export, and Copy Flattened use the
+same floating-point layer compositing, which keeps low-opacity colors from
+being rounded between layers. The export format menu offers the installed macOS
 encoders, including PNG and JPEG. Bitmap support includes TIFF, BMP, GIF, HEIC,
 AVIF, WebP, JPEG XL, DDS, and TGA where macOS provides a decoder. Multiframe
 GIF and TIFF files open as a single image. The checkerboard marks transparent areas.

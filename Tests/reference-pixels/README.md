@@ -86,6 +86,29 @@ built-in Display P3 profile. The embedded profile identifies its license as
 CC0. The test checks all stored pixels, profile bytes, and metadata before
 and after a paint.mac save. [Compact ICC Profiles](https://github.com/saucecontrol/Compact-ICC-Profiles)
 
+## Layer compositing fixtures
+
+`composite-normal.pdn` was generated for this repository using synthetic
+16 × 16 BGRA layers. The bottom three layers contain varied pixel alpha
+and have layer opacities of 255, 171, and 109 respectively. A hidden layer
+and a visible layer at zero opacity sit above them. The first row includes
+pixels with no visible coverage and pixels with very low alpha.
+
+For each blend mode, the middle and top contributing layers use that
+mode, and the base stays Normal. Paint.NET build `5.200.9793.3533` read each
+PDN under Wine. The captures use the output of its document renderer
+(`CreateCompositeSource` with companded sRGB for both compositing and output).
+The captured straight RGBA floats were clamped to [0, 1], rounded to the
+nearest byte with ties to even, and written to RGBA PNGs tagged as sRGB.
+The capture used the reference engine directly because the Wine desktop
+window failed to accept focus. The fixtures contain no third-party imagery.
+
+The regression checks every straight RGBA channel, including RGB at zero
+alpha, in the layer composite, PNG export, and Copy Flattened's PNG on a
+named test pasteboard. It also checks a rectangular clipboard crop and
+confirms the original layered PDN is unchanged. Run these checks in a
+macOS session with access to the pasteboard service.
+
 ## Paintbrush dab fixture
 
 `brush-dabs-input.png` is a 49 × 17 sRGB image with transparent pixels and

@@ -245,9 +245,8 @@ struct LayerStack {
     var canDuplicate: Bool { remainingLayerCapacity > 0 }
     var canMergeDown: Bool { active > 0 }
     var needsBlendComposite: Bool {
-        let overlapping = layers.lazy.filter { $0.isVisible && $0.opacity > 0 }.dropFirst()
-        // Tagged images must blend in the document's space before conversion to the display.
-        return overlapping.contains { colorProfile != nil || $0.blendMode != .normal }
+        let visible = layers.lazy.filter { $0.isVisible && $0.opacity > 0 }
+        return (visible.first?.opacity ?? 255) < 255 || !visible.dropFirst().isEmpty
     }
 
     static func blank(width: Int, height: Int, colorProfile: RGBColorProfile? = nil) -> Self? {
@@ -342,26 +341,39 @@ struct LayerStack {
         if visible.count == 1, let layer = visible.first, layer.opacity == 255 {
             return PaintLayer(name: "Background", image: layer.image, isBackground: true, pdnPixels: layer.pdnPixels)
         }
-        if needsBlendComposite {
-            guard let composite = blendComposite() else { return nil }
-            return PaintLayer(name: "Background", image: composite.image, isBackground: true, pdnPixels: composite.pixels)
-        }
-        let image = activeLayer.image
-        guard let bitmap = Self.makeBitmap(width: image.width, height: image.height,
-                                           colorSpace: workingColorSpace) else { return nil }
-        draw(in: bitmap, rect: CGRect(x: 0, y: 0, width: image.width, height: image.height))
-        guard let flat = bitmap.makeImage() else { return nil }
-        return PaintLayer(name: "Background", image: flat, isBackground: true)
+        guard let composite = blendComposite() else { return nil }
+        return PaintLayer(name: "Background", image: composite.image, isBackground: true, pdnPixels: composite.pixels)
     }
 
-    func blendComposite(preview: CGImage? = nil) -> (image: CGImage, pixels: Data)? {
+    func blendComposite() -> (image: CGImage, pixels: Data)? {
         let image = activeLayer.image
-        var pixels = Data(count: image.width * image.height * 4)
-        for (index, layer) in layers.enumerated() where layer.isVisible && layer.opacity > 0 {
-            let source = index == active ? preview : nil
-            let sourcePixels = if let source { BGRA8.pixels(from: source, in: workingColorSpace) } else { layer.straightPixels }
-            guard let bytes = sourcePixels else { return nil }
-            layer.blendMode.composite(bytes, onto: &pixels, opacity: layer.opacity)
+        let pixelCount = image.width * image.height
+        var sources: [(pixels: Data, mode: LayerBlendMode, opacity: UInt8)] = []
+        for layer in layers where layer.isVisible && layer.opacity > 0 {
+            guard let bytes = layer.straightPixels, bytes.count == pixelCount * 4 else { return nil }
+            sources.append((bytes, layer.blendMode, layer.opacity))
+        }
+        // Transparent results retain the bottom visible layer's RGB, including at zero alpha.
+        var pixels = sources.first?.pixels ?? Data(count: pixelCount * 4)
+        if !sources.isEmpty {
+            // Reuse a bounded working buffer even when the document fills the canvas limit.
+            let blockSize = min(pixelCount, 4096)
+            var block = [SIMD4<Float>](repeating: .zero, count: blockSize)
+            pixels.withUnsafeMutableBytes { output in
+                block.withUnsafeMutableBufferPointer { buffer in
+                    for first in stride(from: 0, to: pixelCount, by: blockSize) {
+                        let count = min(blockSize, pixelCount - first)
+                        let target = UnsafeMutableBufferPointer(start: buffer.baseAddress, count: count)
+                        for index in target.indices { target[index] = .zero }
+                        for source in sources {
+                            source.pixels.withUnsafeBytes {
+                                source.mode.composite($0, startingAt: first, onto: target, opacity: source.opacity)
+                            }
+                        }
+                        LayerBlendMode.storeComposite(UnsafeBufferPointer(target), in: output, startingAt: first)
+                    }
+                }
+            }
         }
         guard let flat = BGRA8.image(from: pixels, width: image.width, height: image.height, colorSpace: workingColorSpace)
         else { return nil }
