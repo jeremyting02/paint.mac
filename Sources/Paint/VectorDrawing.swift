@@ -135,6 +135,12 @@ enum DrawingLinePattern: String, CaseIterable {
     }
 }
 
+enum DrawingLineGeometry: String, CaseIterable {
+    case straight = "Straight"
+    case spline = "Spline"
+    case bezier = "Bézier"
+}
+
 struct DrawingStyle {
     var primary = NSColor.black
     var secondary = NSColor.white
@@ -142,7 +148,7 @@ struct DrawingStyle {
     var antialiased = true
     var shape: DrawingShape = .rectangle
     var fill: DrawingFill = .outline
-    var curve = false
+    var lineGeometry: DrawingLineGeometry = .spline
     var linePattern: DrawingLinePattern = .solid
     var blendMode: LayerBlendMode = .normal
     var cornerRadius: CGFloat = 12
@@ -258,10 +264,26 @@ enum VectorDrawing {
         context.setLineDash(phase: 0, lengths: style.linePattern.lengths.map { $0 * style.width })
         switch self {
         case .line(let points):
-            guard points.count == 4, points[0] != points[3] else { return }
-            context.move(to: points[0])
-            if style.curve { context.addCurve(to: points[3], control1: points[1], control2: points[2]) }
-            else { context.addLine(to: points[3]) }
+            guard points.count == 4, points.dropFirst().contains(where: { $0 != points[0] }) else { return }
+            switch style.lineGeometry {
+            case .straight:
+                context.addLines(between: points)
+            case .spline:
+                context.move(to: points[0])
+                for index in 0..<3 {
+                    let start = points[index], end = points[index + 1]
+                    let previous = points[max(0, index - 1)], next = points[min(3, index + 2)]
+                    // Convert each Catmull–Rom segment to cubic Bézier controls for Core Graphics.
+                    let control1 = CGPoint(x: start.x + (end.x - previous.x) / 6,
+                                           y: start.y + (end.y - previous.y) / 6)
+                    let control2 = CGPoint(x: end.x - (next.x - start.x) / 6,
+                                           y: end.y - (next.y - start.y) / 6)
+                    context.addCurve(to: end, control1: control1, control2: control2)
+                }
+            case .bezier:
+                context.move(to: points[0])
+                context.addCurve(to: points[3], control1: points[1], control2: points[2])
+            }
             context.strokePath()
         case .shape(let rect, let angle):
             guard !rect.isEmpty else { return }

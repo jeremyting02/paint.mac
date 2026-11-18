@@ -19,6 +19,10 @@ Run the Mac checks described in the [README](../README.md).
 | Files | Layered PDN, flat bitmap import and export, EXIF orientation, PDN resolution metadata, bitmap DPI where supported, RGB ICC preservation and assignment or conversion, native Image I/O capabilities detected at runtime | Add fixtures for older PDN variants and advanced export options. Non-RGB bitmap inputs normalize to sRGB. Non-RGB profiles in PDN and JPEG XR remain unsupported. Gamma-correct resize uses encoded sampling when an ICC profile has no linearized color space. |
 | System and performance | macOS document windows, native keyboard shortcuts and a per-document undo history | Add disk-backed history, large-image benchmarks, pressure and accessibility verification, recovery, and an installation check. |
 
+Line/Curve follows the [documented handle behavior](https://paint.net/doc/latest/LineCurveTool.html)
+for Straight, Spline, and Bézier. paint.mac uses a Catmull–Rom spline.
+Exact spline geometry and raster coverage still need comparison against 5.2.
+
 The [Paint.NET 5.2 reference fixtures](../Tests/reference-pixels/README.md)
 verify exact output across all 1,024 pixels per case for Black and White,
 Invert Colors, Posterize at four RGBA levels, three sampler pairs for Pixelate

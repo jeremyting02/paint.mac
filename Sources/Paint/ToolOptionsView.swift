@@ -90,7 +90,7 @@ final class ToolOptionsView: NSStackView, NSComboBoxDelegate {
         tolerance.widthAnchor.constraint(equalToConstant: 88).isActive = true
         configure(shape, "Shape", DrawingShape.allCases.map(\.rawValue))
         configure(fill, "Shape Drawing Mode", DrawingFill.allCases.map(\.rawValue))
-        configure(curve, "Line Geometry", ["Straight", "Bézier"])
+        configure(curve, "Line Geometry", DrawingLineGeometry.allCases.map(\.rawValue))
         configure(linePattern, "Line Pattern", DrawingLinePattern.allCases.map(\.rawValue))
         configure(vectorBlend, "Drawing Blend Mode", LayerBlendMode.allCases.map(\.title))
         configure(cornerRadius, "Corner Radius", cornerSizes.map { "Corner \($0) px" })
@@ -184,7 +184,7 @@ final class ToolOptionsView: NSStackView, NSComboBoxDelegate {
         fill.isHidden = tool != .shapes
         cornerRadius.isHidden = tool != .shapes || canvas.drawingStyle.shape != .roundedRectangle
         curve.isHidden = tool != .lineCurve
-        curve.selectItem(at: canvas.drawingStyle.curve ? 1 : 0)
+        curve.selectItem(withTitle: canvas.drawingStyle.lineGeometry.rawValue)
         linePattern.isHidden = tool != .lineCurve && tool != .shapes
         vectorBlend.isHidden = !tool.usesVectorDrawing || tool == .text
         smoothing.isHidden = !tool.usesVectorDrawing || tool == .text
@@ -375,7 +375,7 @@ final class ToolOptionsView: NSStackView, NSComboBoxDelegate {
             var style = canvas.drawingStyle
             style.shape = DrawingShape.allCases[shape.indexOfSelectedItem]
             style.fill = DrawingFill.allCases[fill.indexOfSelectedItem]
-            style.curve = curve.indexOfSelectedItem == 1
+            style.lineGeometry = DrawingLineGeometry.allCases[curve.indexOfSelectedItem]
             style.linePattern = DrawingLinePattern.allCases[linePattern.indexOfSelectedItem]
             style.blendMode = LayerBlendMode.allCases[vectorBlend.indexOfSelectedItem]
             style.cornerRadius = CGFloat(cornerSizes[cornerRadius.indexOfSelectedItem])

@@ -58,18 +58,35 @@ struct DrawingToolTests {
         #expect(stroke.preview?.straightPixels == Data([255, 0, 0, 128, 0, 255, 0, 255]))
     }
 
-    @Test func testCurveUsesControlPointsAndRebuildsFromLayer() throws {
+    @Test func testLineGeometryReinterpretsTheSameFourHandles() throws {
         let layer = try transparentLayer(width: 24, height: 24)
-        let points = [CGPoint(x: 2, y: 2), CGPoint(x: 5, y: 20), CGPoint(x: 18, y: 20), CGPoint(x: 21, y: 2)]
+        let points = [CGPoint(x: 2.5, y: 2.5), CGPoint(x: 5.5, y: 20.5),
+                      CGPoint(x: 17.5, y: 20.5), CGPoint(x: 20.5, y: 2.5)]
         let drawing = VectorDrawing.line(points)
         var style = DrawingStyle()
         style.width = 2
-        let line = try #require(drawing.applying(to: layer, selection: nil, style: style))
-        style.curve = true
-        let curve = try #require(drawing.applying(to: layer, selection: nil, style: style))
-        #expect(line.straightPixels != curve.straightPixels)
-        style.curve = false
-        #expect(drawing.applying(to: layer, selection: nil, style: style)?.straightPixels == line.straightPixels)
+        #expect(style.lineGeometry == .spline)
+        let spline = try #require(drawing.applying(to: layer, selection: nil, style: style)?.straightPixels)
+        style.lineGeometry = .straight
+        let straight = try #require(drawing.applying(to: layer, selection: nil, style: style)?.straightPixels)
+        style.lineGeometry = .bezier
+        let bezier = try #require(drawing.applying(to: layer, selection: nil, style: style)?.straightPixels)
+        func alpha(in pixels: Data, at point: CGPoint) -> UInt8 {
+            let row = 23 - Int(point.y)
+            return pixels[(row * 24 + Int(point.x)) * 4 + 3]
+        }
+        for point in points {
+            #expect(alpha(in: spline, at: point) > 0)
+            #expect(alpha(in: straight, at: point) > 0)
+        }
+        for point in points[1...2] {
+            #expect(alpha(in: bezier, at: point) == 0)
+        }
+        let aboveStraightSegment = CGPoint(x: 11.5, y: 22.5)
+        #expect(alpha(in: spline, at: aboveStraightSegment) > 0)
+        #expect(alpha(in: straight, at: aboveStraightSegment) == 0)
+        style.lineGeometry = .spline
+        #expect(drawing.applying(to: layer, selection: nil, style: style)?.straightPixels == spline)
         #expect(nil == layer.straightPixels?.first(where: { $0 != 0 }))
     }
 

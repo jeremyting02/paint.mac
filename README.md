@@ -64,8 +64,10 @@ Control-click or Option-click to set the source, then drag elsewhere to paint
 with the copied pixels. **Recolor** replaces colors near the secondary color
 with the primary color. Right-drag swaps the colors.
 
-With **Line/Curve**, drag the endpoints to place a line and drag either
-interior control point to bend it.
+With **Line/Curve**, drag to place a line, then move any of its four handles.
+**Spline** is the default and bends the curve through each handle. Choose
+**Straight** to connect them with straight segments or **Bézier** to use the
+two interior handles to steer the curve between its endpoints.
 Drag the four-way handle near the endpoint to move the entire line.
 **Shapes** offers preset outlines, solid fills, and two-color outline-and-fill
 drawing. Drag inside an editable shape or use its four-way handle to move it.

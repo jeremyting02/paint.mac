@@ -2267,9 +2267,6 @@ private extension CanvasView {
         let point = imagePoint(location)
         if let draft = drawingDraft, let action = drawingAction(at: location, geometry: draft.geometry,
                                                                 width: stack.activeLayer.image.width, secondary: secondary) {
-            if case .line = draft.geometry, case .handle(let index) = action, index == 1 || index == 2 {
-                drawingStyle.curve = true
-            }
             drawingDrag = (point, action, draft.geometry)
             focusTextInput()
             updateCanvasCursor(at: location)
@@ -2429,9 +2426,6 @@ private extension CanvasView {
         case .line(var points):
             if let handle {
                 points[handle] = points[handle] + delta
-                if !drawingStyle.curve {
-                    points = lineControls(from: points[0], to: points[3])
-                }
             } else {
                 if shift {
                     let angle = (atan2(delta.y, delta.x) / (.pi / 12)).rounded() * .pi / 12
