@@ -53,6 +53,68 @@ struct MetalMovePreviewTests {
         #expect(!surface.isHidden)
     }
 
+    @MainActor @Test func brushFallbackRepaintsTheViewportBeforeHidingMetal() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        _ = NSApplication.shared
+        let width = 384, height = 288, count = width * height * 4
+        let white = Data(repeating: 255, count: count)
+        let clear = Data(count: count)
+        let bottom = PaintLayer(name: "Background", image: try #require(BGRA8.image(from: white, width: width, height: height)),
+                                pdnPixels: white)
+        let top = PaintLayer(name: "Layer 1", image: try #require(BGRA8.image(from: clear, width: width, height: height)),
+                             pdnPixels: clear)
+        let document = PaintDocument()
+        try document.read(from: PDNFile.write(LayerStack(layers: [bottom, top], active: 1)), ofType: "Paint.NET Project")
+        document.showWindows()
+        defer { document.close() }
+        let editor = try #require(document.editor)
+        editor.layoutSubtreeIfNeeded()
+        let canvas = editor.canvas
+        canvas.setZoom(100)
+        canvas.updateViewport()
+        let window = try #require(canvas.window)
+        canvas.needsDisplay = true
+        window.displayIfNeeded()
+        canvas.display()
+        let surface = try #require(canvas.subviews.first { $0 is MetalCanvasSurface })
+        #expect(!surface.isHidden)
+
+        canvas.tool = .pencil
+        let viewport = canvas.visibleRect
+        let image = canvas.canvasImageRect
+        let stroke = CGPoint(x: image.midX + 10, y: image.midY + 10)
+        func event(_ type: NSEvent.EventType) throws -> NSEvent {
+            try #require(NSEvent.mouseEvent(with: type, location: canvas.convert(stroke, to: nil),
+                                           modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                           context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        canvas.mouseDown(with: try event(.leftMouseDown))
+        canvas.usesMetalViewportPreview = false  // Force the same handoff as a failed Metal frame.
+        let dirty = CGRect(x: stroke.x - 6, y: stroke.y - 6, width: 12, height: 12)
+        let viewportWidth = Int(ceil(viewport.width)), viewportHeight = Int(ceil(viewport.height))
+        let bytes = try #require(BGRA8.render(width: viewportWidth, height: viewportHeight) { context in
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            context.translateBy(x: -viewport.minX, y: -viewport.minY)
+            context.saveGState()
+            context.clip(to: dirty)
+            canvas.draw(dirty)
+            #expect(!surface.isHidden)
+            context.restoreGState()
+
+            canvas.draw(viewport)
+            #expect(surface.isHidden)
+        })
+        let x = Int(image.minX + image.width / 4 - viewport.minX)
+        let y = viewportHeight - 1 - Int(image.minY + image.height / 4 - viewport.minY)
+        let offset = (y * viewportWidth + x) * 4
+        #expect(Array(bytes[offset..<(offset + 4)]) == [255, 255, 255, 255])
+        canvas.mouseUp(with: try event(.leftMouseUp))
+        #expect(document.stack?.layers[0].straightPixels == white)
+        #expect(document.stack?.layers[1].straightPixels != clear)
+    }
+
     @Test func viewportUsesTheLiveLayerReplacementAndCanRenderAnEmptyStack() throws {
         guard MTLCreateSystemDefaultDevice() != nil else { return }
         let width = 16, height = 8
@@ -75,6 +137,26 @@ struct MetalMovePreviewTests {
         let transparent = try #require(MetalMovePreview(stack: LayerStack(layers: [layer], active: 0)))
         let empty = try #require(transparent.renderViewport(in: bounds, size: bounds.size))
         #expect(BGRA8.pixels(from: empty) == Data(count: pixels.count))
+    }
+
+    @Test func metalBrushPreviewKeepsTheBackgroundUnderTransparentPixels() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        let width = 32, height = 24
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let white = Data(repeating: 255, count: width * height * 4)
+        let clear = Data(count: white.count)
+        let bottom = PaintLayer(name: "Background", image: try #require(BGRA8.image(from: white, width: width, height: height)),
+                                pdnPixels: white)
+        let top = PaintLayer(name: "Layer 1", image: try #require(BGRA8.image(from: clear, width: width, height: height)),
+                             pdnPixels: clear)
+        let renderer = try #require(MetalMovePreview(stack: LayerStack(layers: [bottom, top], active: 1)))
+        let active = try #require(renderer.makeActivePixels(from: clear))
+        active.update(Data([0, 0, 0, 255]), in: CGRect(x: 3, y: 2, width: 1, height: 1))
+        let preview = try #require(renderer.renderViewport(in: bounds, size: bounds.size, activePixels: active))
+        var expected = white
+        let offset = (2 * width + 3) * 4
+        expected.replaceSubrange(offset..<(offset + 4), with: [0, 0, 0, 255])
+        #expect(BGRA8.pixels(from: preview) == expected)
     }
 
     @MainActor @Test func oneSurfacePresentsEditsAcrossTheCanvasEdge() throws {

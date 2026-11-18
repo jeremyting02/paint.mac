@@ -1,10 +1,19 @@
 import CoreGraphics
 import Foundation
 import Metal
+import OSLog
 import QuartzCore
 
 /// Renders a committed stack or floating move. SelectedPixelsTransform still owns document edits.
 final class MetalMovePreview {
+    static let log = Logger(subsystem: "local.paintmac.editor", category: "MetalCanvas")
+
+    enum Presentation {
+        case submitted
+        case noDrawable
+        case encodingFailed
+    }
+
     /// A live replacement of the active layer. Edits update this buffer between presents.
     final class ActivePixels {
         fileprivate let buffer: MTLBuffer
@@ -283,18 +292,25 @@ final class MetalMovePreview {
 
     func present(in layer: CAMetalLayer, region: CGRect, size: CGSize, by transform: CGAffineTransform,
                  copy: Bool, sampling: MoveResampler.Mode, activePixels: ActivePixels?, checkerboard: SIMD4<Float>,
-                 completed: @escaping @Sendable (Bool) -> Void) -> Bool {
-        layer.device = engine.device
-        layer.colorspace = colorSpace
+                 completed: @escaping @Sendable (Bool) -> Void) -> Presentation {
+        if layer.device !== engine.device { layer.device = engine.device }
+        if layer.colorspace != colorSpace { layer.colorspace = colorSpace }
         if layer.drawableSize != size { layer.drawableSize = size }
-        guard let drawable = layer.nextDrawable(),
-              let command = encodeViewport(to: drawable.texture, region: region, transform: transform, copy: copy,
+        guard let drawable = layer.nextDrawable() else { return .noDrawable }
+        guard let command = encodeViewport(to: drawable.texture, region: region, transform: transform, copy: copy,
                                            sampling: sampling, activePixels: activePixels,
-                                           checkerboard: checkerboard) else { return false }
+                                           checkerboard: checkerboard) else { return .encodingFailed }
         command.present(drawable)
-        command.addCompletedHandler { completed($0.status == .completed) }
+        command.addCompletedHandler { buffer in
+            let success = buffer.status == .completed
+            if !success {
+                let reason = buffer.error.map { String(describing: $0) } ?? "status \(buffer.status.rawValue)"
+                Self.log.error("Canvas command failed: \(reason, privacy: .public)")
+            }
+            completed(success)
+        }
         command.commit()
-        return true
+        return .submitted
     }
 
     // Draw the same viewport offscreen for bitmaps, tests, and end-to-end comparisons.

@@ -338,6 +338,7 @@ final class CanvasView: NSView {
     private var metalStrokeDirty = CGRect.null
     private var metalStrokeRevision = 0
     private var metalPresentationFailed = false
+    private var fallbackRepaintScheduled = false
     var cachedMetalComposite: MetalMovePreview? {
         guard layerPreview == nil, metalStack?.revision == document?.stackRevision else { return nil }
         return metalStack?.renderer
@@ -1642,11 +1643,28 @@ final class CanvasView: NSView {
         } else {
             presents = false
         }
-        if onScreen && !presents {
-            metalCanvas?.clearFrame()
-            metalOverlay?.isHidden = true
+        let revealsFallback = onScreen && !presents && metalCanvas?.isHidden == false
+        let viewportImage = rect.intersection(visibleRect)
+        if revealsFallback && !viewportImage.isEmpty && !coversFallbackViewport(viewportImage, dirtyRect: dirtyRect) {
+            // AppKit clips this draw to the dirty area. Keep the prior Metal frame until the
+            // software backing has a complete viewport, including tiles untouched by the edit.
+            if !fallbackRepaintScheduled {
+                fallbackRepaintScheduled = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.fallbackRepaintScheduled = false
+                    self.setNeedsDisplay(self.visibleRect)
+                }
+            }
+            return
         }
-        defer { if !presents { drawCanvasDecorations(stack.activeLayer, in: context) } }
+        defer {
+            if !presents { drawCanvasDecorations(stack.activeLayer, in: context) }
+            if revealsFallback {
+                metalCanvas?.clearFrame()
+                metalOverlay?.isHidden = true
+            }
+        }
         guard !visible.isEmpty else { return }
 
         context.saveGState()
@@ -1674,6 +1692,16 @@ final class CanvasView: NSView {
             drawStack(stack, visible: visible, brush: brush, in: context)
         }
         context.restoreGState()
+    }
+
+    private func coversFallbackViewport(_ viewport: CGRect, dirtyRect: CGRect) -> Bool {
+        guard dirtyRect.contains(viewport) else { return false }
+        // The dirty rectangle may be the bounding box of several disjoint AppKit clips.
+        var rects: UnsafePointer<NSRect>?
+        var count = 0
+        getRectsBeingDrawn(&rects, count: &count)
+        guard let rects, count > 0 else { return true }
+        return UnsafeBufferPointer(start: rects, count: count).contains { $0.contains(viewport) }
     }
 
     private func drawCanvasDecorations(_ layer: PaintLayer, in context: CGContext) {
@@ -1755,7 +1783,10 @@ final class CanvasView: NSView {
         } else {
             return false
         }
-        guard let renderer else { return false }
+        guard let renderer else {
+            MetalMovePreview.log.error("Could not prepare the Metal canvas renderer")
+            return false
+        }
         if metalCanvas == nil {
             let surface = MetalCanvasSurface(frame: rect)
             surface.wantsLayer = true
