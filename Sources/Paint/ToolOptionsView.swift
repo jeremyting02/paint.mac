@@ -1,6 +1,6 @@
 import AppKit
 
-final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
+final class ToolOptionsView: NSStackView, NSComboBoxDelegate {
     private weak var canvas: CanvasView?
     private let rectangleSizing = NSPopUpButton()
     private let rectangleWidth = NSTextField()
@@ -33,16 +33,28 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     private let vectorBlend = NSPopUpButton()
     private let cornerRadius = NSPopUpButton()
     private let smoothing = NSButton(checkboxWithTitle: "Antialias", target: nil, action: nil)
-    private let text = NSTextField()
     private let font = NSPopUpButton()
-    private let fontSize = NSPopUpButton()
+    private let fontSize = NSComboBox()
+    private let fontMetric = NSPopUpButton()
+    private let smaller = NSButton(title: "−", target: nil, action: nil)
+    private let larger = NSButton(title: "+", target: nil, action: nil)
+    private let textRendering = NSPopUpButton()
     private let textAlignment = NSPopUpButton()
-    private let bold = NSButton(checkboxWithTitle: "Bold", target: nil, action: nil)
-    private let italic = NSButton(checkboxWithTitle: "Italic", target: nil, action: nil)
+    private let textClipping = NSPopUpButton()
+    private let textBlend = NSPopUpButton()
+    private let textAntialias = EditorView.icon("waveform.path", label: "Antialias Text")
+    private let bold = EditorView.icon("bold", label: "Bold")
+    private let italic = EditorView.icon("italic", label: "Italic")
+    private let underline = EditorView.icon("underline", label: "Underline")
+    private let strikeout = EditorView.icon("strikethrough", label: "Strikeout")
     private let sampleSizes = [1, 3, 5, 11, 31, 51]
     private let fontSizes = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 80, 96, 128]
+    private let fontSizeRange = 1.0...4096.0
     private let cornerSizes = [0, 2, 4, 8, 12, 16, 24, 32, 48, 64]
-    private let systemFontTitle = "System Font"
+    private var textControls: [NSView] {
+        [font, fontSize, smaller, larger, fontMetric, bold, italic, underline, strikeout,
+         textRendering, textAlignment, textAntialias, textBlend, textClipping]
+    }
 
     func configure(canvas: CanvasView) {
         self.canvas = canvas
@@ -83,42 +95,57 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         configure(vectorBlend, "Drawing Blend Mode", LayerBlendMode.allCases.map(\.title))
         configure(cornerRadius, "Corner Radius", cornerSizes.map { "Corner \($0) px" })
         cornerRadius.selectItem(withTitle: "Corner 12 px")
-        configure(font, "Font", [systemFontTitle] + NSFontManager.shared.availableFonts.filter { !$0.hasPrefix(".") }.sorted())
-        configure(fontSize, "Font Size", fontSizes.map { "\($0) px" })
-        fontSize.selectItem(withTitle: "16 px")
+        let fonts = NSFontManager.shared.availableFonts.filter { !$0.hasPrefix(".") }
+        configure(font, "Font", Set(fonts + [canvas.drawingStyle.fontName]).sorted())
+        font.selectItem(withTitle: canvas.drawingStyle.fontName)
+        fontSize.addItems(withObjectValues: fontSizes.map(String.init))
+        fontSize.setAccessibilityLabel("Font Size")
+        fontSize.toolTip = "Font Size"
+        fontSize.delegate = self
+        fontSize.target = self
+        fontSize.action = #selector(change(_:))
+        fontSize.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        refreshFontSize()
+        configure(fontMetric, "Font Size Metric", ["Points", "Fixed 96"])
+        fontMetric.toolTip = "Points (image DPI) or Fixed (96 DPI)"
+        configure(textRendering, "Text Rendering", TextRendering.allCases.map(\.rawValue))
+        textRendering.selectItem(withTitle: canvas.drawingStyle.textRendering.rawValue)
         configure(textAlignment, "Text Alignment", TextAlignment.allCases.map(\.rawValue))
-        for button in [brushAntialias, brushSmoothing, brushPressure, smoothing, bold, italic] {
+        configureCompactPopup(textAlignment, symbols: ["text.alignleft", "text.aligncenter", "text.alignright"])
+        configure(textClipping, "Text Selection Clipping", ["Smooth Selection", "Pixelated Selection"])
+        configure(textBlend, "Text Blend Mode", BrushOptions.Blend.choices.map(\.title))
+        configureCompactPopup(textClipping, symbols: ["square.dashed", "checkerboard.rectangle"])
+        configureCompactPopup(textBlend, symbols: BrushOptions.Blend.choices.map {
+            $0 == .overwrite ? "square.fill" : "square.on.square"
+        })
+        for button in [bold, italic, underline, strikeout, textAntialias] { button.setButtonType(.pushOnPushOff) }
+        textAntialias.state = .on
+        for (button, label) in [(smaller, "Decrease Font Size"), (larger, "Increase Font Size")] {
+            button.bezelStyle = .texturedRounded
+            button.toolTip = label
+            button.setAccessibilityLabel(label)
+        }
+        for button in [brushAntialias, brushSmoothing, brushPressure, smoothing, bold, italic, underline, strikeout,
+                       smaller, larger, textAntialias] {
             button.target = self
             button.action = #selector(change(_:))
         }
         smoothing.state = .on
-        text.delegate = self
-        text.target = self
-        text.action = #selector(finishText(_:))
-        text.placeholderString = "Text"
-        text.setAccessibilityLabel("Text to draw")
-        text.widthAnchor.constraint(equalToConstant: 128).isActive = true
-        font.widthAnchor.constraint(lessThanOrEqualToConstant: 140).isActive = true
-        for view in [rectangleSizing, rectangleWidth, rectangleHeight, rectangleUnit, moveSampling, brushPressure,
-                     hardnessLabel, hardness, spacingLabel, brushSpacing, brushSmoothing,
-                     brushPattern, brushAntialias, brushBlend, brushClipping,
-                     sampleSource, sampleSize, after, gradientShape, gradientRepeat, gradientMode, gradientBlend,
-                     toleranceLabel, tolerance, shape, fill, cornerRadius, curve, linePattern, vectorBlend,
-                     smoothing, text, font, fontSize, textAlignment, bold, italic] as [NSView] {
-            addArrangedSubview(view)
-        }
-        canvas.editText = { [weak self] in
-            guard let self else { return }
-            text.stringValue = ""
-            update()
-            text.selectText(nil)
-        }
+        font.widthAnchor.constraint(lessThanOrEqualToConstant: 104).isActive = true
+        let otherControls: [NSView] = [rectangleSizing, rectangleWidth, rectangleHeight, rectangleUnit,
+                                      moveSampling, brushPressure, hardnessLabel, hardness, spacingLabel,
+                                      brushSpacing, brushSmoothing, brushPattern, brushAntialias, brushBlend,
+                                      brushClipping, sampleSource, sampleSize, after, gradientShape, gradientRepeat,
+                                      gradientMode, gradientBlend, toleranceLabel, tolerance, shape, fill,
+                                      cornerRadius, curve, linePattern]
+        for view in otherControls + textControls + [smoothing, vectorBlend] { addArrangedSubview(view) }
         update()
     }
 
     func update() {
         guard let canvas else { return }
         let tool = canvas.tool
+        spacing = tool == .text ? 3 : 6
         let tip = tool.usesBrushTip
         let options = canvas.brushOptions
         for control in [hardnessLabel, hardness, spacingLabel, brushSpacing, brushSmoothing, brushAntialias] as [NSView] {
@@ -159,25 +186,30 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         curve.isHidden = tool != .lineCurve
         curve.selectItem(at: canvas.drawingStyle.curve ? 1 : 0)
         linePattern.isHidden = tool != .lineCurve && tool != .shapes
-        vectorBlend.isHidden = !tool.usesVectorDrawing
-        smoothing.isHidden = !tool.usesVectorDrawing
-        for view in [text, font, fontSize, textAlignment, bold, italic] as [NSView] { view.isHidden = tool != .text }
-        text.isEnabled = canvas.hasPendingDrawing
+        vectorBlend.isHidden = !tool.usesVectorDrawing || tool == .text
+        smoothing.isHidden = !tool.usesVectorDrawing || tool == .text
+        for view in textControls { view.isHidden = tool != .text }
         isHidden = !tool.usesRasterDrawing && tool != .colorPicker && tool != .gradient &&
             tool != .rectangleSelect && tool != .moveSelectedPixels && !tool.usesVectorDrawing
     }
 
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSTextField else { return }
-        if field === text {
-            canvas?.drawingStyle.text = text.stringValue
+        if field === fontSize {
+            updateFontSize(from: field.stringValue)
         } else if field === rectangleWidth || field === rectangleHeight {
             updateRectangleDimension(field)
         }
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField, field === rectangleWidth || field === rectangleHeight else { return }
+        guard let field = obj.object as? NSTextField else { return }
+        if field === fontSize {
+            updateFontSize(from: field.stringValue)
+            refreshFontSize()
+            return
+        }
+        guard field === rectangleWidth || field === rectangleHeight else { return }
         updateRectangleDimension(field)
         refreshRectangleDimensions()
     }
@@ -202,17 +234,40 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
             commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            if control === text { finishText(nil) }
-            else { window?.makeFirstResponder(canvas) }
+            if control === fontSize {
+                if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                    updateFontSize(from: textView.string)
+                } else {
+                    textView.string = formattedFontSize
+                }
+                if canvas?.hasPendingText == true { canvas?.focusTextInput() }
+                else { window?.makeFirstResponder(canvas) }
+            } else {
+                window?.makeFirstResponder(canvas)
+            }
             return true
         }
         return false
     }
 
-    @objc private func finishText(_ sender: Any?) {
-        guard let canvas else { return }
-        canvas.finishLiveEdit()
-        window?.makeFirstResponder(canvas)
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        guard notification.object as? NSComboBox === fontSize,
+              let value = fontSize.objectValueOfSelectedItem as? String else { return }
+        updateFontSize(from: value)
+    }
+
+    private var formattedFontSize: String {
+        Double(canvas?.drawingStyle.fontSize ?? 12).formatted(.number.grouping(.never).precision(.fractionLength(0...4)))
+    }
+
+    private func refreshFontSize() {
+        fontSize.stringValue = formattedFontSize
+    }
+
+    private func updateFontSize(from value: String) {
+        guard let canvas, let size = (try? Double(value, format: .number)) ?? Double(value),
+              fontSizeRange.contains(size), canvas.drawingStyle.fontSize != size else { return }
+        canvas.drawingStyle.fontSize = size
     }
 
     private func configure(_ menu: NSPopUpButton, _ label: String, _ titles: [String]) {
@@ -221,6 +276,13 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
         menu.toolTip = label
         menu.target = self
         menu.action = #selector(change(_:))
+    }
+
+    private func configureCompactPopup(_ menu: NSPopUpButton, symbols: [String]) {
+        for (item, symbol) in zip(menu.itemArray, symbols) {
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.title)
+        }
+        menu.imagePosition = .imageOnly
     }
 
     private func configureBrushPercent(_ field: NSTextField, label: String, range: ClosedRange<Int>) {
@@ -288,6 +350,27 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
                 blendMode: LayerBlendMode.allCases[gradientBlend.indexOfSelectedItem]
             )
             update()
+        } else if canvas.tool == .text {
+            var style = canvas.drawingStyle
+            style.fontName = font.titleOfSelectedItem ?? style.fontName
+            style.textMetric = TextMetric.allCases[fontMetric.indexOfSelectedItem]
+            style.textRendering = TextRendering.allCases[textRendering.indexOfSelectedItem]
+            style.alignment = TextAlignment.allCases[textAlignment.indexOfSelectedItem]
+            style.bold = bold.state == .on
+            style.italic = italic.state == .on
+            style.underline = underline.state == .on
+            style.strikeout = strikeout.state == .on
+            style.antialiased = textAntialias.state == .on
+            style.textAntialiasedSelection = textClipping.indexOfSelectedItem == 0
+            style.textBlend = BrushOptions.Blend.choices[textBlend.indexOfSelectedItem]
+            if sender === smaller || sender === larger {
+                let step = sender === smaller ? -1.0 : 1.0
+                style.fontSize = min(fontSizeRange.upperBound, max(fontSizeRange.lowerBound, style.fontSize + step))
+            }
+            canvas.drawingStyle = style
+            if sender === fontSize { updateFontSize(from: fontSize.stringValue) }
+            refreshFontSize()
+            canvas.focusTextInput()
         } else {
             var style = canvas.drawingStyle
             style.shape = DrawingShape.allCases[shape.indexOfSelectedItem]
@@ -297,12 +380,6 @@ final class ToolOptionsView: NSStackView, NSTextFieldDelegate {
             style.blendMode = LayerBlendMode.allCases[vectorBlend.indexOfSelectedItem]
             style.cornerRadius = CGFloat(cornerSizes[cornerRadius.indexOfSelectedItem])
             style.antialiased = smoothing.state == .on
-            style.fontSize = CGFloat(fontSizes[fontSize.indexOfSelectedItem])
-            style.fontName = font.titleOfSelectedItem == systemFontTitle
-                ? NSFont.systemFont(ofSize: style.fontSize).fontName : font.titleOfSelectedItem ?? ""
-            style.alignment = TextAlignment.allCases[textAlignment.indexOfSelectedItem]
-            style.bold = bold.state == .on
-            style.italic = italic.state == .on
             canvas.drawingStyle = style
             update()
         }

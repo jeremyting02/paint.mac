@@ -132,6 +132,23 @@ enum LayerBlendMode: Int, CaseIterable {
 }
 
 enum BGRA8 {
+    static func overwrite(_ color: SIMD4<UInt8>, coverage: Int, pixel: Int = 0,
+                          in target: UnsafeMutableRawBufferPointer) {
+        let foreground = Int(color.w) * coverage
+        let backdrop = Int(target[pixel + 3]) * (255 - coverage)
+        let total = foreground + backdrop
+        for channel in 0..<3 {
+            let value = Int(color[channel])
+            let old = Int(target[pixel + channel])
+            if total == 0 {
+                target[pixel + channel] = UInt8((value * coverage + old * (255 - coverage) + 127) / 255)
+            } else {
+                target[pixel + channel] = UInt8((value * foreground + old * backdrop + total / 2) / total)
+            }
+        }
+        target[pixel + 3] = UInt8((total + 127) / 255)
+    }
+
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
     private static let byteOrder = CGBitmapInfo.byteOrder32Little.rawValue
     private static let straightFormat = CGBitmapInfo(rawValue: byteOrder | CGImageAlphaInfo.first.rawValue)

@@ -66,10 +66,15 @@ with the primary color. Right-drag swaps the colors.
 
 With **Line/Curve**, drag the endpoints to place a line and drag either
 interior control point to bend it. **Shapes** offers preset outlines, solid
-fills, and two-color outline-and-fill drawing. For **Text**, click the image
-to place the text, then type in the contextual toolbar field. Change the font,
-alignment, and style before choosing **Finish** to apply the drawing to the
-active layer as one undo step.
+fills, and two-color outline-and-fill drawing. For **Text**, press **T**, click
+the image, and type at the canvas caret. **Return** starts a new line. Drag
+the four-way handle below the caret to move the text, or hold it and press an
+arrow key to move one pixel. Use the toolbar to change the font, fractional
+size, style, alignment, rendering, blend, or selection clipping while editing.
+Points follow the image DPI, and Fixed (96 DPI) keeps the size consistent
+across images. Changing the Primary color updates the draft. The **Overwrite**
+blend mode lets transparent text erase pixels along the glyphs. Press **Esc**
+or choose **Finish** to rasterize the text on the active layer as one undo step.
 
 Choose **Rectangle Select** or **Ellipse Select** and drag to select an area.
 Hold **Shift** to draw a square or circle. With Ellipse Select the drag

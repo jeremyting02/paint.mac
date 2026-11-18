@@ -3,6 +3,10 @@ import AppKit
 extension PaintDocument {
     @objc func selectAllPixels(_ sender: Any?) {
         guard let canvas = editor?.canvas else { return }
+        if let input = editingTextView {
+            input.selectAll(sender)
+            return
+        }
         canvas.finishSelection()
         guard let image else { return }
         let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
@@ -21,6 +25,10 @@ extension PaintDocument {
 
     @objc func eraseSelectedPixels(_ sender: Any?) {
         guard let canvas = editor?.canvas else { return }
+        if let input = editingTextView {
+            input.deleteForward(sender)
+            return
+        }
         canvas.finishSelection()
         guard let layer = stack?.activeLayer, layer.isVisible, let outline = canvas.selectionOutline,
               let pixels = layer.straightPixels else { return }
@@ -41,6 +49,10 @@ extension PaintDocument {
 
     @objc func fillSelectedPixels(_ sender: Any?) {
         guard let canvas = editor?.canvas else { return }
+        if let input = editingTextView {
+            input.deleteBackward(sender)
+            return
+        }
         canvas.finishSelection()
         guard let layer = stack?.activeLayer, layer.isVisible, let outline = canvas.selectionOutline,
               let clipped = outline.clipped(to: CGRect(x: 0, y: 0, width: layer.image.width, height: layer.image.height))

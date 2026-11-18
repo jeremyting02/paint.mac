@@ -456,19 +456,7 @@ final class RasterDrawing {
             let source = SIMD4(blue, green, red, alpha)
             withUnsafeBytes(of: source) { mode.composite($0, onto: target, opacity: UInt8(coverage)) }
         case .overwrite:
-            let foreground = Int(alpha) * coverage
-            let backdrop = Int(target[3]) * (255 - coverage)
-            let total = foreground + backdrop
-            let source = SIMD3(blue, green, red)
-            for channel in 0..<3 {
-                let value = Int(source[channel]), old = Int(target[channel])
-                target[channel] = if total == 0 {
-                    UInt8((value * coverage + old * (255 - coverage) + 127) / 255)
-                } else {
-                    UInt8((value * foreground + old * backdrop + total / 2) / total)
-                }
-            }
-            target[3] = UInt8((total + 127) / 255)
+            BGRA8.overwrite(SIMD4(blue, green, red, alpha), coverage: coverage, in: target)
         }
     }
 

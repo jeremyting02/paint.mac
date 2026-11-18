@@ -384,6 +384,7 @@ final class EditorView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         applyCrop.isEnabled = canvas.cropRect != nil
         let supportsFinish = [CanvasView.Tool.gradient, .text, .lineCurve, .shapes].contains(canvas.tool)
         finish.isHidden = !canvas.tool.transformsSelection && !canvas.tool.usesFlood && !supportsFinish
+        finish.toolTip = canvas.tool == .text ? "Finish text (Esc)" : "Finish editing and keep the selection"
         finish.isEnabled = canvas.hasPendingMove || canvas.hasPendingFloodEdit || canvas.hasPendingGradient || canvas.hasPendingDrawing
         toolOptions.update()
         enclosingOptionsArea?.refreshSize()

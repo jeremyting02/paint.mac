@@ -1,6 +1,6 @@
 import AppKit
 
-final class CanvasView: NSView {
+final class CanvasView: NSView, NSTextViewDelegate {
     enum Tool: Hashable {
         case brush, eraser, paintBucket, gradient, rectangleSelect, ellipseSelect, lassoSelect, magicWand, moveSelectedPixels, moveSelection
         case pencil, colorPicker, cloneStamp, recolor, text, lineCurve, shapes, zoom, pan
@@ -275,7 +275,6 @@ final class CanvasView: NSView {
     var recolorTolerance = 50
     var colorDidPick: ((NSColor, Bool) -> Void)?
     var handleColorShortcut: ((String) -> Bool)?
-    var editText: (() -> Void)?
     var showsPixelGrid = false { didSet { needsDisplay = true } }
     var canvasImageRect: CGRect { imageRect }
     var pointerDidMove: ((CGPoint?) -> Void)?
@@ -307,6 +306,23 @@ final class CanvasView: NSView {
     private var gradientEdit: GradientEdit?
     private var gradientDrag: GradientDrag?
     private var previousTool = Tool.brush
+    private var textEditor: CanvasTextInput?
+    private var textLayout: TextLayout?
+    private var textBlinkTimer: Timer?
+    private var textCaretVisible = true
+
+    var focusedTextInput: CanvasTextInput? {
+        guard let textEditor, let responder = window?.firstResponder,
+              responder === textEditor || responder === self else { return nil }
+        return textEditor
+    }
+
+    var hasPendingText: Bool { textEditor != nil }
+
+    func focusTextInput() {
+        if let textEditor { window?.makeFirstResponder(textEditor) }
+    }
+
     private var drawingDraft: (geometry: VectorDrawing, secondary: Bool, preview: PaintLayer?)?
     private enum DrawingDragMode { case create, handle(Int), move, rotate }
     private var drawingDrag: (anchor: CGPoint, mode: DrawingDragMode, initial: VectorDrawing)?
@@ -509,7 +525,10 @@ final class CanvasView: NSView {
         } else if tool == .pan || holdingSpace {
             addCursorRect(visibleRect, cursor: .openHand)
         } else if !tool.transformsSelection && !imageRect.isEmpty {
-            addCursorRect(imageRect, cursor: .crosshair)
+            addCursorRect(imageRect, cursor: tool == .text ? .iBeam : .crosshair)
+            if tool == .text, let width = document?.image?.width, let handle = textHandleFrame(imageWidth: width) {
+                addCursorRect(handle, cursor: .openHand)
+            }
         }
     }
 
@@ -812,6 +831,7 @@ final class CanvasView: NSView {
     func setSelection(_ outline: SelectionOutline?) {
         guard selectionOutline != outline else { return }
         selectionOutline = outline
+        if textEditor != nil { updateDrawingPreview() }
         needsDisplay = true
         selectionDidChange?()
     }
@@ -882,6 +902,7 @@ final class CanvasView: NSView {
         cloneCursor = nil
         drawingDraft = nil
         drawingDrag = nil
+        endTextInput()
         cancelSelectionDrag()
         floodDrag = nil
         if let floodEdit {
@@ -1042,6 +1063,15 @@ final class CanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if let textEditor {
+            if window?.firstResponder === self {
+                focusTextInput()
+                if window?.firstResponder === textEditor { textEditor.keyDown(with: event) }
+            } else {
+                super.keyDown(with: event)
+            }
+            return
+        }
         if event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
            let key = event.charactersIgnoringModifiers?.lowercased(), key == "c" || key == "x" {
             if event.isARepeat || handleColorShortcut?(key) == true { return }
@@ -2083,7 +2113,7 @@ private extension CanvasView {
         guard panDrag == nil, drawingDrag == nil, rasterDrawing == nil,
               let stack = document?.stack, layerPreview == nil else { return }
         let location = convert(event.locationInWindow, from: nil)
-        window?.makeFirstResponder(self)
+        if textEditor == nil { window?.makeFirstResponder(self) }
         updateBrushCursor(at: event.locationInWindow)
         if tool == .zoom {
             stepZoom(secondary ? -1 : 1, at: event.locationInWindow)
@@ -2101,6 +2131,7 @@ private extension CanvasView {
             if let handle = nearest {
                 if case .line = draft.geometry, handle.index == 1 || handle.index == 2 { drawingStyle.curve = true }
                 drawingDrag = (point, .handle(handle.index), draft.geometry)
+                focusTextInput()
                 return
             }
             if secondary && tool != .text {
@@ -2112,6 +2143,7 @@ private extension CanvasView {
                 return
             }
         }
+        if tool == .text && secondary { return }
         guard imageRect.contains(location) else {
             finishDrawing()
             return
@@ -2140,9 +2172,9 @@ private extension CanvasView {
                 geometry = .text(point)
             }
             drawingDraft = (geometry, secondary, nil)
-            if tool != .text { drawingDrag = (point, .create, geometry) }
+            if tool == .text { beginTextInput() }
+            else { drawingDrag = (point, .create, geometry) }
             updateDrawingPreview()
-            if tool == .text { editText?() }
         }
     }
 
@@ -2324,7 +2356,15 @@ private extension CanvasView {
         style.primary = draft.secondary ? secondaryColor : brushColor
         style.secondary = draft.secondary ? brushColor : secondaryColor
         style.width = brushSize
-        drawingDraft?.preview = draft.geometry.applying(to: layer, selection: selectionOutline, style: style)
+        if case .text(let origin) = draft.geometry {
+            style.textResolution = imageResolution
+            let layout = TextLayout(origin: origin, style: style)
+            textLayout = layout
+            window?.invalidateCursorRects(for: self)
+            drawingDraft?.preview = layout.applying(to: layer, selection: selectionOutline, style: style)
+        } else {
+            drawingDraft?.preview = draft.geometry.applying(to: layer, selection: selectionOutline, style: style)
+        }
         composite = nil
         needsDisplay = true
         selectionDidChange?()
@@ -2334,6 +2374,7 @@ private extension CanvasView {
         guard let draft = drawingDraft else { return }
         drawingDraft = nil
         drawingDrag = nil
+        endTextInput()
         composite = nil
         let action: String
         switch draft.geometry {
@@ -2347,7 +2388,10 @@ private extension CanvasView {
     }
 
     func drawingHandles(for drawing: VectorDrawing, width: Int) -> [(index: Int, frame: CGRect)] {
-        drawing.handles.enumerated().map { index, point in
+        if case .text = drawing, let frame = textHandleFrame(imageWidth: width) {
+            return [(0, frame)]
+        }
+        return drawing.handles.enumerated().map { index, point in
             let center = marquee(for: CGRect(origin: point, size: .zero), imageWidth: width).origin
             return (index, CGRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8))
         }
@@ -2358,7 +2402,9 @@ private extension CanvasView {
         context.setFillColor(NSColor.white.cgColor)
         context.setStrokeColor(NSColor.black.cgColor)
         context.setLineWidth(1)
-        if let geometry = drawingDraft?.geometry {
+        if textEditor != nil {
+            drawTextControls(imageWidth: imageWidth, in: context)
+        } else if let geometry = drawingDraft?.geometry {
             for handle in drawingHandles(for: geometry, width: imageWidth) {
                 context.fillEllipse(in: handle.frame)
                 context.strokeEllipse(in: handle.frame)
@@ -2388,5 +2434,141 @@ private extension CGPoint {
 
     func rotated(by angle: CGFloat) -> CGPoint {
         applying(CGAffineTransform(rotationAngle: angle))
+    }
+}
+
+extension CanvasView {
+    private func beginTextInput() {
+        let input = CanvasTextInput()
+        input.delegate = self
+        input.finish = { [weak self] in self?.finishDrawing() }
+        input.nudgeHandle = { [weak self] event in self?.nudgeTextHandle(with: event) ?? false }
+        input.screenRect = { [weak self] index in
+            guard let self, let window, let caret = textCaretFrame(at: index) else { return .zero }
+            return window.convertToScreen(convert(caret, to: nil))
+        }
+        input.indexAtScreenPoint = { [weak self] point in
+            guard let self, let window, let textLayout else { return NSNotFound }
+            let location = convert(window.convertPoint(fromScreen: point), from: nil)
+            return textLayout.characterIndex(at: imagePoint(location))
+        }
+        addSubview(input)
+        textEditor = input
+        focusTextInput()
+        textCaretVisible = true
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.textCaretVisible.toggle()
+            self.invalidateTextBlink()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        textBlinkTimer = timer
+    }
+
+    private func endTextInput() {
+        guard let input = textEditor else { return }
+        textEditor = nil
+        textLayout = nil
+        textBlinkTimer?.invalidate()
+        textBlinkTimer = nil
+        input.delegate = nil
+        if window?.firstResponder === input { window?.makeFirstResponder(self) }
+        input.removeFromSuperview()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    func textDidChange(_ notification: Notification) {
+        guard let input = notification.object as? CanvasTextInput, input === textEditor else { return }
+        drawingStyle.text = input.string
+        updateTextCaret()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard let input = notification.object as? CanvasTextInput, input === textEditor else { return }
+        updateTextCaret()
+    }
+
+    private func updateTextCaret() {
+        textCaretVisible = true
+        window?.invalidateCursorRects(for: self)
+        invalidateTextControls()
+        guard drawingDrag == nil, let input = textEditor, let caret = textCaretFrame(at: NSMaxRange(input.selectedRange())),
+              imageRect.intersects(caret) else { return }
+        scrollToVisible(caret.insetBy(dx: -12, dy: -8).intersection(imageRect))
+    }
+
+    private func invalidateTextBlink() {
+        guard let input = textEditor, let width = document?.image?.width else { return }
+        if let overlay = metalOverlay, !overlay.isHidden {
+            overlay.needsDisplay = true
+        } else {
+            if input.selectedRange().length == 0, let caret = textCaretFrame(at: input.selectedRange().location) {
+                setNeedsDisplay(caret.insetBy(dx: -2, dy: -2))
+            }
+            if let handle = textHandleFrame(imageWidth: width) {
+                setNeedsDisplay(handle.insetBy(dx: -1, dy: -1))
+            }
+        }
+    }
+
+    private func invalidateTextControls() {
+        if let overlay = metalOverlay, !overlay.isHidden { overlay.needsDisplay = true }
+        else { needsDisplay = true }
+    }
+
+    private func textCaretFrame(at index: Int) -> CGRect? {
+        guard let textLayout, let image = document?.image else { return nil }
+        let caret = marquee(for: textLayout.caret(at: index), imageWidth: image.width)
+        return CGRect(x: caret.minX, y: caret.minY, width: 1, height: max(1, caret.height))
+    }
+
+    func textHandleFrame(imageWidth: Int) -> CGRect? {
+        guard let input = textEditor, let textLayout else { return nil }
+        let caret = marquee(for: textLayout.caret(at: NSMaxRange(input.selectedRange())), imageWidth: imageWidth)
+        let viewport = visibleRect.insetBy(dx: 2, dy: 2)
+        let x = max(viewport.minX, min(viewport.maxX - 16, caret.minX + 6))
+        let y = max(viewport.minY, min(viewport.maxY - 16, caret.minY - 18))
+        return CGRect(x: x, y: y, width: 16, height: 16)
+    }
+
+    private func nudgeTextHandle(with event: NSEvent) -> Bool {
+        guard let drag = drawingDrag, let draft = drawingDraft, let delta = nudge(for: event) else { return false }
+        drawingDrag = (drag.anchor, drag.mode, drag.initial.translated(by: delta))
+        drawingDraft?.geometry = draft.geometry.translated(by: delta)
+        updateDrawingPreview()
+        return true
+    }
+
+    private func drawTextControls(imageWidth: Int, in context: CGContext) {
+        guard let input = textEditor, let layout = textLayout else { return }
+        let selected = input.selectedRange()
+        context.saveGState()
+        context.clip(to: imageRect)
+        if selected.length > 0 {
+            context.setFillColor(NSColor.selectedTextBackgroundColor.withAlphaComponent(0.4).cgColor)
+            for rect in layout.selectionRects(for: selected) {
+                context.fill(marquee(for: rect, imageWidth: imageWidth))
+            }
+        } else if textCaretVisible, let caret = textCaretFrame(at: selected.location) {
+            context.setFillColor(NSColor.white.cgColor)
+            context.fill(caret.insetBy(dx: -1, dy: -1))
+            context.setFillColor(NSColor.black.cgColor)
+            context.fill(caret)
+        }
+        if input.hasMarkedText() {
+            context.setFillColor(NSColor.keyboardFocusIndicatorColor.cgColor)
+            for rect in layout.selectionRects(for: input.markedRange()) {
+                let frame = marquee(for: rect, imageWidth: imageWidth)
+                context.fill(CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: 1))
+            }
+        }
+        context.restoreGState()
+        if let frame = textHandleFrame(imageWidth: imageWidth) {
+            context.setFillColor(NSColor.white.withAlphaComponent(textCaretVisible ? 1 : 0.65).cgColor)
+            context.fill(frame)
+            context.setStrokeColor(NSColor.black.cgColor)
+            context.stroke(frame)
+            Self.floodHandleIcon?.draw(in: frame.insetBy(dx: 2, dy: 2))
+        }
     }
 }

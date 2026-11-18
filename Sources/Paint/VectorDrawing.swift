@@ -1,5 +1,4 @@
 import AppKit
-import CoreText
 
 enum DrawingShape: String, CaseIterable {
     case rectangle = "Rectangle", roundedRectangle = "Rounded Rectangle", ellipse = "Ellipse"
@@ -148,11 +147,18 @@ struct DrawingStyle {
     var blendMode: LayerBlendMode = .normal
     var cornerRadius: CGFloat = 12
     var text = ""
-    var fontName = NSFont.systemFont(ofSize: 16).fontName
-    var fontSize: CGFloat = 16
-    var alignment: TextAlignment = .left
+    var fontName = "Arial"
+    var fontSize: CGFloat = 12
+    var textMetric = TextMetric.points
+    var textResolution = ImageResolution.standard
+    var textRendering = TextRendering.sharpModern
+    var textAntialiasedSelection = true
+    var textBlend = BrushOptions.Blend.layer(.normal)
+    var alignment = TextAlignment.left
     var bold = false
     var italic = false
+    var underline = false
+    var strikeout = false
 }
 
 enum VectorDrawing {
@@ -213,6 +219,10 @@ enum VectorDrawing {
 
     func applying(to layer: PaintLayer, selection: SelectionOutline?, style: DrawingStyle,
                   allowsMetal: Bool = true) -> PaintLayer? {
+        if case .text(let origin) = self {
+            return TextLayout(origin: origin, style: style).applying(to: layer, selection: selection,
+                                                                  style: style, allowsMetal: allowsMetal)
+        }
         let width = layer.image.width, height = layer.image.height
         guard let original = layer.straightPixels,
               let overlay = BGRA8.render(width: width, height: height, colorSpace: layer.workingColorSpace, draw: { context in
@@ -260,24 +270,7 @@ enum VectorDrawing {
                 context.setFillColor(secondary)
                 context.drawPath(using: .eoFillStroke)
             }
-        case .text(let origin):
-            let size = style.fontSize
-            var font = NSFont(name: style.fontName, size: size) ?? .systemFont(ofSize: size)
-            if style.bold { font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) }
-            if style.italic { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
-            let attributes: [NSAttributedString.Key: Any] = [
-                NSAttributedString.Key(kCTFontAttributeName as String): font,
-                NSAttributedString.Key(kCTForegroundColorAttributeName as String): primary
-            ]
-            var baseline = origin.y - font.ascender
-            for content in style.text.components(separatedBy: .newlines) {
-                let line = CTLineCreateWithAttributedString(NSAttributedString(string: content, attributes: attributes))
-                let width = CTLineGetTypographicBounds(line, nil, nil, nil)
-                let offset = style.alignment == .left ? 0 : style.alignment == .center ? width / 2 : width
-                context.textPosition = CGPoint(x: origin.x - offset, y: baseline)
-                CTLineDraw(line, context)
-                baseline -= font.ascender - font.descender + font.leading
-            }
+        case .text: break
         }
     }
 }

@@ -60,10 +60,25 @@ final class PaintDocument: NSDocument {
         clipboard.setString(text, forType: .string)
     }
 
-    @objc func cut(_ sender: Any?) { copyPixels(to: .general, cutting: true) }
-    @objc func copy(_ sender: Any?) { copyPixels(to: .general, cutting: false) }
+    var editingTextView: NSTextView? {
+        if let input = editor?.window?.firstResponder as? NSTextView, input.isFieldEditor { return input }
+        return editor?.canvas.focusedTextInput
+    }
+
+    @objc func cut(_ sender: Any?) {
+        if let input = editingTextView { input.cut(sender) }
+        else { copyPixels(to: .general, cutting: true) }
+    }
+
+    @objc func copy(_ sender: Any?) {
+        if let input = editingTextView { input.copy(sender) }
+        else { copyPixels(to: .general, cutting: false) }
+    }
     @objc func copyFlattened(_ sender: Any?) { copyPixels(to: .general, cutting: false, flattened: true) }
-    @objc func paste(_ sender: Any?) { pastePixels(from: .general) }
+    @objc func paste(_ sender: Any?) {
+        if let input = editingTextView { input.pasteAsPlainText(sender) }
+        else { pastePixels(from: .general) }
+    }
     @objc func pasteIntoNewLayer(_ sender: Any?) { pastePixels(from: .general, intoNewLayer: true) }
     @objc func pasteIntoNewImage(_ sender: Any?) { pasteNewImage(from: .general) }
 
@@ -529,6 +544,7 @@ final class PaintDocument: NSDocument {
         case #selector(selectAllPixels(_:)): return editor != nil && image != nil
         case #selector(invertPixelSelection(_:)): return editor?.canvas.copyableOutline != nil
         case #selector(eraseSelectedPixels(_:)), #selector(fillSelectedPixels(_:)):
+            if editingTextView != nil { return true }
             return stack?.activeLayer.isVisible == true && editor?.canvas.copyableOutline != nil
         case #selector(toggleWorkspaceRulers(_:)):
             (item as? NSMenuItem)?.state = editor?.showsRulers == true ? .on : .off
@@ -540,10 +556,15 @@ final class PaintDocument: NSDocument {
         case #selector(redoStroke(_:)): return undoManager?.canRedo == true && editor?.canvas.hasLiveEditChange != true
         case #selector(cropSelection(_:)): return editor?.canvas.cropRect != nil
         case #selector(copySelection(_:)): return editor?.canvas.copyableOutline != nil
-        case #selector(cut(_:)): return editor?.canvas.copyableOutline != nil
-        case #selector(copy(_:)), #selector(copyFlattened(_:)): return editor?.canvas.canCopyPixels == true
-        case #selector(paste(_:)): return stack?.activeLayer.isVisible == true
-            && NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
+        case #selector(cut(_:)), #selector(copy(_:)):
+            if let input = editingTextView { return input.selectedRange().length > 0 }
+            return item.action == #selector(cut(_:))
+                ? editor?.canvas.copyableOutline != nil : editor?.canvas.canCopyPixels == true
+        case #selector(copyFlattened(_:)): return editor?.canvas.canCopyPixels == true
+        case #selector(paste(_:)):
+            if editingTextView != nil { return NSPasteboard.general.string(forType: .string) != nil }
+            return stack?.activeLayer.isVisible == true
+                && NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
         case #selector(pasteIntoNewLayer(_:)): return stack?.canDuplicate == true
             && NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
         case #selector(pasteIntoNewImage(_:)): return NSPasteboard.general.availableType(from: Self.pixelClipboardTypes) != nil
@@ -557,7 +578,7 @@ final class PaintDocument: NSDocument {
         case #selector(deselect(_:)):
             guard let canvas = editor?.canvas else { return false }
             return canvas.imageSelection != nil || canvas.hasPendingMove || canvas.hasPendingFloodEdit ||
-                canvas.hasPendingGradient
+                canvas.hasPendingGradient || canvas.hasPendingText
         case #selector(flattenLayers(_:)): return stack.map { $0.layers.count > 1 } ?? false
         case #selector(resetColorsPanel(_:)): return editor != nil
         case #selector(toggleUtilityPanel(_:)):
