@@ -65,8 +65,13 @@ with the copied pixels. **Recolor** replaces colors near the secondary color
 with the primary color. Right-drag swaps the colors.
 
 With **Line/Curve**, drag the endpoints to place a line and drag either
-interior control point to bend it. **Shapes** offers preset outlines, solid
-fills, and two-color outline-and-fill drawing. For **Text**, press **T**, click
+interior control point to bend it.
+Drag the four-way handle near the endpoint to move the entire line.
+**Shapes** offers preset outlines, solid fills, and two-color outline-and-fill
+drawing. Drag inside an editable shape or use its four-way handle to move it.
+Drag a corner to resize. Drag the crosshair in the circle to move the rotation
+pivot, then drag in the band outside the shape or right-drag to rotate.
+For **Text**, press **T**, click
 the image, and type at the canvas caret. **Return** starts a new line. Drag
 the four-way handle below the caret to move the text, or hold it and press an
 arrow key to move one pixel. Use the toolbar to change the font, fractional
@@ -108,7 +113,8 @@ undo step.
 Choose **Gradient** or press **G**, then drag to draw a gradient from the
 **Primary** color to the **Secondary** color. Choose one of seven geometries,
 enable a repeating pattern, or use transparency mode to fade the active layer.
-Drag either endpoint to adjust the preview, hold **Shift** to snap the angle,
+The pointer changes to a hand over an endpoint. Drag either endpoint to
+adjust the preview, hold **Shift** to snap the angle,
 or right-click an endpoint to reverse the colors. The gradient paints only
 inside the active selection. Click **Finish** or press **Return** to commit it
 as one undo step.
@@ -132,7 +138,8 @@ the selection size and its top-left pixel. To crop, choose **Image → Crop to S
 
 Choose **Move Pixels** in **Tools** or press **M**. The tool acts on the
 selection or, if there is none, the entire active layer. Drag where the pointer
-shows a hand to move in whole image pixels. Each axis moves one pixel for every
+shows a four-way arrow to move in whole image pixels. The hand identifies
+resize handles and the rotation pivot. Each axis moves one pixel for every
 full pixel the pointer travels from the start of the drag. Drag just outside
 the outline or use a right-button drag to rotate. The rotate cursor has a
 white outline for visibility on dark areas.
@@ -199,7 +206,8 @@ button and drag to pan with any tool active. **View → Rulers** shows pixel
 coordinates at the top and left, and **View → Pixel Grid** shows individual
 pixel edges at 200% zoom and above.
 
-Press **Z** to use the Zoom tool or **H** to use Pan. Hold **Space** while
+Press **Z** to use the Zoom tool. Click to zoom in, right-click to zoom out, or
+drag a rectangle to zoom to that area. Press **H** to use Pan. Hold **Space** while
 dragging or pressing the arrow keys to pan temporarily with another tool active.
 
 Use **Command-Z** and **Command-Y** to undo or redo an edit. Selection changes

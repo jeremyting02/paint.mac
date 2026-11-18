@@ -57,6 +57,14 @@ oversized axes to the viewport edge. Paint.NET documents viewport-relative
 placement when zoomed in. Its exact partial-overlap rule still needs a
 side-by-side check. [Paint.NET Edit menu](https://paint.net/doc/latest/EditMenu.html)
 
+Shapes and Line/Curve use a hand over editing handles, a four-way cursor to
+move a draft, and a curved cursor to rotate. Shapes supports a draggable
+pivot and a rotation area outside its bounds. Gradient endpoints use a hand.
+Move Pixels and Move Selection distinguish moves from handle drags. Zoom
+uses a magnifier and fits a dragged rectangle. Cursor artwork, hover
+distances, and the reference Gradient endpoint cursor still need a live
+5.2 comparison.
+
 Paint.NET 5.2 reopened and resaved a Mac-edited 8 × 6 PDN. All 144 stored
 pixels across three layers, layer properties and resolution matched after
 the resave. Paint.NET renumbered its EXIF entries and added software and

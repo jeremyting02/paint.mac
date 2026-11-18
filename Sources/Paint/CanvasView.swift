@@ -181,37 +181,61 @@ final class CanvasView: NSView, NSTextViewDelegate {
         600, 800, 1000, 1200, 1400, 1600, 2000, 2400, 2800, 3200, 4000, 4800, 5600, 6400,
         8000, 10000
     ]
-    private static let rotationCursor: NSCursor = {
-        let size = NSSize(width: 20, height: 20)
-        let center = CGPoint(x: 10, y: 10)
-        let image = NSImage(size: size, flipped: false) { _ in
-            let arrow = NSBezierPath()
-            arrow.appendArc(withCenter: center, radius: 6, startAngle: -50, endAngle: 0, clockwise: true)
-            arrow.move(to: CGPoint(x: 12.5, y: 13.5))
-            arrow.line(to: CGPoint(x: 16, y: 10))
-            arrow.line(to: CGPoint(x: 17.5, y: 14.5))
-            arrow.lineCapStyle = .round
-            arrow.lineJoinStyle = .round
+    private static let rotationCursor = outlinedCursor("Rotate") { arrow in
+        arrow.move(to: CGPoint(x: 4, y: 9))
+        arrow.curve(to: CGPoint(x: 16, y: 9), controlPoint1: CGPoint(x: 4, y: 17),
+                    controlPoint2: CGPoint(x: 16, y: 17))
+        arrow.move(to: CGPoint(x: 2, y: 12))
+        arrow.line(to: CGPoint(x: 4, y: 9))
+        arrow.line(to: CGPoint(x: 7, y: 11))
+        arrow.move(to: CGPoint(x: 13, y: 11))
+        arrow.line(to: CGPoint(x: 16, y: 9))
+        arrow.line(to: CGPoint(x: 18, y: 12))
+    }
+    private static let fourWayCursor = outlinedCursor("Move") { path in
+        for angle in [0.0, .pi / 2, .pi, 3 * .pi / 2] {
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: 10, y: 10) + CGPoint(x: x, y: y).rotated(by: angle)
+            }
+            path.move(to: point(0, 0))
+            path.line(to: point(0, 7))
+            path.move(to: point(-2.5, 4.5))
+            path.line(to: point(0, 7))
+            path.line(to: point(2.5, 4.5))
+        }
+    }
+    private static let zoomCursor = outlinedCursor("Zoom", hotSpot: CGPoint(x: 8, y: 8)) { path in
+        path.appendOval(in: CGRect(x: 3, y: 7, width: 10, height: 10))
+        path.move(to: CGPoint(x: 12, y: 8))
+        path.line(to: CGPoint(x: 17, y: 3))
+    }
 
-            // The white outline stays visible over dark pixels and the black stroke over light ones.
+    private static func outlinedCursor(_ name: String, hotSpot: CGPoint = CGPoint(x: 10, y: 10),
+                                       drawPath: @escaping (NSBezierPath) -> Void) -> NSCursor {
+        let image = NSImage(size: CGSize(width: 20, height: 20), flipped: false) { _ in
+            let path = NSBezierPath()
+            drawPath(path)
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            path.lineWidth = 4
             NSColor.white.setStroke()
-            arrow.lineWidth = 4
-            arrow.stroke()
+            path.stroke()
+            path.lineWidth = 2
             NSColor.black.setStroke()
-            arrow.lineWidth = 2
-            arrow.stroke()
+            path.stroke()
             return true
         }
-        image.accessibilityDescription = "Rotate Selection"
-        return NSCursor(image: image, hotSpot: center)
-    }()
-    private static let floodHandleIcon = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right",
-                                                 accessibilityDescription: "Move flood tool click point")
+        image.accessibilityDescription = name
+        return NSCursor(image: image, hotSpot: hotSpot)
+    }
+    private static let moveHandleIcon = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right",
+                                                accessibilityDescription: "Move")
 
     private weak var document: PaintDocument?
     var tool = Tool.brush {
         willSet {
             if newValue != tool {
+                zoomDrag = nil
                 cancelSelectionDrag()
                 rasterDrawing = nil
                 cloneCursor = nil
@@ -324,8 +348,17 @@ final class CanvasView: NSView, NSTextViewDelegate {
     }
 
     private var drawingDraft: (geometry: VectorDrawing, secondary: Bool, preview: PaintLayer?)?
-    private enum DrawingDragMode { case create, handle(Int), move, rotate }
+    private var shapePivot: CGPoint?
+    private enum DrawingDragMode {
+        case create, handle(Int), move, rotate, pivot(CGPoint)
+
+        var isCreating: Bool {
+            if case .create = self { return true }
+            return false
+        }
+    }
     private var drawingDrag: (anchor: CGPoint, mode: DrawingDragMode, initial: VectorDrawing)?
+    private var zoomDrag: (anchor: CGPoint, point: CGPoint)?
     private var rasterDrawing: RasterDrawing? {
         didSet {
             if oldValue !== rasterDrawing {
@@ -497,6 +530,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
     }
 
     private func resetWindowInteraction() {
+        zoomDrag = nil
         completeMoveDrag()
         cancelSelectionDrag()
         floodDrag = nil
@@ -524,7 +558,8 @@ final class CanvasView: NSView, NSTextViewDelegate {
             addCursorRect(visibleRect, cursor: .closedHand)
         } else if tool == .pan || holdingSpace {
             addCursorRect(visibleRect, cursor: .openHand)
-        } else if !tool.transformsSelection && !imageRect.isEmpty {
+        } else if !tool.transformsSelection && tool != .shapes && tool != .lineCurve &&
+                    tool != .gradient && tool != .zoom && !imageRect.isEmpty {
             addCursorRect(imageRect, cursor: tool == .text ? .iBeam : .crosshair)
             if tool == .text, let width = document?.image?.width, let handle = textHandleFrame(imageWidth: width) {
                 addCursorRect(handle, cursor: .openHand)
@@ -542,14 +577,12 @@ final class CanvasView: NSView, NSTextViewDelegate {
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if updatePanCursor() { return }
-        if tool.transformsSelection { updateMoveCursor(at: convert(event.locationInWindow, from: nil)) }
-        else if tool.usesFlood { updateFloodCursor(at: convert(event.locationInWindow, from: nil)) }
-        else { super.cursorUpdate(with: event) }
+        if !updateCanvasCursor(at: convert(event.locationInWindow, from: nil)) { super.cursorUpdate(with: event) }
     }
 
     override func mouseEntered(with event: NSEvent) {
         updateBrushCursor(at: event.locationInWindow)
+        updateCanvasCursor(at: convert(event.locationInWindow, from: nil))
         super.mouseEntered(with: event)
     }
 
@@ -562,10 +595,44 @@ final class CanvasView: NSView, NSTextViewDelegate {
         } else {
             pointerDidMove?(nil)
         }
-        if updatePanCursor() { return }
+        if !updateCanvasCursor(at: location) { super.mouseMoved(with: event) }
+    }
+
+    @discardableResult
+    private func updateCanvasCursor(at location: CGPoint) -> Bool {
+        if updatePanCursor() { return true }
         if tool.transformsSelection { updateMoveCursor(at: location) }
         else if tool.usesFlood { updateFloodCursor(at: location) }
-        else { super.mouseMoved(with: event) }
+        else if let cursor = drawingCursor(at: location) { cursor.set() }
+        else { return false }
+        return true
+    }
+
+    private func refreshCanvasCursor() {
+        guard let window, window.isKeyWindow else { return }
+        let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        if visibleRect.contains(location) { updateCanvasCursor(at: location) }
+    }
+
+    func drawingCursor(at location: CGPoint) -> NSCursor? {
+        let ordinary: NSCursor = imageRect.contains(location) ? .crosshair : .arrow
+        switch tool {
+        case .shapes, .lineCurve:
+            guard let draft = drawingDraft, let image = document?.image else { return ordinary }
+            let mode = drawingDrag?.mode ?? drawingAction(at: location, geometry: draft.geometry, width: image.width)
+            switch mode {
+            case .handle, .pivot: return drawingDrag == nil ? .openHand : .closedHand
+            case .move: return Self.fourWayCursor
+            case .rotate: return Self.rotationCursor
+            case .create: return .crosshair
+            default: return ordinary
+            }
+        case .gradient:
+            if let drag = gradientDrag { return drag.startsLine ? ordinary : .closedHand }
+            return gradientEndpoint(at: location) == nil ? ordinary : .openHand
+        case .zoom: return zoomDrag != nil || imageRect.contains(location) ? Self.zoomCursor : .arrow
+        default: return nil
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -608,7 +675,8 @@ final class CanvasView: NSView, NSTextViewDelegate {
         }
         switch moveDrag?.handle ?? transformHandle(at: location, layer: layer) {
         case .rotate: Self.rotationCursor.set()
-        case .move, .resize, .pivot: (moveDrag == nil ? NSCursor.openHand : .closedHand).set()
+        case .move: Self.fourWayCursor.set()
+        case .resize, .pivot: (moveDrag == nil ? NSCursor.openHand : .closedHand).set()
         }
     }
 
@@ -628,7 +696,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
             return
         }
         zoomingScrollGesture = true
-        guard !imageRect.isEmpty, selectionDrag == nil, moveDrag == nil, floodDrag == nil,
+        guard !imageRect.isEmpty, selectionDrag == nil, moveDrag == nil, floodDrag == nil, zoomDrag == nil,
               gradientDrag == nil, drawingDrag == nil, rasterDrawing == nil, panDrag == nil else { return }
 
         let steps: Int
@@ -663,6 +731,34 @@ final class CanvasView: NSView, NSTextViewDelegate {
         updateViewport(anchor: anchor)
     }
 
+    private var zoomMarquee: CGRect? {
+        guard let drag = zoomDrag else { return nil }
+        return CGRect(x: min(drag.anchor.x, drag.point.x), y: min(drag.anchor.y, drag.point.y),
+                      width: abs(drag.point.x - drag.anchor.x), height: abs(drag.point.y - drag.anchor.y))
+            .intersection(imageRect)
+    }
+
+    private func finishZoom(with event: NSEvent) {
+        guard zoomDrag != nil else { return }
+        zoomDrag?.point = convert(event.locationInWindow, from: nil)
+        let region = zoomMarquee
+        zoomDrag = nil
+        needsDisplay = true
+        guard let region, region.width >= 4, region.height >= 4, let scrollView = enclosingScrollView else {
+            stepZoom(1, at: event.locationInWindow)
+            return
+        }
+        let viewport = scrollView.contentSize
+        let centerX = (region.midX - imageRect.minX) / imageRect.width
+        let centerY = (region.midY - imageRect.minY) / imageRect.height
+        let factor = min(viewport.width / region.width, viewport.height / region.height)
+        zoomPercent = min(Self.zoomSteps.last ?? 10_000, max(1, displayedZoomPercent * factor))
+        updateViewport()
+        scroll(to: CGPoint(x: imageRect.minX + centerX * imageRect.width - viewport.width / 2,
+                           y: imageRect.minY + centerY * imageRect.height - viewport.height / 2), in: scrollView)
+        updateCanvasCursor(at: convert(event.locationInWindow, from: nil))
+    }
+
     override func otherMouseDown(with event: NSEvent) {
         guard event.buttonNumber == 2 else {
             super.otherMouseDown(with: event)
@@ -680,7 +776,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
     }
 
     private func beginPan(with event: NSEvent) {
-        guard !imageRect.isEmpty, panDrag == nil, selectionDrag == nil, moveDrag == nil,
+        guard !imageRect.isEmpty, panDrag == nil, selectionDrag == nil, moveDrag == nil, zoomDrag == nil,
               floodDrag == nil, gradientDrag == nil, drawingDrag == nil, rasterDrawing == nil else { return }
         if event.buttonNumber != 2 { window?.makeFirstResponder(self) }
         panDrag = (event.locationInWindow, event.buttonNumber)
@@ -714,14 +810,10 @@ final class CanvasView: NSView, NSTextViewDelegate {
         panDrag = nil
         updateBrushCursor(at: event.locationInWindow)
         defer { window?.invalidateCursorRects(for: self) }
-        if updatePanCursor() { return }
         let location = convert(event.locationInWindow, from: nil)
-        if tool.transformsSelection && visibleRect.contains(location) {
-            updateMoveCursor(at: location)
-        } else if tool.usesFlood && visibleRect.contains(location) {
-            updateFloodCursor(at: location)
-        } else if visibleRect.contains(location) && imageRect.contains(location) {
-            NSCursor.crosshair.set()
+        if visibleRect.contains(location) && updateCanvasCursor(at: location) { return }
+        if visibleRect.contains(location) && imageRect.contains(location) {
+            (tool == .text ? NSCursor.iBeam : .crosshair).set()
         } else {
             NSCursor.arrow.set()
         }
@@ -914,9 +1006,11 @@ final class CanvasView: NSView, NSTextViewDelegate {
     }
 
     func cancelEditingGesture() {
+        zoomDrag = nil
         rasterDrawing = nil
         cloneCursor = nil
         drawingDraft = nil
+        shapePivot = nil
         drawingDrag = nil
         endTextInput()
         cancelSelectionDrag()
@@ -1114,6 +1208,11 @@ final class CanvasView: NSView, NSTextViewDelegate {
             return
         }
         let isEscape = event.keyCode == 53
+        if isEscape && zoomDrag != nil {
+            zoomDrag = nil
+            needsDisplay = true
+            return
+        }
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         let deselects = (isEscape || isReturn) &&
             (move != nil || !selection.isEmpty || selectionDrag != nil || hasPendingFloodEdit || hasPendingGradient || hasPendingDrawing)
@@ -1133,6 +1232,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
             finishDrawing()
         } else if let delta = nudge(for: event), let draft = drawingDraft, drawingDrag == nil {
             drawingDraft?.geometry = draft.geometry.translated(by: delta)
+            if let pivot = shapePivot { shapePivot = pivot + delta }
             updateDrawingPreview()
         } else if (isEscape || isReturn) && hasPendingGradient {
             finishGradient()
@@ -1422,27 +1522,21 @@ final class CanvasView: NSView, NSTextViewDelegate {
     }
 
     private func beginGradient(with event: NSEvent, rightButton: Bool) {
-        guard panDrag == nil, gradientDrag == nil, let layer = document?.stack?.activeLayer else { return }
+        guard panDrag == nil, gradientDrag == nil else { return }
         let location = convert(event.locationInWindow, from: nil)
-        if var edit = gradientEdit {
-            let handles = gradientHandleCenters(edit.line, imageWidth: layer.image.width)
-            let startDelta = location - handles.start, endDelta = location - handles.end
-            let startDistance = hypot(startDelta.x, startDelta.y)
-            let endDistance = hypot(endDelta.x, endDelta.y)
-            if min(startDistance, endDistance) <= 9 {
-                window?.makeFirstResponder(self)
-                if rightButton {
-                    edit.reversed.toggle()
-                    gradientEdit = edit
-                    invalidateGradientPreview()
-                } else {
-                    let movesStart = startDistance < endDistance
-                    let endpoint = movesStart ? edit.line.start : edit.line.end
-                    gradientDrag = GradientDrag(startsLine: false, movesStart: movesStart, rightButton: false,
-                                                offset: endpoint - imagePoint(location))
-                }
-                return
+        if var edit = gradientEdit, let movesStart = gradientEndpoint(at: location) {
+            window?.makeFirstResponder(self)
+            if rightButton {
+                edit.reversed.toggle()
+                gradientEdit = edit
+                invalidateGradientPreview()
+            } else {
+                let endpoint = movesStart ? edit.line.start : edit.line.end
+                gradientDrag = GradientDrag(startsLine: false, movesStart: movesStart, rightButton: false,
+                                            offset: endpoint - imagePoint(location))
             }
+            updateCanvasCursor(at: location)
+            return
         }
         guard imageRect.contains(location) else { return }
         finishGradient()
@@ -1484,6 +1578,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
         gradientDrag = nil
         renderGradientPreviewIfNeeded()
         if drag.startsLine, let edit = gradientEdit, edit.line.start == edit.line.end { finishGradient() }
+        updateCanvasCursor(at: convert(event.locationInWindow, from: nil))
     }
 
     private func invalidateGradientPreview() {
@@ -1514,6 +1609,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
         needsDisplay = true
         if let preview = edit.preview { document?.commitPaintLayer(preview, actionName: "Gradient") }
         selectionDidChange?()
+        refreshCanvasCursor()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1638,6 +1734,11 @@ final class CanvasView: NSView, NSTextViewDelegate {
 
     override func mouseDragged(with event: NSEvent) {
         if panDrag != nil { dragPan(with: event); return }
+        if zoomDrag != nil {
+            zoomDrag?.point = convert(event.locationInWindow, from: nil)
+            needsDisplay = true
+            return
+        }
         if updateToolGesture(with: event) { return }
         if tool == .gradient {
             dragGradient(with: event, rightButton: false)
@@ -1667,6 +1768,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
 
     override func mouseUp(with event: NSEvent) {
         if panDrag != nil { finishPan(with: event); return }
+        if zoomDrag != nil { finishZoom(with: event); return }
         if endToolGesture(with: event) { return }
         if tool == .gradient {
             endGradientDrag(with: event, rightButton: false)
@@ -1776,6 +1878,15 @@ final class CanvasView: NSView, NSTextViewDelegate {
         let geometry = moveGeometry(for: image)
         let marquee = marquee(for: showsHandles ? geometry.rect : selection, imageWidth: image.width)
         defer {
+            if let frame = zoomMarquee, !frame.isEmpty {
+                context.saveGState()
+                context.setFillColor(NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor)
+                context.fill(frame)
+                context.setStrokeColor(NSColor.controlAccentColor.cgColor)
+                context.setLineWidth(1)
+                context.stroke(frame)
+                context.restoreGState()
+            }
             drawDrawingHandles(imageWidth: image.width, in: context)
             if let edit = gradientEdit { drawGradientHandles(edit.line, imageWidth: image.width, in: context) }
             if let handle = floodHandle { drawFloodHandle(at: handle.seed, frame: handle.frame, in: context) }
@@ -2032,6 +2143,14 @@ final class CanvasView: NSView, NSTextViewDelegate {
          marquee(for: CGRect(origin: line.end, size: .zero), imageWidth: imageWidth).origin)
     }
 
+    private func gradientEndpoint(at location: CGPoint) -> Bool? {
+        guard let line = gradientEdit?.line, let image = document?.image else { return nil }
+        let handles = gradientHandleCenters(line, imageWidth: image.width)
+        let start = location - handles.start, end = location - handles.end
+        let startDistance = hypot(start.x, start.y), endDistance = hypot(end.x, end.y)
+        return min(startDistance, endDistance) <= 9 ? startDistance < endDistance : nil
+    }
+
     private func drawGradientHandles(_ line: LinearGradient, imageWidth: Int, in context: CGContext) {
         let centers = gradientHandleCenters(line, imageWidth: imageWidth)
         context.saveGState()
@@ -2062,7 +2181,7 @@ final class CanvasView: NSView, NSTextViewDelegate {
         context.fill(frame)
         context.setStrokeColor(NSColor.black.cgColor)
         context.stroke(frame)
-        Self.floodHandleIcon?.draw(in: frame.insetBy(dx: 3, dy: 3))
+        Self.moveHandleIcon?.draw(in: frame.insetBy(dx: 3, dy: 3))
         context.restoreGState()
     }
 
@@ -2085,6 +2204,10 @@ final class CanvasView: NSView, NSTextViewDelegate {
             context.stroke(frame)
         }
         context.restoreGState()
+        drawRotationPivot(at: pivot, in: context)
+    }
+
+    private func drawRotationPivot(at pivot: CGPoint, in context: CGContext) {
         context.saveGState()
         let pivotFrame = CGRect(x: pivot.x - 5, y: pivot.y - 5, width: 10, height: 10)
         context.setFillColor(NSColor.windowBackgroundColor.cgColor)
@@ -2132,32 +2255,25 @@ private extension CanvasView {
         if textEditor == nil { window?.makeFirstResponder(self) }
         updateBrushCursor(at: event.locationInWindow)
         if tool == .zoom {
-            stepZoom(secondary ? -1 : 1, at: event.locationInWindow)
+            if secondary {
+                if zoomDrag == nil { stepZoom(-1, at: event.locationInWindow) }
+            } else if visibleRect.contains(location) {
+                zoomDrag = (location, location)
+            }
+            updateCanvasCursor(at: location)
             return
         }
         guard !imageRect.isEmpty else { return }
         let point = imagePoint(location)
-        if let draft = drawingDraft {
-            let handles = drawingHandles(for: draft.geometry, width: stack.activeLayer.image.width)
-                .filter { $0.frame.insetBy(dx: -2, dy: -2).contains(location) }
-            let nearest = handles.min { first, second in
-                let a = first.frame.center - location, b = second.frame.center - location
-                return hypot(a.x, a.y) < hypot(b.x, b.y)
+        if let draft = drawingDraft, let action = drawingAction(at: location, geometry: draft.geometry,
+                                                                width: stack.activeLayer.image.width, secondary: secondary) {
+            if case .line = draft.geometry, case .handle(let index) = action, index == 1 || index == 2 {
+                drawingStyle.curve = true
             }
-            if let handle = nearest {
-                if case .line = draft.geometry, handle.index == 1 || handle.index == 2 { drawingStyle.curve = true }
-                drawingDrag = (point, .handle(handle.index), draft.geometry)
-                focusTextInput()
-                return
-            }
-            if secondary && tool != .text {
-                drawingDrag = (point, .rotate, draft.geometry)
-                return
-            }
-            if draft.geometry.shapeContains(point) {
-                drawingDrag = (point, .move, draft.geometry)
-                return
-            }
+            drawingDrag = (point, action, draft.geometry)
+            focusTextInput()
+            updateCanvasCursor(at: location)
+            return
         }
         if tool == .text && secondary { return }
         guard imageRect.contains(location) else {
@@ -2191,6 +2307,7 @@ private extension CanvasView {
             if tool == .text { beginTextInput() }
             else { drawingDrag = (point, .create, geometry) }
             updateDrawingPreview()
+            updateCanvasCursor(at: location)
         }
     }
 
@@ -2284,16 +2401,25 @@ private extension CanvasView {
         switch drag.mode {
         case .create: handle = nil
         case .handle(let index): handle = index
+        case .pivot(let initial):
+            shapePivot = initial + delta
+            needsDisplay = true
+            return true
         case .move:
-            drawingDraft?.geometry = drag.initial.translated(by: delta)
+            let moved = drag.initial.translated(by: delta)
+            if let pivot = shapePivot, let previous = drawingDraft?.geometry.center {
+                shapePivot = pivot + (moved.center - previous)
+            }
+            drawingDraft?.geometry = moved
             updateDrawingPreview()
             return true
         case .rotate:
-            let pivot = drag.initial.center
+            let pivot = shapePivot ?? drag.initial.center
             let start = anchor - pivot, end = point - pivot
+            guard start != .zero, end != .zero else { return true }
             var angle = atan2(end.y, end.x) - atan2(start.y, start.x)
             if shift { angle = (angle / (.pi / 12)).rounded() * .pi / 12 }
-            drawingDraft?.geometry = drag.initial.rotated(by: angle)
+            drawingDraft?.geometry = drag.initial.rotated(by: angle, around: pivot)
             updateDrawingPreview()
             return true
         }
@@ -2362,6 +2488,7 @@ private extension CanvasView {
             }
         }
         drawingDrag = nil
+        updateCanvasCursor(at: convert(event.locationInWindow, from: nil))
         needsDisplay = true
         return true
     }
@@ -2390,6 +2517,7 @@ private extension CanvasView {
         guard let draft = drawingDraft else { return }
         drawingDraft = nil
         drawingDrag = nil
+        shapePivot = nil
         endTextInput()
         composite = nil
         let action: String
@@ -2401,6 +2529,7 @@ private extension CanvasView {
         if let preview = draft.preview { document?.commitPaintLayer(preview, actionName: action) }
         needsDisplay = true
         selectionDidChange?()
+        refreshCanvasCursor()
     }
 
     func drawingHandles(for drawing: VectorDrawing, width: Int) -> [(index: Int, frame: CGRect)] {
@@ -2411,6 +2540,46 @@ private extension CanvasView {
             let center = marquee(for: CGRect(origin: point, size: .zero), imageWidth: width).origin
             return (index, CGRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8))
         }
+    }
+
+    private func drawingMoveHandle(for drawing: VectorDrawing, width: Int) -> CGRect? {
+        let point: CGPoint
+        switch drawing {
+        case .line(let points): point = points[3]
+        case .shape: point = drawing.handles[2]
+        case .text: return nil
+        }
+        let anchor = marquee(for: CGRect(origin: point, size: .zero), imageWidth: width).origin
+        let x = anchor.x + (anchor.x + 24 <= visibleRect.maxX ? 16 : -16)
+        let y = anchor.y + (anchor.y + 24 <= visibleRect.maxY ? 16 : -16)
+        return CGRect(x: x - 8, y: y - 8, width: 16, height: 16)
+    }
+
+    private func drawingAction(at location: CGPoint, geometry: VectorDrawing, width: Int,
+                               secondary: Bool = false) -> DrawingDragMode? {
+        let handles = drawingHandles(for: geometry, width: width)
+            .filter { $0.frame.insetBy(dx: -2, dy: -2).contains(location) }
+        if let nearest = handles.min(by: { first, second in
+            let a = first.frame.center - location, b = second.frame.center - location
+            return hypot(a.x, a.y) < hypot(b.x, b.y)
+        }) { return .handle(nearest.index) }
+
+        if case .text = geometry { return nil }
+        if case .shape = geometry {
+            let pivot = shapePivot ?? geometry.center
+            let center = marquee(for: CGRect(origin: pivot, size: .zero), imageWidth: width).origin
+            let delta = location - center
+            if !secondary && hypot(delta.x, delta.y) <= 6 { return .pivot(pivot) }
+        }
+        if secondary { return .rotate }
+        if drawingMoveHandle(for: geometry, width: width)?.contains(location) == true { return .move }
+        if case .shape(let rect, let angle) = geometry {
+            let frame = marquee(for: rect, imageWidth: width)
+            let local = frame.center + (location - frame.center).rotated(by: -angle)
+            if frame.contains(local) { return .move }
+            if frame.insetBy(dx: -24, dy: -24).contains(local) { return .rotate }
+        }
+        return nil
     }
 
     func drawDrawingHandles(imageWidth: Int, in context: CGContext) {
@@ -2424,6 +2593,18 @@ private extension CanvasView {
             for handle in drawingHandles(for: geometry, width: imageWidth) {
                 context.fillEllipse(in: handle.frame)
                 context.strokeEllipse(in: handle.frame)
+            }
+            if drawingDrag == nil || drawingDrag?.mode.isCreating == false {
+                if let frame = drawingMoveHandle(for: geometry, width: imageWidth) {
+                    context.fill(frame)
+                    context.stroke(frame)
+                    Self.moveHandleIcon?.draw(in: frame.insetBy(dx: 3, dy: 3))
+                }
+                if case .shape = geometry {
+                    let pivot = shapePivot ?? geometry.center
+                    let center = marquee(for: CGRect(origin: pivot, size: .zero), imageWidth: imageWidth).origin
+                    drawRotationPivot(at: center, in: context)
+                }
             }
         }
         if tool == .cloneStamp, let source = cloneCursor ?? cloneSource?.point, !imageRect.isEmpty {
@@ -2584,7 +2765,7 @@ extension CanvasView {
             context.fill(frame)
             context.setStrokeColor(NSColor.black.cgColor)
             context.stroke(frame)
-            Self.floodHandleIcon?.draw(in: frame.insetBy(dx: 2, dy: 2))
+            Self.moveHandleIcon?.draw(in: frame.insetBy(dx: 2, dy: 2))
         }
     }
 }

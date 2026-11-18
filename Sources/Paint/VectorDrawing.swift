@@ -195,14 +195,18 @@ enum VectorDrawing {
         }
     }
 
-    func rotated(by angle: CGFloat) -> Self {
-        let pivot = center
+    func rotated(by angle: CGFloat, around origin: CGPoint? = nil) -> Self {
+        let pivot = origin ?? center
         switch self {
         case .line(let points):
             let transform = CGAffineTransform(translationX: pivot.x, y: pivot.y)
                 .rotated(by: angle).translatedBy(x: -pivot.x, y: -pivot.y)
             return .line(points.map { $0.applying(transform) })
-        case .shape(let rect, let previous): return .shape(rect, angle: previous + angle)
+        case .shape(let rect, let previous):
+            let transform = CGAffineTransform(translationX: pivot.x, y: pivot.y)
+                .rotated(by: angle).translatedBy(x: -pivot.x, y: -pivot.y)
+            let center = CGPoint(x: rect.midX, y: rect.midY).applying(transform)
+            return .shape(rect.offsetBy(dx: center.x - rect.midX, dy: center.y - rect.midY), angle: previous + angle)
         case .text: return self
         }
     }
