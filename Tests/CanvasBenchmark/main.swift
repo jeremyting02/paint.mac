@@ -79,6 +79,82 @@ if CommandLine.arguments.contains("--initial") {
     exit(0)
 }
 
+#if TRANSPARENT_EDGE_BENCHMARK
+if CommandLine.arguments.contains("--transparent-edge") {
+    setbuf(stdout, nil)
+    guard let name = MetalMovePreview.deviceName else { fatalError("Metal preview is unavailable") }
+    print("Metal device: \(name)")
+    let width = 4096, height = 2048
+    let selection = CGRect(x: 128, y: 512, width: 640, height: 512)
+    // A visible block followed by a transparent strip. Once the block leaves the image,
+    // the drag traverses the old Metal cutoff (128 × 512 visible) and reaches zero overlap.
+    let outward: [Int] = stride(from: -416, through: -800, by: -12).map { $0 }
+    let shifts = outward + Array(outward.dropLast().reversed())
+    for count in [1, 4] {
+        let document = makeDocument(width: width, height: height, layerCount: count, patterned: true)
+        var stack = document.stack!
+        var bytes = Data(count: width * height * 4)
+        let startRow = height - Int(selection.maxY)
+        for row in startRow..<(startRow + Int(selection.height)) {
+            let start = (row * width + Int(selection.minX) + 24) * 4
+            bytes.replaceSubrange(start..<(start + 424 * 4), with: repeatElement(UInt8(255), count: 424 * 4))
+        }
+        stack.layers[stack.active] = stack.activeLayer.withPixels(bytes)!
+        document.applyEdit(replacingStack: stack, actionName: "Transparent edge fixture")
+        document.showWindows()
+        guard let editor = document.editor else { fatalError("No benchmark editor") }
+        editor.layoutSubtreeIfNeeded()
+        let canvas = editor.canvas
+        canvas.setZoom(nil)
+        canvas.updateViewport()
+        canvas.tool = .moveSelectedPixels
+        canvas.setSelection(SelectionOutline(rect: selection)!)
+        canvas.needsDisplay = true
+        canvas.window?.displayIfNeeded()
+        canvas.display()
+        let image = canvas.canvasImageRect
+        let scale = image.width / CGFloat(width)
+        func event(_ type: NSEvent.EventType, shift: Int) -> NSEvent {
+            let point = CGPoint(x: image.minX + (selection.midX + CGFloat(shift) - 32) * scale,
+                                y: image.minY + (selection.midY + 40) * scale)
+            return NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil), modifierFlags: [],
+                                      timestamp: 0, windowNumber: canvas.window!.windowNumber, context: nil,
+                                      eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        canvas.mouseDown(with: event(.leftMouseDown, shift: 0))
+        canvas.mouseDragged(with: event(.leftMouseDragged, shift: -1))
+        canvas.display()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.060))
+        var samples = [Double](), nearEdge = [Double]()
+        var metalFrames = 0, changes = 0
+        var previouslyMetal = canvas.subviews.contains { $0 is MetalCanvasSurface && !$0.isHidden }
+        for shift in shifts {
+            let drag = event(.leftMouseDragged, shift: shift)
+            let duration = time {
+                canvas.mouseDragged(with: drag)
+                canvas.display()
+            }
+            samples.append(duration)
+            if abs(shift + 640) <= 36 || abs(shift + 768) <= 36 { nearEdge.append(duration) }
+            let metal = canvas.subviews.contains { $0 is MetalCanvasSurface && !$0.isHidden }
+            if metal { metalFrames += 1 }
+            if metal != previouslyMetal { changes += 1 }
+            previouslyMetal = metal
+            // Let the prior drawable retire before timing the next pointer event.
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.0 / 60.0))
+        }
+        precondition(canvas.hasPendingMove)
+        let label = "4096x2048 / \(count) layers / Fit / transparent edge"
+        stats("\(label) / all input + draw calls", samples)
+        stats("\(label) / near cutoff or fully outside", nearEdge)
+        print("\(label) / Metal surface visible on \(metalFrames)/\(samples.count) frames / \(changes) renderer switches")
+        canvas.cancelEditingGesture()
+        document.close()
+    }
+    exit(0)
+}
+#endif
+
 #if METAL_CANVAS_BENCHMARK
 if CommandLine.arguments.contains("--metal-canvas") {
     setbuf(stdout, nil)

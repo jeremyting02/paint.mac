@@ -5,6 +5,32 @@ import QuartzCore
 
 /// Renders a committed stack or floating move. SelectedPixelsTransform still owns document edits.
 final class MetalMovePreview {
+    /// A live replacement of the active layer. Edits update this buffer between presents.
+    final class ActivePixels {
+        fileprivate let buffer: MTLBuffer
+        private let width: Int
+        private let height: Int
+
+        fileprivate init(buffer: MTLBuffer, width: Int, height: Int) {
+            self.buffer = buffer
+            self.width = width
+            self.height = height
+        }
+
+        func update(_ bytes: Data, in region: CGRect) {
+            guard CGRect(x: 0, y: 0, width: width, height: height).contains(region), region == region.integral,
+                  !region.isEmpty, bytes.count == Int(region.width * region.height) * 4 else { return }
+            let rows = Int(region.height), rowBytes = Int(region.width) * 4
+            let start = (Int(region.minY) * width + Int(region.minX)) * 4
+            bytes.withUnsafeBytes { source in
+                for row in 0..<rows {
+                    buffer.contents().advanced(by: start + row * width * 4)
+                        .copyMemory(from: source.baseAddress!.advanced(by: row * rowBytes), byteCount: rowBytes)
+                }
+            }
+        }
+    }
+
     private struct Engine {
         let device: MTLDevice
         let queue: MTLCommandQueue
@@ -126,7 +152,9 @@ final class MetalMovePreview {
             if isActive { active = layers.count }
             layers.append(SIMD4(offset, UInt32(layer.opacity), UInt32(layer.blendMode.rawValue), 0))
         }
-        guard !layers.isEmpty, source == nil || active != nil else { return nil }
+        guard source == nil || active != nil else { return nil }
+        let visibleCount = layers.count
+        if layers.isEmpty { layers = [.zero] }
         let layout = source?.selection ?? .zero
         var clearedOffset = UInt32.max
         if source?.isPaste == true, let active {
@@ -148,7 +176,7 @@ final class MetalMovePreview {
             foregroundOffset = 0
             foregroundStride = image.width
         }
-        guard let input = engine.device.makeBuffer(length: byteCount, options: .storageModeShared),
+        guard let input = engine.device.makeBuffer(length: max(4, byteCount), options: .storageModeShared),
               let layerInfo = layers.withUnsafeBytes({ buffer in
                   engine.device.makeBuffer(bytes: buffer.baseAddress!, length: buffer.count, options: .storageModeShared)
               }) else { return nil }
@@ -161,8 +189,8 @@ final class MetalMovePreview {
         self.engine = engine
         self.input = input
         self.layerInfo = layerInfo
-        let activeIndex = source == nil ? UInt32.max : UInt32(active ?? 0)
-        canvas = SIMD4(UInt32(image.width), UInt32(layers.count), activeIndex, clearedOffset)
+        let activeIndex = active.map(UInt32.init) ?? .max
+        canvas = SIMD4(UInt32(image.width), UInt32(visibleCount), activeIndex, clearedOffset)
         foreground = SIMD4(foregroundOffset, UInt32(foregroundStride), UInt32(layout.width), UInt32(layout.height))
         selection = layout
         hasMove = source != nil
@@ -244,14 +272,25 @@ final class MetalMovePreview {
         return (parameters, destinationOrigin != nil)
     }
 
+    func makeActivePixels(from pixels: Data) -> ActivePixels? {
+        let width = Int(bounds.width), height = Int(bounds.height)
+        guard pixels.count == width * height * 4,
+              let buffer = pixels.withUnsafeBytes({ source in
+                  engine.device.makeBuffer(bytes: source.baseAddress!, length: source.count, options: .storageModeShared)
+              }) else { return nil }
+        return ActivePixels(buffer: buffer, width: width, height: height)
+    }
+
     func present(in layer: CAMetalLayer, region: CGRect, size: CGSize, by transform: CGAffineTransform,
-                 copy: Bool, sampling: MoveResampler.Mode, completed: @escaping @Sendable (Bool) -> Void) -> Bool {
+                 copy: Bool, sampling: MoveResampler.Mode, activePixels: ActivePixels?, checkerboard: SIMD4<Float>,
+                 completed: @escaping @Sendable (Bool) -> Void) -> Bool {
         layer.device = engine.device
         layer.colorspace = colorSpace
         if layer.drawableSize != size { layer.drawableSize = size }
         guard let drawable = layer.nextDrawable(),
               let command = encodeViewport(to: drawable.texture, region: region, transform: transform, copy: copy,
-                                           sampling: sampling) else { return false }
+                                           sampling: sampling, activePixels: activePixels,
+                                           checkerboard: checkerboard) else { return false }
         command.present(drawable)
         command.addCompletedHandler { completed($0.status == .completed) }
         command.commit()
@@ -260,7 +299,8 @@ final class MetalMovePreview {
 
     // Draw the same viewport offscreen for bitmaps, tests, and end-to-end comparisons.
     func renderViewport(in region: CGRect, size: CGSize, by transform: CGAffineTransform = .identity,
-                        copy: Bool = false, sampling: MoveResampler.Mode = .bicubic) -> CGImage? {
+                        copy: Bool = false, sampling: MoveResampler.Mode = .bicubic,
+                        activePixels: ActivePixels? = nil) -> CGImage? {
         guard size.width >= 1, size.height >= 1, size.width <= 8192, size.height <= 8192 else { return nil }
         let width = Int(size.width), height = Int(size.height)
         if previewTexture?.width != width || previewTexture?.height != height {
@@ -276,7 +316,8 @@ final class MetalMovePreview {
         }
         guard let texture = previewTexture,
               let command = encodeViewport(to: texture, region: region, transform: transform, copy: copy,
-                                           sampling: sampling) else { return nil }
+                                           sampling: sampling, activePixels: activePixels, checkerboard: .zero)
+        else { return nil }
         #if arch(x86_64)
         if texture.storageMode == .managed {
             guard let blit = command.makeBlitCommandEncoder() else { return nil }
@@ -300,7 +341,8 @@ final class MetalMovePreview {
     }
 
     private func encodeViewport(to texture: MTLTexture, region: CGRect, transform: CGAffineTransform,
-                                copy: Bool, sampling: MoveResampler.Mode) -> MTLCommandBuffer? {
+                                copy: Bool, sampling: MoveResampler.Mode, activePixels: ActivePixels?,
+                                checkerboard: SIMD4<Float>) -> MTLCommandBuffer? {
         guard !region.isEmpty,
               let (configuration, translates) = parameters(region: bounds, transform: transform, copy: copy,
                                                            sampling: sampling),
@@ -319,6 +361,10 @@ final class MetalMovePreview {
         encoder.setFragmentBuffer(layerInfo, offset: 0, index: 1)
         encoder.setFragmentBytes(&configurationBytes, length: MemoryLayout<Parameters>.stride, index: 3)
         encoder.setFragmentBytes(&mapping, length: MemoryLayout<SIMD4<Float>>.stride, index: 4)
+        encoder.setFragmentBuffer(activePixels?.buffer ?? input, offset: 0, index: 5)
+        var presentation = checkerboard
+        presentation.w = activePixels == nil ? 0 : 1
+        encoder.setFragmentBytes(&presentation, length: MemoryLayout<SIMD4<Float>>.stride, index: 6)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         return command

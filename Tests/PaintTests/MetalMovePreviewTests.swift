@@ -53,6 +53,80 @@ struct MetalMovePreviewTests {
         #expect(!surface.isHidden)
     }
 
+    @Test func viewportUsesTheLiveLayerReplacementAndCanRenderAnEmptyStack() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        let width = 16, height = 8
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let pixels = Data(repeating: 255, count: width * height * 4)
+        let image = try #require(BGRA8.image(from: pixels, width: width, height: height))
+        var layer = PaintLayer(name: "White", image: image, pdnPixels: pixels)
+        let renderer = try #require(MetalMovePreview(stack: LayerStack(layers: [layer], active: 0)))
+        let active = try #require(renderer.makeActivePixels(from: pixels))
+        active.update(Data([0, 0, 255, 255]), in: CGRect(x: 3, y: 2, width: 1, height: 1))
+        let preview = try #require(renderer.renderViewport(in: bounds, size: bounds.size, activePixels: active))
+        var expected = pixels
+        let offset = (2 * width + 3) * 4
+        expected.replaceSubrange(offset..<(offset + 4), with: [0, 0, 255, 255])
+        #expect(BGRA8.pixels(from: preview) == expected)
+        let committed = try #require(renderer.renderViewport(in: bounds, size: bounds.size))
+        #expect(BGRA8.pixels(from: committed) == pixels)
+
+        layer.isVisible = false
+        let transparent = try #require(MetalMovePreview(stack: LayerStack(layers: [layer], active: 0)))
+        let empty = try #require(transparent.renderViewport(in: bounds, size: bounds.size))
+        #expect(BGRA8.pixels(from: empty) == Data(count: pixels.count))
+    }
+
+    @MainActor @Test func oneSurfacePresentsEditsAcrossTheCanvasEdge() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        _ = NSApplication.shared
+        let width = 512, height = 320
+        let layer = try layer(width: width, height: height, seed: 37)
+        let stack = LayerStack(layers: [layer], active: 0)
+        let document = PaintDocument()
+        try document.read(from: PDNFile.write(stack), ofType: "Paint.NET Project")
+        document.showWindows()
+        defer { document.close() }
+        let editor = try #require(document.editor)
+        editor.layoutSubtreeIfNeeded()
+        let canvas = editor.canvas
+        canvas.setZoom(nil)
+        canvas.updateViewport()
+        let window = try #require(canvas.window)
+        canvas.needsDisplay = true
+        window.displayIfNeeded()
+        canvas.display()
+        let surface = try #require(canvas.subviews.first { $0 is MetalCanvasSurface })
+        #expect(!surface.isHidden)
+
+        var sheet = try #require(document.stack)
+        sheet.layers[sheet.active].opacity = 128
+        canvas.layerPreview = sheet
+        canvas.display()
+        #expect(!surface.isHidden)
+        canvas.layerPreview = nil
+
+        let rect = CGRect(x: 48, y: 32, width: 352, height: 240)
+        let outline = try #require(SelectionOutline(rect: rect))
+        let selection = CGRect(x: rect.minX, y: CGFloat(height) - rect.maxY, width: rect.width, height: rect.height)
+        let pixels = try #require(SelectedPixelsTransform(layer: layer, selection: selection))
+        let initial = MoveGeometry(rect: rect, pivot: CGPoint(x: rect.midX, y: rect.midY))
+        canvas.setSelection(outline)
+        for shift: CGFloat in [-12, -330, -420, -12] {
+            var geometry = initial
+            geometry.rect = rect.offsetBy(dx: shift, dy: 0)
+            let session = CanvasView.MoveSession(layerIndex: 0, pixels: pixels, outline: outline,
+                                                 initialGeometry: initial, geometry: geometry, recorded: true)
+            canvas.restoreMove(session)
+            canvas.display()
+            #expect(canvas.subviews.first { $0 is MetalCanvasSurface } === surface)
+            #expect(!surface.isHidden)
+        }
+        let expected = try #require(canvas.move?.renderedLayer()?.straightPixels)
+        canvas.finishSelection()
+        #expect(document.stack?.activeLayer.straightPixels == expected)
+    }
+
     private func layer(width: Int, height: Int, seed: Int, mode: LayerBlendMode = .normal,
                        opacity: UInt8 = 255) throws -> PaintLayer {
         let bytes = Data((0..<(width * height * 4)).map { UInt8(truncatingIfNeeded: $0 * seed + $0 / 17) })

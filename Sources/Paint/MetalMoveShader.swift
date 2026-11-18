@@ -107,7 +107,8 @@ float3 blend(uint mode, float3 a, float3 b) {
 }
 
 uchar4 compositePixel(device const uchar4 *pixels, device const uint4 *layers,
-                      constant Parameters &p, uint2 location) {
+                      constant Parameters &p, uint2 location, device const uchar4 *replacement,
+                      bool replacesActive) {
     uint pixel = location.y * p.canvas.x + location.x;
     uchar4 active = 0;
     if (!p.flags.w) {
@@ -140,12 +141,19 @@ uchar4 compositePixel(device const uchar4 *pixels, device const uint4 *layers,
         }
     }
 
-    if (p.canvas.y == 1 && layers[0].y == 255) return p.flags.w ? pixels[layers[0].x + pixel] : active;
+    if (p.canvas.y == 1 && layers[0].y == 255) {
+        if (!p.flags.w) return active;
+        return replacesActive && p.canvas.z == 0 ? replacement[pixel] : pixels[layers[0].x + pixel];
+    }
     float4 backdrop = 0;
     uchar4 bottom = 0;
     for (uint index = 0; index < p.canvas.y; ++index) {
         uint4 layer = layers[index];
-        uchar4 bytes = index == p.canvas.z ? active : pixels[layer.x + pixel];
+        uchar4 bytes = pixels[layer.x + pixel];
+        if (index == p.canvas.z) {
+            if (!p.flags.w) bytes = active;
+            else if (replacesActive) bytes = replacement[pixel];
+        }
         if (index == 0) bottom = bytes;
         float4 color = float4(bytes) / 255.0f;
         float alpha = color.w * (float(layer.y) / 255.0f);
@@ -168,7 +176,7 @@ kernel void renderMovePreview(device const uchar4 *pixels [[buffer(0)]],
                               constant Parameters &p [[buffer(3)]],
                               uint2 id [[thread_position_in_grid]]) {
     if (any(id >= p.region.zw)) return;
-    output[id.y * p.region.z + id.x] = compositePixel(pixels, layers, p, p.region.xy + id);
+    output[id.y * p.region.z + id.x] = compositePixel(pixels, layers, p, p.region.xy + id, pixels, false);
 }
 
 vertex float4 viewportVertex(uint id [[vertex_id]]) {
@@ -179,7 +187,9 @@ fragment float4 viewportFragment(float4 position [[position]],
                                  device const uchar4 *pixels [[buffer(0)]],
                                  device const uint4 *layers [[buffer(1)]],
                                  constant Parameters &p [[buffer(3)]],
-                                 constant float4 &mapping [[buffer(4)]]) {
+                                 constant float4 &mapping [[buffer(4)]],
+                                 device const uchar4 *replacement [[buffer(5)]],
+                                 constant float4 &presentation [[buffer(6)]]) {
     // Filter the composited pixels, including alpha, before writing premultiplied color.
     // Four strata per axis bound the work for heavily minified document previews.
     uint samples = uint(clamp(ceil(max(mapping.z, mapping.w)), 1.0f, 4.0f));
@@ -189,10 +199,17 @@ fragment float4 viewportFragment(float4 position [[position]],
             float2 subpixel = (float2(x, y) + 0.5f) / float(samples) - 0.5f;
             float2 source = mapping.xy + (position.xy + subpixel) * mapping.zw;
             uint2 point = uint2(clamp(floor(source), float2(0), float2(p.region.zw - 1)));
-            float4 value = float4(compositePixel(pixels, layers, p, point).zyxw) / 255.0f;
+            float4 value = float4(compositePixel(pixels, layers, p, point, replacement, presentation.w != 0).zyxw) / 255.0f;
             color += float4(value.xyz * value.w, value.w);
         }
     }
-    return color / float(samples * samples);
+    color /= float(samples * samples);
+    if (presentation.z > 0) {
+        float2 anchor = presentation.xy + float2(position.x, -position.y);
+        int2 square = int2(floor(anchor / presentation.z));
+        float gray = ((square.x + square.y) & 1) == 0 ? 0.73f : 0.90f;
+        return float4(color.xyz + gray * (1 - color.w), 1);
+    }
+    return color;
 }
 """

@@ -140,7 +140,8 @@ a History entry if the move is already in progress.
 Large move, resize, and rotation previews use Metal when available. Rotated edges can
 look slightly different in the floating preview. Finish uses the same CPU
 sampler for the committed pixels on every Mac.
-Layered canvases and large floating moves can present directly through Metal.
+The canvas presents through one Metal surface for painting, previews, and moves.
+If Metal cannot render, the canvas falls back to Core Graphics.
 Fit renders a filtered viewport-sized preview. A rectangular move can reuse
 the layered canvas's existing GPU data.
 
@@ -287,6 +288,9 @@ compare CPU and Metal rotation previews on the same 4,096 × 2,048 documents.
 It reports the first frame, including layer upload, and subsequent viewport redraws.
 Use `sh Tests/canvas-benchmark.sh --move-selection` for the same comparison while
 dragging a rectangular selection covering about 95% of the canvas.
+Run `sh Tests/canvas-benchmark.sh --transparent-edge 8326029` to compare
+on-screen drag and draw-call timings and renderer switches when a transparent
+selection crosses the canvas edge.
 Run `sh Tests/canvas-benchmark.sh --metal-canvas` to compare viewport rendering,
 initial layer compositing, move setup, and thumbnail rendering.
 Run `sh Tests/metal-raster-tools-benchmark.sh`, `sh Tests/metal-effects-benchmark.sh`,

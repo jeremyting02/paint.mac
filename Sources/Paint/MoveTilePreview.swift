@@ -90,18 +90,15 @@ final class MoveTilePreview {
 
     func metalFrame(in visible: CGRect, by transform: CGAffineTransform, copy: Bool,
                     sampling: MoveResampler.Mode) -> (region: CGRect, image: CGImage)? {
-        guard let preview = metalRenderer(in: visible, by: transform)?.render(in: visible, by: transform,
-                                                                             copy: copy, sampling: sampling)
+        let destination = pixels.destinationRegion(by: transform).intersection(visible)
+        guard !destination.isEmpty, destination.width * destination.height >= 65_536,
+              let preview = metal?.render(in: visible, by: transform, copy: copy, sampling: sampling)
         else { return nil }
         metalDraws += 1
         return preview
     }
 
-    func metalRenderer(in visible: CGRect, by transform: CGAffineTransform) -> MetalMovePreview? {
-        let destination = pixels.destinationRegion(by: transform).intersection(visible)
-        guard !destination.isEmpty, destination.width * destination.height >= 65_536 else { return nil }
-        return metal
-    }
+    var metalRenderer: MetalMovePreview? { metal }
 
     func tiles(in visible: CGRect, by transform: CGAffineTransform, copy: Bool, sampling: MoveResampler.Mode)
         -> [(core: CGRect, padded: CGRect, image: CGImage)] {

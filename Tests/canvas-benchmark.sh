@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 
 mode=
 case "${1:-}" in
-    --initial|--move|--move-rotation|--move-selection|--metal-canvas) mode=$1; shift ;;
+    --initial|--move|--move-rotation|--move-selection|--metal-canvas|--transparent-edge) mode=$1; shift ;;
 esac
 
 metal_mode=false
@@ -14,6 +14,7 @@ if [ "$#" -gt 1 ] || { [ "$mode" = --metal-canvas ] && [ "$#" -ne 0 ]; }; then
     echo "Usage: sh Tests/canvas-benchmark.sh [--initial|--move] [baseline-ref]" >&2
     echo "       sh Tests/canvas-benchmark.sh [--move-rotation|--move-selection] [baseline-ref]" >&2
     echo "       sh Tests/canvas-benchmark.sh --metal-canvas" >&2
+    echo "       sh Tests/canvas-benchmark.sh --transparent-edge [baseline-ref]" >&2
     exit 2
 fi
 
@@ -28,6 +29,7 @@ build_benchmark() {
     done
     if [ "$metal_mode" = true ]; then set -- -D METAL_MOVE_BENCHMARK "$@"; fi
     if [ "$mode" = --metal-canvas ]; then set -- -D METAL_CANVAS_BENCHMARK "$@"; fi
+    if [ "$mode" = --transparent-edge ]; then set -- -D TRANSPARENT_EDGE_BENCHMARK "$@"; fi
     swiftc -O -whole-module-optimization -I "$directory/Sources/CZlib" \
         -module-cache-path "$scratch/modules" "$@" Tests/CanvasBenchmark/main.swift -o "$directory/benchmark"
 }

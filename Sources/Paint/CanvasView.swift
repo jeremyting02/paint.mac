@@ -281,6 +281,7 @@ final class CanvasView: NSView {
         didSet {
             composite = nil
             moveTilePreview = nil
+            metalSheetPreview = nil
             needsDisplay = true
         }
     }
@@ -305,7 +306,15 @@ final class CanvasView: NSView {
     private var drawingDraft: (geometry: VectorDrawing, secondary: Bool, preview: PaintLayer?)?
     private enum DrawingDragMode { case create, handle(Int), move, rotate }
     private var drawingDrag: (anchor: CGPoint, mode: DrawingDragMode, initial: VectorDrawing)?
-    private var rasterDrawing: RasterDrawing?
+    private var rasterDrawing: RasterDrawing? {
+        didSet {
+            if oldValue !== rasterDrawing {
+                metalStroke = nil
+                metalStrokeDirty = .null
+                metalStrokeRevision &+= 1
+            }
+        }
+    }
     private var drawingWithSecondaryButton = false
     private var lastTabletPressure: CGFloat?
     private var cloneSource: (point: CGPoint, layer: Int)?
@@ -323,6 +332,12 @@ final class CanvasView: NSView {
     private var metalCanvas: MetalCanvasSurface?
     private var metalOverlay: MetalCanvasOverlay?
     private var metalStack: (revision: Int, renderer: MetalMovePreview?)?
+    private var metalSheetPreview: MetalMovePreview?
+    private var metalActivePreview: (image: CGImage, pixels: MetalMovePreview.ActivePixels)?
+    private var metalStroke: (renderer: MetalMovePreview, pixels: MetalMovePreview.ActivePixels)?
+    private var metalStrokeDirty = CGRect.null
+    private var metalStrokeRevision = 0
+    private var metalPresentationFailed = false
     var cachedMetalComposite: MetalMovePreview? {
         guard layerPreview == nil, metalStack?.revision == document?.stackRevision else { return nil }
         return metalStack?.renderer
@@ -421,6 +436,8 @@ final class CanvasView: NSView {
                 metalCanvas?.clearFrame()
                 metalOverlay?.isHidden = true
                 metalStack = nil
+                metalSheetPreview = nil
+                metalActivePreview = nil
                 moveTilePreview = nil
             } else if newWindow !== window {
                 cancelEditingGesture()
@@ -1617,8 +1634,14 @@ final class CanvasView: NSView {
         if let preview { stack.layers[stack.active] = preview }
         // AppKit can call draw while rendering the window into a backing surface.
         let onScreen = window != nil && NSPrintOperation.current == nil
-        let presents = onScreen && usesMetalViewportPreview &&
-            presentMetalCanvas(stack, move: floating, canComposite: brush == nil && preview == nil && layerPreview == nil)
+        let wantsMetal = onScreen && usesMetalViewportPreview
+        let presents: Bool
+        if wantsMetal && !metalPresentationFailed && !imageRect.intersection(visibleRect).isEmpty {
+            presents = presentMetalCanvas(stack, move: floating, brush: brush, preview: preview)
+            metalPresentationFailed = !presents
+        } else {
+            presents = false
+        }
         if onScreen && !presents {
             metalCanvas?.clearFrame()
             metalOverlay?.isHidden = true
@@ -1628,6 +1651,10 @@ final class CanvasView: NSView {
 
         context.saveGState()
         context.clip(to: visible)
+        if presents {
+            context.restoreGState()
+            return
+        }
         context.setFillColor(gray: 0.9, alpha: 1)
         context.fill(rect)
         context.setFillColor(gray: 0.73, alpha: 1)
@@ -1641,12 +1668,10 @@ final class CanvasView: NSView {
             }
         }
         if displayedZoomPercent >= 100 { context.interpolationQuality = .none }
-        if !presents {
-            if let floating, stack.activeLayer.opacity > 0 {
-                drawMovePreview(floating, stack: stack, visible: visible, in: context)
-            } else {
-                drawStack(stack, visible: visible, brush: brush, in: context)
-            }
+        if let floating, stack.activeLayer.opacity > 0 {
+            drawMovePreview(floating, stack: stack, visible: visible, allowsBitmapMetal: !wantsMetal, in: context)
+        } else {
+            drawStack(stack, visible: visible, brush: brush, in: context)
         }
         context.restoreGState()
     }
@@ -1701,24 +1726,30 @@ final class CanvasView: NSView {
         }
     }
 
-    private func presentMetalCanvas(_ stack: LayerStack, move session: MoveSession?, canComposite: Bool) -> Bool {
+    private func presentMetalCanvas(_ stack: LayerStack, move requestedMove: MoveSession?, brush: RasterDrawing?,
+                                    preview: PaintLayer?) -> Bool {
         let rect = imageRect.intersection(visibleRect)
-        guard !rect.isEmpty else { return false }
         let image = stack.activeLayer.image
         let region = imageRegion(for: rect, width: image.width)
+        let session = stack.activeLayer.isVisible && stack.activeLayer.opacity > 0 ? requestedMove : nil
         let transform = session?.transform ?? .identity
+        let documentStack = document?.stack ?? stack
+        let sheetUsesActivePixels = layerPreview != nil && canSharePreviewLayers(stack, committed: documentStack)
+        let usesSheetStack = layerPreview != nil && !sheetUsesActivePixels
+        let candidate = sheetUsesActivePixels ? stack.activeLayer : preview
+        let activePreview = stack.activeLayer.isVisible && stack.activeLayer.opacity > 0 ? candidate : nil
         let renderer: MetalMovePreview?
-        if let session, usesMetalMovePreview, stack.activeLayer.opacity > 0 {
-            if !stack.needsBlendComposite,
-               session.pixels?.retainedImageOffset(by: transform, copy: session.copy) != nil { return false }
+        if let session {
             if moveTilePreview == nil, let pixels = session.pixels {
                 moveTilePreview = MoveTilePreview(stack: stack, pixels: pixels, residentStack: cachedMetalComposite)
             }
-            renderer = moveTilePreview?.metalRenderer(in: region, by: transform)
-        } else if session == nil, canComposite, stack.needsBlendComposite,
-                  region.width * region.height >= 65_536, let revision = document?.stackRevision {
+            renderer = moveTilePreview?.metalRenderer
+        } else if usesSheetStack {
+            if metalSheetPreview == nil { metalSheetPreview = MetalMovePreview(stack: stack) }
+            renderer = metalSheetPreview
+        } else if let revision = document?.stackRevision {
             if metalStack?.revision != revision {
-                metalStack = (revision, MetalMovePreview(stack: stack))
+                metalStack = (revision, MetalMovePreview(stack: documentStack))
             }
             renderer = metalStack?.renderer
         } else {
@@ -1740,17 +1771,58 @@ final class CanvasView: NSView {
             metalOverlay = overlay
         }
         guard let surface = metalCanvas, let overlay = metalOverlay else { return false }
-        let size = CGSize(width: (rect.width * backingScale).rounded(), height: (rect.height * backingScale).rounded())
-        guard size.width >= 1, size.height >= 1 else { return false }
+        let size = CGSize(width: max(1, (rect.width * backingScale).rounded()),
+                          height: max(1, (rect.height * backingScale).rounded()))
+        let checker = SIMD4(Float((rect.minX - imageRect.minX) * backingScale),
+                            Float((rect.maxY - imageRect.minY) * backingScale), Float(12 * backingScale), 0)
         let frame = MetalCanvasSurface.Frame(region: region, size: size, transform: transform,
-                                            copy: session?.copy ?? false, sampling: session?.sampling ?? .bicubic)
-        surface.frame = rect
+                                            copy: session?.copy ?? false, sampling: session?.sampling ?? .bicubic,
+                                            checkerboard: checker, activeImage: activePreview.map { ObjectIdentifier($0.image) },
+                                            strokeRevision: brush == nil ? nil : metalStrokeRevision)
+        if surface.frame != rect { surface.frame = rect }
         surface.isHidden = false
-        guard surface.draw(frame, with: renderer, invalidate: { [weak self] in self?.needsDisplay = true }) else { return false }
-        overlay.frame = visibleRect
+        guard surface.draw(frame, with: renderer, activePixels: {
+            if let brush { return prepareMetalStroke(brush, stack: documentStack, renderer: renderer) }
+            guard let activePreview else {
+                metalActivePreview = nil
+                return nil
+            }
+            if metalActivePreview?.image !== activePreview.image, let bytes = activePreview.straightPixels,
+               let pixels = renderer.makeActivePixels(from: bytes) {
+                metalActivePreview = (activePreview.image, pixels)
+            }
+            return metalActivePreview?.image === activePreview.image ? metalActivePreview?.pixels : nil
+        }, invalidate: { [weak self] in self?.needsDisplay = true }) else { return false }
+        if overlay.frame != visibleRect { overlay.frame = visibleRect }
         overlay.isHidden = false
         overlay.needsDisplay = true
         return true
+    }
+
+    private func canSharePreviewLayers(_ preview: LayerStack, committed: LayerStack) -> Bool {
+        guard preview.active == committed.active, preview.layers.count == committed.layers.count else { return false }
+        return preview.layers.indices.allSatisfy { index in
+            let a = preview.layers[index], b = committed.layers[index]
+            return (index == preview.active || a.image === b.image) && a.isVisible == b.isVisible &&
+                a.opacity == b.opacity && a.blendMode == b.blendMode
+        }
+    }
+
+    private func prepareMetalStroke(_ brush: RasterDrawing, stack: LayerStack, renderer: MetalMovePreview)
+        -> MetalMovePreview.ActivePixels? {
+        if metalStroke?.renderer !== renderer {
+            let image = stack.activeLayer.image
+            let bounds = canvasBounds(for: image)
+            let previous = metalStroke == nil ? nil : brush.pixels(in: bounds)
+            guard let bytes = previous ?? stack.activeLayer.straightPixels,
+                  let pixels = renderer.makeActivePixels(from: bytes) else { return nil }
+            metalStroke = (renderer, pixels)
+        }
+        if !metalStrokeDirty.isEmpty, let bytes = brush.pixels(in: metalStrokeDirty) {
+            metalStroke?.pixels.update(bytes, in: metalStrokeDirty)
+        }
+        metalStrokeDirty = .null
+        return metalStroke?.pixels
     }
 
     private func drawStack(_ stack: LayerStack, visible: CGRect, brush: RasterDrawing? = nil, in context: CGContext) {
@@ -1797,7 +1869,8 @@ final class CanvasView: NSView {
         context.restoreGState()
     }
 
-    private func drawMovePreview(_ session: MoveSession, stack: LayerStack, visible: CGRect, in context: CGContext) {
+    private func drawMovePreview(_ session: MoveSession, stack: LayerStack, visible: CGRect,
+                                 allowsBitmapMetal: Bool, in context: CGContext) {
         let image = stack.activeLayer.image
         let transform = session.transform
         if !stack.needsBlendComposite,
@@ -1821,7 +1894,7 @@ final class CanvasView: NSView {
             return
         }
         let dirtyImage = imageRegion(for: visible, width: image.width)
-        if usesMetalMovePreview, let preview = moveTilePreview.metalFrame(in: dirtyImage, by: transform,
+        if allowsBitmapMetal && usesMetalMovePreview, let preview = moveTilePreview.metalFrame(in: dirtyImage, by: transform,
                                                                          copy: session.copy, sampling: session.sampling) {
             context.draw(preview.image, in: viewRegion(for: preview.region, image: image))
             return
@@ -2067,6 +2140,8 @@ private extension CanvasView {
     private func invalidateRasterDrawing(_ drawing: RasterDrawing) {
         let region = drawing.takeDirtyBounds()
         guard !region.isEmpty, let stack = document?.stack else { return }
+        metalStrokeRevision &+= 1
+        metalStrokeDirty = metalStrokeDirty.union(region)
         if composite == nil { composite = CanvasComposite(stack: stack) }
         composite?.invalidate(region)
         setNeedsDisplay(viewRegion(for: region, image: stack.activeLayer.image).insetBy(dx: -2, dy: -2))

@@ -9,6 +9,9 @@ final class MetalCanvasSurface: NSView {
         let transform: CGAffineTransform
         let copy: Bool
         let sampling: MoveResampler.Mode
+        let checkerboard: SIMD4<Float>
+        let activeImage: ObjectIdentifier?
+        let strokeRevision: Int?
     }
 
     private var last: (MetalMovePreview, Frame)?
@@ -18,7 +21,7 @@ final class MetalCanvasSurface: NSView {
 
     override func makeBackingLayer() -> CALayer {
         let layer = CAMetalLayer()
-        layer.isOpaque = false
+        layer.isOpaque = true
         return layer
     }
 
@@ -29,15 +32,19 @@ final class MetalCanvasSurface: NSView {
         isHidden = true
     }
 
-    func draw(_ frame: Frame, with renderer: MetalMovePreview, invalidate: @escaping () -> Void) -> Bool {
+    func draw(_ frame: Frame, with renderer: MetalMovePreview,
+              activePixels: () -> MetalMovePreview.ActivePixels?, invalidate: @escaping () -> Void) -> Bool {
         guard !failed, let layer = layer as? CAMetalLayer else { return false }
         if let last, last.0 === renderer, last.1 == frame { return true }
         if inFlight {
             pending = true
             return true
         }
+        let replacement = activePixels()
+        if replacement == nil && (frame.activeImage != nil || frame.strokeRevision != nil) { return false }
         inFlight = renderer.present(in: layer, region: frame.region, size: frame.size, by: frame.transform,
-                                    copy: frame.copy, sampling: frame.sampling) { [weak self] success in
+                                    copy: frame.copy, sampling: frame.sampling, activePixels: replacement,
+                                    checkerboard: frame.checkerboard) { [weak self] success in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.inFlight = false
