@@ -13,11 +13,10 @@ trap 'rm -rf "$scratch"' EXIT
 build() {
     directory=$1
     shift
-    for source in "$directory"/Sources/Paint/*.swift; do
-        [ "${source##*/}" = main.swift ] || set -- "$@" "$source"
-    done
-    swiftc -O -whole-module-optimization -I "$directory/Sources/CZlib" \
-        -module-cache-path "$scratch/modules" "$@" Tests/DocumentJobsBenchmark/main.swift -o "$directory/benchmark"
+    find "$directory/Sources/Paint" -type f -name '*.swift' ! -name main.swift \
+        -exec swiftc -O -whole-module-optimization -I "$directory/Sources/CZlib" \
+            -module-cache-path "$scratch/modules" "$@" Tests/DocumentJobsBenchmark/main.swift \
+            -o "$directory/benchmark" {} +
 }
 
 if [ "$#" -eq 1 ]; then

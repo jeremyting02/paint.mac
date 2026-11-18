@@ -24,14 +24,13 @@ trap 'rm -rf "$scratch"' EXIT
 build_benchmark() {
     directory=$1
     set --
-    for source in "$directory"/Sources/Paint/*.swift; do
-        [ "${source##*/}" = main.swift ] || set -- "$@" "$source"
-    done
     if [ "$metal_mode" = true ]; then set -- -D METAL_MOVE_BENCHMARK "$@"; fi
     if [ "$mode" = --metal-canvas ]; then set -- -D METAL_CANVAS_BENCHMARK "$@"; fi
     if [ "$mode" = --transparent-edge ]; then set -- -D TRANSPARENT_EDGE_BENCHMARK "$@"; fi
-    swiftc -O -whole-module-optimization -I "$directory/Sources/CZlib" \
-        -module-cache-path "$scratch/modules" "$@" Tests/CanvasBenchmark/main.swift -o "$directory/benchmark"
+    find "$directory/Sources/Paint" -type f -name '*.swift' ! -name main.swift \
+        -exec swiftc -O -whole-module-optimization -I "$directory/Sources/CZlib" \
+            -module-cache-path "$scratch/modules" "$@" Tests/CanvasBenchmark/main.swift \
+            -o "$directory/benchmark" {} +
 }
 
 run_benchmark() {

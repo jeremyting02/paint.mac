@@ -4,9 +4,10 @@ cd "$(dirname "$0")/.."
 
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-swiftc -I Sources/CZlib Sources/Paint/PDN*.swift Sources/Paint/LayerStack.swift \
-    Sources/Paint/LayerBlendMode.swift Sources/Paint/ImageResolution.swift Sources/Paint/PaintFiles.swift \
-    Sources/Paint/RGBColorProfile.swift Sources/Paint/RegionComposite.swift Sources/Paint/PixelRegion.swift \
-    Sources/Paint/MetalRasterTools.swift \
+swiftc -I Sources/CZlib Sources/Paint/FileFormats/PDN*.swift Sources/Paint/FileFormats/PaintFiles.swift \
+    Sources/Paint/Document/LayerStack.swift Sources/Paint/Document/ImageResolution.swift \
+    Sources/Paint/Document/RGBColorProfile.swift Sources/Paint/Raster/LayerBlendMode.swift \
+    Sources/Paint/Raster/RegionComposite.swift Sources/Paint/Raster/PixelRegion.swift \
+    Sources/Paint/Raster/MetalRasterTools.swift \
     Tests/main.swift -o "$scratch/check"
 "$scratch/check" Tests/Layers52.pdn

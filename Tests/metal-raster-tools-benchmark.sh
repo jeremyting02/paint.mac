@@ -5,11 +5,14 @@ cd "$(dirname "$0")/.."
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 swiftc -O -whole-module-optimization -I Sources/CZlib -module-cache-path "$scratch/modules" \
-    Sources/Paint/PDN*.swift Sources/Paint/RGBColorProfile.swift Sources/Paint/LayerStack.swift \
-    Sources/Paint/LayerBlendMode.swift Sources/Paint/RegionComposite.swift Sources/Paint/PixelRegion.swift \
-    Sources/Paint/FloodSettings.swift Sources/Paint/SelectionOutline.swift Sources/Paint/LinearGradient.swift \
-    Sources/Paint/VectorDrawing.swift Sources/Paint/RasterDrawing.swift Sources/Paint/RasterHistoryPatch.swift \
-    Sources/Paint/BrushOptions.swift Sources/Paint/BrushTip.swift Sources/Paint/MetalRasterTools.swift \
-    Sources/Paint/MetalBrushStroke.swift \
+    Sources/Paint/FileFormats/PDN*.swift Sources/Paint/Document/RGBColorProfile.swift \
+    Sources/Paint/Document/LayerStack.swift Sources/Paint/Document/ImageResolution.swift \
+    Sources/Paint/Canvas/TextLayout.swift Sources/Paint/Raster/LayerBlendMode.swift \
+    Sources/Paint/Raster/RegionComposite.swift Sources/Paint/Raster/PixelRegion.swift \
+    Sources/Paint/Raster/FloodSettings.swift Sources/Paint/Raster/SelectionOutline.swift \
+    Sources/Paint/Raster/LinearGradient.swift Sources/Paint/Raster/VectorDrawing.swift \
+    Sources/Paint/Raster/RasterDrawing.swift Sources/Paint/Raster/RasterHistoryPatch.swift \
+    Sources/Paint/Raster/BrushOptions.swift Sources/Paint/Raster/BrushTip.swift \
+    Sources/Paint/Raster/MetalRasterTools.swift Sources/Paint/Raster/MetalBrushStroke.swift \
     Tests/MetalRasterToolsBenchmark/main.swift -o "$scratch/benchmark"
 "$scratch/benchmark"
