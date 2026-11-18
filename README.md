@@ -1,6 +1,6 @@
 # paint.mac
 
-Native macOS bitmap editor for layered Paint.NET (`.pdn`) projects. Open, edit, and save layers or export a flattened image.
+paint.mac is an independent, faithful recreation of the Paint.NET editing experience on macOS. Open, edit, and save layered Paint.NET (`.pdn`) projects or export a flattened image.
 
 ![paint.mac editing a layered illustration](docs/screenshot.png)
 
