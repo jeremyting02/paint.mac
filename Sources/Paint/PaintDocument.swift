@@ -15,6 +15,21 @@ final class PaintDocument: NSDocument {
     private static let projectType = "Paint.NET Project"
     private static let projectContentType = UTType(importedAs: "com.paintdotnet.pdn")
     private static let pixelClipboardTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .init(UTType.jpeg.identifier)]
+    private static let pixelOriginType = NSPasteboard.PasteboardType("local.paintmac.pixel-origin")
+
+    private struct PixelOrigin: Codable {
+        let x: Int
+        let y: Int
+
+        static func read(from data: Data?, for image: CGImage) -> CGPoint? {
+            guard let data, data.count <= 64, let origin = try? JSONDecoder().decode(Self.self, from: data),
+                  (0...(Int.max - image.width)).contains(origin.x),
+                  (0...(Int.max - image.height)).contains(origin.y),
+                  LayerStack.supportsCanvas(width: origin.x + image.width, height: origin.y + image.height)
+            else { return nil }
+            return CGPoint(x: origin.x, y: origin.y)
+        }
+    }
     private(set) var stack: LayerStack? { didSet { stackRevision &+= 1 } }
     private(set) var stackRevision = 0
     private var activeJob: DocumentJob?
@@ -86,6 +101,7 @@ final class PaintDocument: NSDocument {
         guard let canvas = editor?.canvas, canvas.canCopyPixels, let layer = canvas.copyableLayer,
               var copied = flattened ? stack?.copyingFlattened(preview: layer) : layer else { return }
         var cutLayer: PaintLayer?
+        var origin = PixelOrigin(x: 0, y: 0)
         if let outline = canvas.copyableOutline {
             let bounds = outline.bounds.integral
             let height = layer.image.height
@@ -93,6 +109,7 @@ final class PaintDocument: NSDocument {
                                 width: bounds.width, height: bounds.height)
             let mask = outline.pixelRectangle ? nil : outline.mask(in: region, imageHeight: height)
             guard outline.pixelRectangle || mask != nil, copied.crop(to: region, keeping: mask) else { return }
+            origin = PixelOrigin(x: Int(region.minX), y: Int(region.minY))
             if cutting {
                 guard let source = layer.straightPixels,
                       let cleared = layer.withPixels(layer.clearing(region, mask: mask, from: source)) else { return }
@@ -102,9 +119,12 @@ final class PaintDocument: NSDocument {
             return
         }
 
-        guard let data = try? PaintFiles.pngData(copied.image) else { return }
+        guard let data = try? PaintFiles.pngData(copied.image),
+              let originData = try? JSONEncoder().encode(origin) else { return }
+        let item = NSPasteboardItem()
+        guard item.setData(data, forType: .png), item.setData(originData, forType: Self.pixelOriginType) else { return }
         clipboard.clearContents()
-        guard clipboard.setData(data, forType: .png) else { return }
+        guard clipboard.writeObjects([item]) else { return }
         if let cutLayer {
             canvas.finishLiveEdit()
             canvas.completeMoveDrag()
@@ -113,9 +133,16 @@ final class PaintDocument: NSDocument {
     }
 
     static func image(on clipboard: NSPasteboard) -> CGImage? {
+        clipboardPixels(from: clipboard)?.image
+    }
+
+    private static func clipboardPixels(from clipboard: NSPasteboard) -> (image: CGImage, origin: CGPoint?)? {
+        guard let items = clipboard.pasteboardItems else { return nil }
         for type in Self.pixelClipboardTypes {
-            if let data = clipboard.data(forType: type), let image = PaintFiles.readClipboardImage(data) {
-                return image
+            if let item = items.first(where: { $0.types.contains(type) }),
+               let data = item.data(forType: type), let image = PaintFiles.readClipboardImage(data) {
+                let origin = type == .png ? PixelOrigin.read(from: item.data(forType: pixelOriginType), for: image) : nil
+                return (image, origin)
             }
         }
         return nil
@@ -124,11 +151,11 @@ final class PaintDocument: NSDocument {
     func pastePixels(from clipboard: NSPasteboard, intoNewLayer: Bool = false) {
         guard let stack, editor != nil,
               intoNewLayer ? stack.canDuplicate : stack.activeLayer.isVisible else { return }
-        guard let pasted = Self.image(on: clipboard) else { NSSound.beep(); return }
+        guard let (pasted, origin) = Self.clipboardPixels(from: clipboard) else { NSSound.beep(); return }
         let requiredWidth = max(pasted.width, stack.activeLayer.image.width)
         let requiredHeight = max(pasted.height, stack.activeLayer.image.height)
         if requiredWidth == stack.activeLayer.image.width && requiredHeight == stack.activeLayer.image.height {
-            performPaste(pasted, intoNewLayer: intoNewLayer, expand: false)
+            performPaste(pasted, origin: origin, intoNewLayer: intoNewLayer, expand: false)
         } else if let window = windowForSheet, window.attachedSheet == nil {
             let alert = NSAlert()
             alert.messageText = "The clipboard image is larger than the canvas."
@@ -139,18 +166,18 @@ final class PaintDocument: NSDocument {
             alert.addButton(withTitle: "Cancel")
             alert.beginSheetModal(for: window) { [weak self] response in
                 if canExpand && response == .alertFirstButtonReturn {
-                    self?.performPaste(pasted, intoNewLayer: intoNewLayer, expand: true)
+                    self?.performPaste(pasted, origin: origin, intoNewLayer: intoNewLayer, expand: true)
                 } else if response == (canExpand ? .alertSecondButtonReturn : .alertFirstButtonReturn) {
-                    self?.performPaste(pasted, intoNewLayer: intoNewLayer, expand: false)
+                    self?.performPaste(pasted, origin: origin, intoNewLayer: intoNewLayer, expand: false)
                 }
             }
         }
     }
 
-    func performPaste(_ pasted: CGImage, intoNewLayer: Bool, expand: Bool) {
+    func performPaste(_ pasted: CGImage, origin: CGPoint? = nil, intoNewLayer: Bool, expand: Bool) {
         guard let canvas = editor?.canvas else { return }
         if !intoNewLayer && !expand {
-            canvas.pastePixels(pasted)
+            canvas.pastePixels(pasted, sourceOrigin: origin)
             return
         }
         canvas.finishSelection()
@@ -162,7 +189,7 @@ final class PaintDocument: NSDocument {
                                                        anchor: .topLeft)
             }
             if intoNewLayer { try prepared.insertBlankLayer() }
-            canvas.pastePixels(pasted, replacingStack: prepared, fromTopLeft: expand,
+            canvas.pastePixels(pasted, sourceOrigin: origin, replacingStack: prepared, fromTopLeft: expand,
                                actionName: intoNewLayer ? "Paste into New Layer" : "Paste")
         } catch {
             presentError(error)

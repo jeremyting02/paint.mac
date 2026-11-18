@@ -171,9 +171,13 @@ Option-Shift-Command-V uses Replace.
 
 Use **Command-X** to cut selected pixels from the active layer and **Command-C**
 to copy them. With no selection, Copy takes the entire active layer.
-**Command-V** pastes a clipboard image at the top-left of the selection or, if
-there is no selection, at the top-left of the visible canvas. **Move Pixels**
-lets you position, resize, or rotate it before committing. **Paste**
+**Command-V** preserves the copied pixel coordinates in the same image or
+another open image when the paste fits there in view. If it would extend
+beyond the visible canvas, it shifts just enough to fit. On an axis where
+the paste is larger than the view, it starts at the visible edge and keeps
+its size. Images copied from other apps without source coordinates start at
+the top-left of the visible canvas. **Move Pixels** lets you position, resize,
+or rotate the paste before committing. **Paste**
 has its own history entry. Use **Command-Z** to step back through its transforms
 and then remove the floating paste.
 

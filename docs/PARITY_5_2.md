@@ -50,6 +50,13 @@ Motion Blur exposes Centered and all four documented edge modes. Synthetic
 tests verify the direction, centering, and boundary behavior. Its sampling,
 default settings, and pixel output still need comparison against 5.2.
 
+Cut, Copy, and Copy Flattened retain the source image coordinates for Paste
+and Paste into New Layer, including across documents. paint.mac shifts the
+paste by the minimum amount that fits the current viewport and aligns
+oversized axes to the viewport edge. Paint.NET documents viewport-relative
+placement when zoomed in. Its exact partial-overlap rule still needs a
+side-by-side check. [Paint.NET Edit menu](https://paint.net/doc/latest/EditMenu.html)
+
 Paint.NET 5.2 reopened and resaved a Mac-edited 8 × 6 PDN. All 144 stored
 pixels across three layers, layer properties and resolution matched after
 the resave. Paint.NET renumbered its EXIF entries and added software and

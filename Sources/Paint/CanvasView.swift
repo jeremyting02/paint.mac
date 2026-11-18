@@ -862,24 +862,16 @@ final class CanvasView: NSView, NSTextViewDelegate {
         document?.stack != nil && (copyableOutline != nil || (selectionOutline == nil && move?.isPaste != true))
     }
 
-    func pastePixels(_ pastedImage: CGImage, replacingStack replacement: LayerStack? = nil,
+    func pastePixels(_ pastedImage: CGImage, sourceOrigin: CGPoint? = nil, replacingStack replacement: LayerStack? = nil,
                      fromTopLeft: Bool = false, actionName: String = "Paste") {
         guard let document, let stack = replacement ?? document.stack,
               let layer = replacement?.activeLayer ?? copyableLayer,
               layer.isVisible, layerPreview == nil else { return }
-        let corner: CGPoint
-        if fromTopLeft {
-            corner = CGPoint(x: 0, y: layer.image.height)
-        } else if selectionOutline != nil || move?.isPaste == true, let bounds = copyableOutline?.bounds.integral {
-            corner = CGPoint(x: bounds.minX, y: bounds.maxY)
-        } else {
-            let visible = imageRect.intersection(visibleRect)
-            corner = visible.isEmpty ? CGPoint(x: 0, y: layer.image.height)
-                : pixelEdge(at: CGPoint(x: visible.minX, y: visible.maxY), in: layer.image)
-        }
-        let rect = CGRect(x: corner.x, y: corner.y - CGFloat(pastedImage.height),
-                          width: CGFloat(pastedImage.width), height: CGFloat(pastedImage.height))
-        let destination = topLeftRect(rect, imageHeight: layer.image.height)
+        let size = CGSize(width: pastedImage.width, height: pastedImage.height)
+        let origin = fromTopLeft ? .zero : pasteOrigin(sourceOrigin, size: size, in: layer.image)
+        let destination = CGRect(origin: origin, size: size)
+        let rect = CGRect(x: origin.x, y: CGFloat(layer.image.height) - destination.maxY,
+                          width: size.width, height: size.height)
         guard let outline = SelectionOutline(rect: rect),
               let pixels = SelectedPixelsTransform(layer: layer, pastedImage: pastedImage, at: destination) else { return }
 
@@ -895,6 +887,30 @@ final class CanvasView: NSView, NSTextViewDelegate {
             document.recordMove(from: nil, to: session, actionName: actionName)
         }
         window?.makeFirstResponder(self)
+    }
+
+    private func pasteOrigin(_ source: CGPoint?, size: CGSize, in image: CGImage) -> CGPoint {
+        let visible = imageRect.intersection(visibleRect)
+        let width = CGFloat(image.width), height = CGFloat(image.height)
+        let minX: CGFloat, minY: CGFloat, maxX: CGFloat, maxY: CGFloat
+        if visible.isEmpty {
+            minX = 0
+            minY = 0
+            maxX = width
+            maxY = height
+        } else {
+            // Use whole pixel edges in top-left image coordinates. A subpixel
+            // sliver at the edge still has one pixel available for placement.
+            minX = min(width - 1, ceil((visible.minX - imageRect.minX) / imageRect.width * width))
+            minY = min(height - 1, ceil((imageRect.maxY - visible.maxY) / imageRect.height * height))
+            maxX = floor((visible.maxX - imageRect.minX) / imageRect.width * width)
+            maxY = floor((imageRect.maxY - visible.minY) / imageRect.height * height)
+        }
+        func fit(_ coordinate: CGFloat, lower: CGFloat, upper: CGFloat, length: CGFloat) -> CGFloat {
+            max(lower, min(coordinate, upper - length))
+        }
+        return CGPoint(x: fit(source?.x ?? minX, lower: minX, upper: maxX, length: size.width),
+                       y: fit(source?.y ?? minY, lower: minY, upper: maxY, length: size.height))
     }
 
     func cancelEditingGesture() {
