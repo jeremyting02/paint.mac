@@ -134,7 +134,7 @@ enum MetalRasterEffects {
     }
 
     enum Blur: UInt32 {
-        case fragment, radial, surface, quantile, outline
+        case fragment, radial, surface, quantile, outline, motion
     }
 
     static func blur(_ effect: Blur, pixels: Data, width: Int, height: Int, parameters: [SIMD4<Float>],

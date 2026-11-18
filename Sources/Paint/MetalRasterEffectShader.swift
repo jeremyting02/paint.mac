@@ -369,11 +369,33 @@ uint rasterBlurQuantile(device const uchar4 *input, int2 point, uint2 size, cons
     return uint(ordered[rank]);
 }
 
+int rasterMotionEdge(int value, int size, uint edge) {
+    if (edge == 0 || edge == 3) return clamp(value, 0, size - 1);
+    if (edge == 1) return ((value % size) + size) % size;
+    int period = 2 * size;
+    int index = ((value % period) + period) % period;
+    return min(index, period - index - 1);
+}
+
 kernel void rasterCustomBlur(device const uchar4 *input [[buffer(0)]], device uchar4 *output [[buffer(1)]],
                               constant float4 *table [[buffer(2)]], constant uint4 &options [[buffer(3)]],
                               uint pixel [[thread_position_in_grid]]) {
     if (pixel >= options.x) return;
     int2 point = int2(pixel % options.y, pixel / options.y);
+    if (options.w == 5) {
+        uint count = uint(table[0].x), edge = uint(table[0].y);
+        float4 sum = float4(0);
+        for (uint i = 1; i <= count; ++i) {
+            int2 tap = point + int2(table[i].xy);
+            if (edge == 3 && any(uint2(tap) >= options.yz)) continue;
+            int x = rasterMotionEdge(tap.x, int(options.y), edge);
+            int y = rasterMotionEdge(tap.y, int(options.z), edge);
+            sum += rasterPremultiply(input[y * int(options.y) + x]) * table[i].z;
+        }
+        float3 rgb = sum.w > 0 ? sum.xyz * (255.0f / sum.w) : float3(0);
+        output[pixel] = uchar4(uchar3(clamp(round(rgb), 0.0f, 255.0f)), uchar(clamp(round(sum.w), 0.0f, 255.0f)));
+        return;
+    }
     if (options.w == 3) {
         output[pixel] = as_type<uchar4>(rasterBlurQuantile(input, point, options.yz, table));
         return;

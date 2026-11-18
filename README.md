@@ -145,9 +145,10 @@ If Metal cannot render, the canvas falls back to Core Graphics.
 Fit renders a filtered viewport-sized preview. A rectangular move can reuse
 the layered canvas's existing GPU data.
 
-Drag a corner or edge handle to resize. Hold **Shift** to preserve proportions,
-**Option** to resize about the center, or both to combine them. Drag a handle
-past its opposite edge to flip. **Command**-drag to keep the original pixels
+Drag a corner or edge handle to resize. Hold **Shift** to preserve the proportions
+at the point you press it. Hold **Option** to resize about the center, or hold
+both to combine them. Drag a handle past its opposite edge to flip.
+**Command**-drag to keep the original pixels
 and transform a copy. Use the arrow keys to nudge one pixel, or hold **Control**
 to nudge ten.
 
@@ -239,7 +240,9 @@ filters. They operate on the active visible layer and honor the selection.
 the alpha levels separately. **Pixelate** offers independent Scale Down and
 Scale Up settings. **Square Blur** supports a radius from 0 to 300 and
 Gamma Boost from −0.99 to +2. Raising Gamma Boost gives brighter samples more
-weight in the blur.
+weight in the blur. **Motion Blur** can center the trail on each pixel or extend
+it in one direction. **Edge Behavior** controls how it samples beyond the canvas
+with Clamp, Wrap, Mirror, and Transparent modes.
 Configurable filters preview changes as you adjust their values. **Apply**
 adds a single history entry and **Cancel** discards the preview. **Effects →
 Repeat Last Effect** reuses the most recently applied effect settings.

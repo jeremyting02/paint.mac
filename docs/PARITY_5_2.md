@@ -37,6 +37,18 @@ alpha values. Fixed-position dabs and unsmoothed short strokes match the
 captured path sampler's dab centers. Reference coverage at those fixed
 positions remains unverified because Wine rejected Direct2D brush-mask rendering.
 
+The hard-tip approximation accounts for circular edge curvature. The 9-pixel
+100% hardness capture now allows an alpha RMSE of 3.7 on the 0–255 scale.
+
+Both Move tools preserve the live aspect ratio when Shift is pressed during a
+resize and keep the current size when Shift is released. The Mac integration
+test exercises the side handle, undo and redo. This follows the
+[5.2 release notes](https://paint.net/roadmap.html).
+
+Motion Blur exposes Centered and all four documented edge modes. Synthetic
+tests verify the direction, centering, and boundary behavior. Its sampling,
+default settings, and pixel output still need comparison against 5.2.
+
 Paint.NET 5.2 reopened and resaved a Mac-edited 8 × 6 PDN. All 144 stored
 pixels across three layers, layer properties and resolution matched after
 the resave. Paint.NET renumbered its EXIF entries and added software and

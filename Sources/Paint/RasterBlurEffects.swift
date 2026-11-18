@@ -2,6 +2,29 @@ import Foundation
 
 extension RasterFilter {
     static let blurEffects: [Self] = [
+        Self("Motion Blur", category: "Blurs", [
+            .init("Angle", -180...180, 0, step: 0.1),
+            .init("Distance", 0...200, 10),
+            .init("Centered", choices: ["Off", "On"], initial: 1),
+            .init("Edge Behavior", choices: ["Clamp", "Wrap", "Mirror", "Transparent"])
+        ], preview: { bytes, width, height, values, cancelled in
+            let taps = motionTaps(values)
+            guard !taps.isEmpty else { return bytes }
+            let parameters = [SIMD4(Float(taps.count), Float(values[3]), 0, 0)] + taps.map {
+                SIMD4(Float($0.x), Float($0.y), Float($0.weight), 0)
+            }
+            return MetalRasterEffects.blur(.motion, pixels: bytes, width: width, height: height,
+                                           parameters: parameters, isCancelled: cancelled)
+        }, render: { bytes, width, height, values, cancelled in
+            let taps = motionTaps(values)
+            guard !taps.isEmpty else { return bytes }
+            let edge = BlurEdge.allCases[Int(values[3])]
+            return renderBlur(bytes, width: width, height: height, edge: edge, cancelled: cancelled) { raster, x, y in
+                var sum = Pixel.zero
+                for tap in taps { sum += raster.at(x + tap.x, y + tap.y) * tap.weight }
+                return sum
+            }
+        }),
         Self("Fragment Blur", category: "Blurs", [
             .init("Fragment Count", 2...50, 4), .init("Distance", 0...100, 8), .init("Rotation", 0...360, 0)
         ], preview: { bytes, width, height, values, cancelled in
@@ -148,13 +171,57 @@ extension RasterFilter {
                                        isCancelled: cancelled)
     }
 
+    private static func motionTaps(_ values: [Double]) -> [(x: Int, y: Int, weight: Double)] {
+        let distance = Int(values[1])
+        guard distance > 0 else { return [] }
+        let angle = values[0] * .pi / 180
+        let start = values[2] == 1 ? -Double(distance) / 2 : 0
+        let directionX = -cos(angle), directionY = sin(angle)
+        var weights: [SIMD2<Int>: Double] = [:]
+        // Precompute the bilinear taps once because every destination is at an integer pixel.
+        for step in 0...distance {
+            let position = start + Double(step)
+            let x = directionX * position, y = directionY * position
+            let left = Int(floor(x)), top = Int(floor(y))
+            let dx = x - Double(left), dy = y - Double(top)
+            weights[SIMD2(left, top), default: 0] += (1 - dx) * (1 - dy)
+            weights[SIMD2(left + 1, top), default: 0] += dx * (1 - dy)
+            weights[SIMD2(left, top + 1), default: 0] += (1 - dx) * dy
+            weights[SIMD2(left + 1, top + 1), default: 0] += dx * dy
+        }
+        return weights.keys.sorted { first, second in
+            first.y == second.y ? first.x < second.x : first.y < second.y
+        }.compactMap { offset in
+            guard let weight = weights[offset], weight > 1e-12 else { return nil }
+            return (offset.x, offset.y, weight / Double(distance + 1))
+        }
+    }
+
+    private enum BlurEdge: CaseIterable {
+        case clamp, wrap, mirror, transparent
+
+        func index(_ position: Int, extent: Int) -> Int? {
+            if (0..<extent).contains(position) { return position }
+            switch self {
+            case .clamp: return min(extent - 1, max(0, position))
+            case .wrap: return (position % extent + extent) % extent
+            case .mirror:
+                let period = extent * 2
+                let mirrored = (position % period + period) % period
+                return min(mirrored, period - mirrored - 1)
+            case .transparent: return nil
+            }
+        }
+    }
+
     private struct BlurRaster {
         let bytes: UnsafeRawBufferPointer
         let width: Int
         let height: Int
+        let edge: BlurEdge
 
         func word(_ x: Int, _ y: Int) -> UInt32 {
-            let column = min(width - 1, max(0, x)), row = min(height - 1, max(0, y))
+            guard let column = edge.index(x, extent: width), let row = edge.index(y, extent: height) else { return 0 }
             return UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: (row * width + column) * 4, as: UInt32.self))
         }
 
@@ -175,12 +242,12 @@ extension RasterFilter {
         }
     }
 
-    private static func renderBlur(_ bytes: Data, width: Int, height: Int, cancelled: () -> Bool,
+    private static func renderBlur(_ bytes: Data, width: Int, height: Int, edge: BlurEdge = .clamp, cancelled: () -> Bool,
                                    sample: (BlurRaster, Int, Int) -> Pixel) -> Data? {
         var result = bytes
         let completed = result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
             bytes.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
-                let raster = BlurRaster(bytes: source, width: width, height: height)
+                let raster = BlurRaster(bytes: source, width: width, height: height, edge: edge)
                 for y in 0..<height {
                     for x in 0..<width {
                         if x & 127 == 0, cancelled() { return false }
@@ -234,7 +301,7 @@ extension RasterFilter {
         ordered.reserveCapacity(offsetSets[0].count)
         let completed = result.withUnsafeMutableBytes { (target: UnsafeMutableRawBufferPointer) in
             bytes.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
-                let raster = BlurRaster(bytes: source, width: width, height: height)
+                let raster = BlurRaster(bytes: source, width: width, height: height, edge: .clamp)
                 for y in 0..<height {
                     for x in 0..<width {
                         if x & 127 == 0, cancelled() { return false }

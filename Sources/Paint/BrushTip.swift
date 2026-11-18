@@ -50,7 +50,10 @@ struct BrushTip {
             } else {
                 let edge = Double(distance - radius)
                 if edge <= -1.25 { return 255 }
-                let feather = 0.5 * erfc(edge / (sqrt(2) * Self.hardSigma))
+                // A circular edge loses more coverage than a straight edge under the
+                // same blur. Approximate the inward shift of the half-coverage contour.
+                let curvature = Self.hardSigma * Self.hardSigma / (2 * Double(radius))
+                let feather = 0.5 * erfc((edge + curvature) / (sqrt(2) * Self.hardSigma))
                 if radius < 1 {
                     let linear = min(1, max(0, Double(radius + 0.5 - distance)))
                     fraction = linear + (feather - linear) * Double(2 * radius - 1)

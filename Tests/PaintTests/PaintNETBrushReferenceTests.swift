@@ -104,7 +104,7 @@ struct PaintNETBrushReferenceTests {
             }
         }
         let rmse = sqrt(squaredError / Double(columns.count * input.height))
-        let tolerance = hardness == 100 ? 5.0 : 1.5
+        let tolerance = hardness == 100 ? 3.7 : 1.5
         #expect(rmse <= tolerance, Comment(rawValue: "Alpha RMSE: \(rmse), tolerance: \(tolerance)"))
     }
 

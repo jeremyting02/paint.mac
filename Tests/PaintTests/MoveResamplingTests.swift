@@ -244,6 +244,58 @@ struct MoveResamplingTests {
         #expect(document.stack?.activeLayer.straightPixels == source.straightPixels)
     }
 
+    @MainActor @Test(arguments: [false, true])
+    func shiftResizeKeepsTheLiveAspectRatio(movesPixels: Bool) throws {
+        _ = NSApplication.shared
+        let source = try makeLayer(width: 96, height: 80, points: [(32, 40, [23, 71, 191, 255])])
+        let document = PaintDocument()
+        try document.read(from: PDNFile.write(LayerStack(layers: [source], active: 0)), ofType: "Paint.NET Project")
+        document.showWindows()
+        defer { document.close() }
+        let editor = try #require(document.editor)
+        editor.layoutSubtreeIfNeeded()
+        let canvas = editor.canvas
+        canvas.setZoom(200)
+        canvas.updateViewport()
+        canvas.tool = movesPixels ? .moveSelectedPixels : .moveSelection
+        canvas.setSelection(SelectionOutline(rect: CGRect(x: 16, y: 24, width: 40, height: 32)))
+        let imageRect = canvas.canvasImageRect
+        let scale = imageRect.width / CGFloat(source.image.width)
+        let window = try #require(canvas.window)
+        func event(_ type: NSEvent.EventType, x: CGFloat, modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
+            let location = canvas.convert(CGPoint(x: imageRect.minX + x * scale,
+                                                  y: imageRect.minY + 40 * scale), to: nil)
+            return try #require(NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
+                                                 timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                 eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+
+        let originalHistory = document.historyEntries
+        canvas.mouseDown(with: try event(.leftMouseDown, x: 56, modifiers: .shift))
+        canvas.mouseUp(with: try event(.leftMouseUp, x: 56, modifiers: .shift))
+        #expect(canvas.move == nil)
+        #expect(document.historyEntries == originalHistory)
+
+        canvas.mouseDown(with: try event(.leftMouseDown, x: 56))
+        canvas.mouseDragged(with: try event(.leftMouseDragged, x: 66))
+        let freeRect = try #require(canvas.move?.geometry.rect)
+        #expect(freeRect == CGRect(x: 16, y: 24, width: 50, height: 32))
+        canvas.mouseDragged(with: try event(.leftMouseDragged, x: 66, modifiers: .shift))
+        #expect(canvas.move?.geometry.rect == freeRect)
+        canvas.mouseDragged(with: try event(.leftMouseDragged, x: 91, modifiers: .shift))
+        let constrainedRect = try #require(canvas.move?.geometry.rect)
+        #expect(constrainedRect == CGRect(x: 16, y: 16, width: 75, height: 48))
+        canvas.mouseDragged(with: try event(.leftMouseDragged, x: 91))
+        #expect(canvas.move?.geometry.rect == constrainedRect)
+        canvas.mouseUp(with: try event(.leftMouseUp, x: 94))
+        #expect(canvas.move?.geometry.rect == CGRect(x: 16, y: 16, width: 78, height: 48))
+        #expect(document.historyEntries.count == originalHistory.count + 1)
+        document.undoStroke(nil)
+        #expect(canvas.move == nil)
+        document.redoStroke(nil)
+        #expect(canvas.move?.geometry.rect == CGRect(x: 16, y: 16, width: 78, height: 48))
+    }
+
     private func makeLayer(width: Int, height: Int, points: [(x: Int, y: Int, bgra: [UInt8])]) throws -> PaintLayer {
         var bytes = Data(count: width * height * 4)
         for point in points {

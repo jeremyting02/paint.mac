@@ -132,7 +132,7 @@ observed subpixel click positions. The exact click coordinates were not
 recorded. For the 9 px antialiased dabs, the tests estimate each center from
 the alpha-weighted centroid of the black pixels and compare alpha coverage
 over the corresponding 16 × 17 region. These captures informed the feathered
-tip approximation. They allow an alpha RMSE of 5 at 100% hardness and 1.5
+tip approximation. They allow an alpha RMSE of 3.7 at 100% hardness and 1.5
 at 25% hardness.
 
 `brush-paths.json` records dab centers emitted by the Paint.NET

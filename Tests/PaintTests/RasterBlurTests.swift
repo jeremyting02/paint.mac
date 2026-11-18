@@ -24,6 +24,23 @@ struct RasterBlurTests {
         #expect(try render("Fragment Blur", input, values: [4, 0, 45]) == [0, 0, 255, 0, 0])
     }
 
+    @Test func motionBlurCentersTheTrailAndAddressesEachCanvasEdge() throws {
+        let samples: [UInt8] = [0, 0, 255, 0, 0]
+        let impulse = try input(samples, width: 5)
+        #expect(try render("Motion Blur", impulse, values: [0, 2, 1, 0]) == [0, 85, 85, 85, 0])
+        #expect(try render("Motion Blur", impulse, values: [0, 2, 0, 0]) == [0, 0, 85, 85, 85])
+        #expect(try render("Motion Blur", impulse, values: [180, 2, 0, 0]) == [85, 85, 85, 0, 0])
+        #expect(try render("Motion Blur", impulse, values: [0, 0, 0, 3]) == samples)
+
+        let edges = try input([30, 90, 240], width: 3)
+        #expect(try render("Motion Blur", edges, values: [0, 2, 0, 0]) == [30, 50, 120])
+        #expect(try render("Motion Blur", edges, values: [0, 2, 0, 1]) == [120, 120, 120])
+        #expect(try render("Motion Blur", edges, values: [0, 2, 0, 2]) == [50, 50, 120])
+        let filter = try #require(RasterFilter.blurEffects.first { $0.title == "Motion Blur" })
+        let transparent = try #require(edges.render(filter, values: [0, 2, 0, 3])?.straightPixels)
+        #expect(Array(transparent) == [30, 30, 30, 85, 60, 60, 60, 170, 120, 120, 120, 255])
+    }
+
     @Test func radialBlurKeepsCenterStillAndSpreadsAnOffsetFeature() throws {
         let samples: [UInt8] = [0, 255, 0, 0, 100, 0, 0, 0, 0]
         let input = try input(samples, width: 3)

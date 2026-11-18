@@ -111,6 +111,9 @@ final class CanvasView: NSView {
         let handle: TransformHandle
         let rightButton: Bool
         var lastPoint: CGPoint
+        var resizeGeometry: MoveGeometry
+        var resizeAnchor: CGPoint
+        var proportional: Bool
     }
 
     private enum TransformHandle {
@@ -143,6 +146,7 @@ final class CanvasView: NSView {
             let multiplier: CGFloat = centered ? 2 : 1
             var width = rect.width + (x * local.x * multiplier).rounded()
             var height = rect.height + (y * local.y * multiplier).rounded()
+            guard width != rect.width || height != rect.height else { return geometry }
             if proportional {
                 let sx = width / rect.width, sy = height / rect.height
                 let dominant = abs(sx - 1) >= abs(sy - 1) ? sx : sy
@@ -1163,8 +1167,10 @@ final class CanvasView: NSView {
         guard beginMove(on: stack) else { return }
         window?.makeFirstResponder(self)
         let point = imagePoint(location)
-        moveDrag = MoveDrag(before: before, geometry: moveGeometry(for: stack.activeLayer.image), anchor: point,
-                            handle: handle, rightButton: rightButton, lastPoint: point)
+        let geometry = moveGeometry(for: stack.activeLayer.image)
+        moveDrag = MoveDrag(before: before, geometry: geometry, anchor: point, handle: handle,
+                            rightButton: rightButton, lastPoint: point, resizeGeometry: geometry,
+                            resizeAnchor: point, proportional: event.modifierFlags.contains(.shift))
         updateMoveCursor(at: location)
     }
 
@@ -1178,17 +1184,19 @@ final class CanvasView: NSView {
     private func updateMoveDrag(with event: NSEvent, rightButton: Bool) {
         guard let drag = moveDrag, drag.rightButton == rightButton else { return }
         let point = imagePoint(convert(event.locationInWindow, from: nil))
-        moveDrag?.lastPoint = point
         updateMoveDrag(at: point, modifiers: event.modifierFlags)
     }
 
     private func updateMoveDrag(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
-        guard let drag = moveDrag else { return }
+        guard var drag = moveDrag else { return }
+        let previousPoint = drag.lastPoint
+        drag.lastPoint = point
         let delta = point - drag.anchor
         var geometry = drag.geometry
         let actionName: String
         switch drag.handle {
         case .pivot:
+            moveDrag = drag
             move?.geometry.pivot = geometry.pivot + delta
             needsDisplay = true
             return
@@ -1198,12 +1206,22 @@ final class CanvasView: NSView {
             geometry = translated(geometry, by: offset)
             actionName = "Move Selected Pixels"
         case .resize(let handle):
-            geometry = handle.resized(geometry, delta: delta, proportional: modifiers.contains(.shift),
+            let proportional = modifiers.contains(.shift)
+            if proportional != drag.proportional {
+                // Pick up the live size when shifting between free and constrained resizing.
+                drag.resizeGeometry = move?.geometry ?? drag.resizeGeometry
+                drag.resizeAnchor = previousPoint
+                drag.proportional = proportional
+            }
+            geometry = handle.resized(drag.resizeGeometry, delta: point - drag.resizeAnchor, proportional: proportional,
                                       centered: modifiers.contains(.option))
             actionName = "Resize Selected Pixels"
         case .rotate:
             let from = drag.anchor - geometry.pivot, to = point - geometry.pivot
-            guard from != .zero, to != .zero else { return }
+            guard from != .zero, to != .zero else {
+                moveDrag = drag
+                return
+            }
             let change = atan2(from.x * to.y - from.y * to.x, from.x * to.x + from.y * to.y)
             let step = CGFloat.pi / 12
             let angle = geometry.angle + change
@@ -1214,6 +1232,7 @@ final class CanvasView: NSView {
             geometry.angle = snapped.remainder(dividingBy: 2 * .pi)
             actionName = "Rotate Pixels"
         }
+        moveDrag = drag
         let copy = !modifiers.intersection([.control, .command]).isEmpty
         updateMove(with: geometry, actionName: actionName, copy: copy)
     }

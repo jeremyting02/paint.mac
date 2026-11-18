@@ -8,12 +8,6 @@ extension RasterFilter {
         coreImage("Gaussian Blur", category: "Blurs", [.init("Radius", 0...200, 2)]) { image, values in
             image.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: values[0]])
         },
-        coreImage("Motion Blur", category: "Blurs", [.init("Distance", 0...200, 10),
-                                                     .init("Angle", -180...180, 0)]) { image, values in
-            image.clampedToExtent().applyingFilter("CIMotionBlur", parameters: [
-                kCIInputRadiusKey: values[0], kCIInputAngleKey: values[1] * .pi / 180
-            ])
-        },
         coreImage("Sharpen", category: "Photo", [.init("Amount", 0...100, 25)]) { image, values in
             image.clampedToExtent().applyingFilter("CISharpenLuminance", parameters: ["inputSharpness": values[0] / 50])
         },
